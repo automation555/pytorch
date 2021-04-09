@@ -1676,6 +1676,20 @@ new_module_tests = [
     ),
     dict(
         module_name='GroupNorm',
+        constructor_args=(3, 48, 0.0),
+        cpp_constructor_args='torch::nn::GroupNormOptions(3, 48).eps(0.0)',
+        input_fn=lambda: torch.rand(2, 48, 15, 15),
+        cudnn=True,
+        check_eval=True,
+        check_bfloat16=True,
+        desc='2d_no_affine_large_feature_forward',
+        check_forward_only=True,
+        reference_fn=lambda x, *_: ((x.view(2, 3, -1) - x.view(2, 3, -1).mean(
+            dim=-1, keepdim=True)) / x.view(2, 3, -1).std(
+                dim=-1, unbiased=False, keepdim=True)).view(2, 48, 15, 15)
+    ),
+    dict(
+        module_name='GroupNorm',
         constructor_args=(3, 3, 1e-3, False),
         cpp_constructor_args='torch::nn::GroupNormOptions(3, 3).eps(1e-3).affine(false)',
         input_size=(4, 3, 2, 3),
