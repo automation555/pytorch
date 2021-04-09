@@ -177,11 +177,9 @@ sampleMultinomialOnce(int64_t* dest,
 ) {
   extern __shared__  unsigned char my_smem[];
   __shared__ bool found;
+  __shared__ unsigned foundPos;
 
-  // Shared Memory hold blockdim.x T for holding the cumulative sum,
-  // blockDim.x AccT for normalizing the probabilities,
-  scalar_t *smem = reinterpret_cast<scalar_t *>(my_smem);
-  accscalar_t *asmem = reinterpret_cast<accscalar_t *>(&my_smem[blockDim.x * sizeof(scalar_t)]);
+  accscalar_t *smem = reinterpret_cast<accscalar_t *>(my_smem);
 
   accscalar_t accZero = static_cast<accscalar_t>(0);
   scalar_t zero = static_cast<scalar_t>(0);
@@ -201,7 +199,7 @@ sampleMultinomialOnce(int64_t* dest,
     }
 
     // threadIdx.x == 0 has the sum value from this
-    sum = reduceBlock(asmem, blockDim.x, sum, ReduceAdd<accscalar_t>(), accZero);
+    sum = reduceBlock(smem, blockDim.x, sum, ReduceAdd<accscalar_t>(), accZero);
 
     // Broadcast sum and sample value
     if (threadIdx.x == 0) {
@@ -209,13 +207,14 @@ sampleMultinomialOnce(int64_t* dest,
       CUDA_KERNEL_ASSERT(!THCNumerics<accscalar_t>::isinf(sum));
       CUDA_KERNEL_ASSERT(sum > accZero);
 
-      asmem[0] = sum;
-      smem[0] = sampled[curDist];
+      foundPos = 0;
+      smem[0] = sum;
+      smem[1] = sampled[curDist];
     }
     __syncthreads();
 
-    sum = asmem[0];
-    scalar_t sample = smem[0];
+    sum = smem[0];
+    scalar_t sample = static_cast<scalar_t>(smem[1]);
     __syncthreads();
 
     if (sum == accZero) {
@@ -228,24 +227,23 @@ sampleMultinomialOnce(int64_t* dest,
     }
 
     int chunks = (categories + (int)blockDim.x - 1) / blockDim.x;
-    scalar_t prevHighProb = zero;
+    accscalar_t prevHighProb = accZero;
     found = false;
 
     for (int chunk = 0; chunk < chunks && !found; ++chunk) {
       // All threads in bounds load a value
       int cat = chunk * blockDim.x + threadIdx.x;
 
-      accscalar_t a_dist_val = cat < categories ?
-                               static_cast<accscalar_t>(dist[curDist * stride_dist + cat * stride_categories]) / sum :
-                               accZero;
-      scalar_t dist_val = static_cast<scalar_t>(a_dist_val);
+      accscalar_t dist_val = cat < categories ?
+                             static_cast<accscalar_t>(dist[curDist * stride_dist + cat * stride_categories]) / sum :
+                             accZero;
 
       smem[threadIdx.x] = dist_val;
       __syncthreads();
 
       // Perform an inclusive prefix sum of the shared memory contents
-      for (int offset = 1; offset < blockDim.x; offset *= 2) {
-        scalar_t val = zero;
+      for (unsigned offset = 1; offset < blockDim.x; offset *= 2) {
+        accscalar_t val = accZero;
 
         if (threadIdx.x >= offset) {
           val = smem[threadIdx.x - offset] + smem[threadIdx.x];
@@ -260,10 +258,11 @@ sampleMultinomialOnce(int64_t* dest,
 
       // Each thread will check to see if the sample falls in its
       // bucket
-      scalar_t curBucket = smem[threadIdx.x] + prevHighProb;
-      scalar_t prevBucket =
-          threadIdx.x == 0 ? prevHighProb :
-          smem[threadIdx.x - 1] + prevHighProb;
+      scalar_t curBucket =
+          static_cast<scalar_t>(smem[threadIdx.x] + prevHighProb);
+      scalar_t prevBucket = static_cast<scalar_t>(
+          threadIdx.x == 0 ? prevHighProb
+                           : smem[threadIdx.x - 1] + prevHighProb);
       bool inBucket =
           (cat < categories) &&
           (!(sample >= curBucket) &&
@@ -273,7 +272,7 @@ sampleMultinomialOnce(int64_t* dest,
       if (inBucket) {
         // We're done; we have the sample
         // Torch indices are 1-based
-        dest[curDist] = cat;
+        atomicMax(&foundPos, cat);
         found = true;
       }
 
@@ -283,7 +282,9 @@ sampleMultinomialOnce(int64_t* dest,
       __syncthreads();
     }
 
-    if (threadIdx.x == 0 && !found) {
+    if (threadIdx.x == 0 && found) {
+        dest[curDist] = foundPos;
+    } else if (threadIdx.x == 0 && !found) {
       // This should address a rare bug where we don't select a valid index. This likely occurs when
       // due to floating point arithmetic rounding errors, our cumulative sum does not add up to 1, but
       // and our uniform sample is greater than this value. In this case we likely have unitialized memory
@@ -326,7 +327,7 @@ void multinomial_with_replacement_kernel_impl(
     int maxThreads = props->maxThreadsPerBlock;
     int maxShared = props->sharedMemPerBlock;
     int requiredShared = (numCategories < maxThreads ? numCategories : maxThreads)
-                         * (sizeof(scalar_t) + sizeof(accscalar_t));
+                         * (sizeof(accscalar_t) + 1);
 
     if (n_sample == 1 && maxShared >= requiredShared) {
       // Optimized allocation-free implementation
