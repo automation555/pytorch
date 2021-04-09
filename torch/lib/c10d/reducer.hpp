@@ -25,6 +25,28 @@ constexpr int kDefaultBucketBytesCap = int(25 * 1024 * 1024);
 // Collect runtime stats once for every kDDPRuntimeLoggingSampleRate iterations.
 constexpr int kDDPRuntimeLoggingSampleRate = 100;
 
+// Locates a specific variable by replica index and variable index.
+struct VariableIndex {
+  size_t replica_index;
+  size_t variable_index;
+
+  VariableIndex() = default;
+
+  VariableIndex(size_t replica_index_, size_t variable_index_) {
+    replica_index = replica_index_;
+    variable_index = variable_index_;
+  }
+
+  static size_t hash(const VariableIndex& key) {
+    return c10::get_hash(key.replica_index, key.variable_index);
+  }
+};
+
+inline bool operator==(const VariableIndex& lhs, const VariableIndex& rhs) {
+  return lhs.replica_index == rhs.replica_index
+    && lhs.variable_index == rhs.variable_index;
+}
+
 class Reducer {
  public:
   // The constructor takes a list of variables for every model replica.
@@ -52,8 +74,7 @@ class Reducer {
   // and the user wishes to reduce gradients in the backwards pass.
   // If they don't, and wish to accumulate gradients before reducing them,
   // a call to this function can simply be omitted.
-  void prepare_for_backward(
-      const std::vector<at::Tensor>& outputs);
+  void prepare_for_backward(const std::vector<at::Tensor>& outputs);
 
   // Called at the begginning of forward() inside DistributedDataParallel,
   // right now it caputures the starting time of forward in each iteration.
@@ -97,7 +118,8 @@ class Reducer {
   // buckets once after the first iteration and never rebuild them if
   // find_unused_parameters_.
   inline bool should_rebuild_buckets() const {
-    return !find_unused_parameters_ && !has_rebuilt_bucket_;
+    return !find_unused_parameters_ && !has_rebuilt_bucket_
+      && (unused_parameters_.size() == 0);
   }
 
   // Pushes all parameters to be rebuilt.
@@ -123,21 +145,15 @@ class Reducer {
   // recorded once every "sample_rate" training iterations.
   void set_ddp_runtime_logging_sample_rate(int sample_rate);
 
+  // Speficy the training graph is static.
+  void set_static_graph();
+
+  // Delay all reduce to be after all gradients' calculation is complete.
+  void delay_all_reduce();
+
  protected:
   // Forward declaration.
   struct Bucket;
-  // Locates a specific variable by replica index and variable index.
-  struct VariableIndex {
-    size_t replica_index;
-    size_t variable_index;
-
-    VariableIndex() = default;
-
-    VariableIndex(size_t replica_index_, size_t variable_index_) {
-      replica_index = replica_index_;
-      variable_index = variable_index_;
-    }
-  };
 
   void push_rebuilt_params(const VariableIndex& index);
 
@@ -203,9 +219,7 @@ class Reducer {
 
   using GradCallback =
       torch::distributed::autograd::DistAutogradContext::GradCallback;
-  void runGradCallbackForVariable(
-      at::Tensor& variable,
-      GradCallback&& cb);
+  void runGradCallbackForVariable(at::Tensor& variable, GradCallback&& cb);
 
   // A bucket replica represents [1..N] gradients to be reduced,
   // with the same dtype, on the same device.
@@ -419,7 +433,21 @@ class Reducer {
   // Division factor for reduction of gradients.
   int divFactor_;
 
+  bool static_graph_ = false;
+
+  // Map will not change after 1st iteration.
+  std::unordered_map<VariableIndex, int, c10::hash<VariableIndex>> numGradHooksTriggeredMap_;
+  // Map will change after 1st iteration to track a grad is ready for communication or not.
+  std::unordered_map<VariableIndex, int, c10::hash<VariableIndex>> numGradHooksTriggeredMapPerIteration_;
+
  private:
+  void reset_bucket_counting();
+  void search_unused_parameters(
+      const std::vector<torch::autograd::Variable>& outputs);
+  void set_divide_factor();
+  void all_reduce_bucket(Bucket& bucket);
+  void all_reduce_local_used_map();
+
   // comm_hook_ is used to access the DDP communication hook if registered.
   std::unique_ptr<CommHookInterface> comm_hook_;
   // Current thread local state
