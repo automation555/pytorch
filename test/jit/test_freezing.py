@@ -1,7 +1,9 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import unittest
 from torch.testing._internal.jit_utils import JitTestCase
+from torch._C import parse_ir
 
 from torch.testing import FileCheck
 from torch.testing._internal.common_quantized import override_quantized_engine
@@ -1784,7 +1786,7 @@ class TestFrozenOptimizations(JitTestCase):
     @unittest.skipIf(not TEST_CUDNN, "requires CUDNN")
     def test_freeze_conv_relu_fusion(self):
         conv_bias = [True, False]
-        conv_ops = [nn.Conv2d, nn.Conv3d]
+        conv_ops = [nn.Conv2d]
         add_z = [True, False]
         use_tracing = [True, False]
         for use_bias, conv, add_z, tracing in product(conv_bias, conv_ops, add_z, use_tracing):
@@ -1805,8 +1807,11 @@ class TestFrozenOptimizations(JitTestCase):
 
             mod_eager = Net(3, 6, kernel_size=3, stride=2).eval().cuda()
 
-            inps = [5, 3, 4, 4]
+            inps = [5, 3, 4]
+            if conv == nn.Conv2d:
+                inps.append(inps[-1])
             if conv == nn.Conv3d:
+                inps.append(inps[-1])
                 inps.append(inps[-1])
             inp = torch.rand(inps).cuda()
 
@@ -1824,6 +1829,33 @@ class TestFrozenOptimizations(JitTestCase):
                 FileCheck().check("aten::cudnn_convolution_relu").run(frozen_mod.graph)
 
             self.assertEqual(mod_eager(inp), frozen_mod(inp))
+
+    @unittest.skipIf(not torch._C.has_mkldnn, "MKL-DNN build is disabled")
+    def test_hardswish_hardsigmoid(self):
+        with set_default_dtype(torch.float):
+            op_map = {
+                'prim::MKLDNNHardSwish' : F.hardswish,
+                'prim::MKLDNNHardSigmoid' : F.hardsigmoid
+            }
+
+            input_sizes = ([0], [1], [3], [1, 3, 8, 8])
+            for (mkldnn_opname, aten_op) in op_map.items():
+                for size in input_sizes:
+                    for inplace in (True, False):
+                        inplace_str = "_" if inplace else ""
+                        inplace_tgt = "%34" if inplace else "%35"
+                        graph_str = f"""graph(%input.1 : Tensor):
+                            %33 : None = prim::Constant()
+                            %34 : Tensor = aten::to_mkldnn(%input.1, %33)
+                            %35 : Tensor = {mkldnn_opname}{inplace_str}(%34)
+                            return ({inplace_tgt})
+                        """
+                        g = parse_ir(graph_str)
+                        m = self.createFunctionFromGraph(g)
+                        x = torch.rand(size)
+                        x_copy = x.detach().clone()
+                        self.assertTrue(torch.allclose(aten_op(x, inplace=inplace), m(x_copy).to_dense()))
+
 
 @unittest.skipIf(not torch._C.has_mkldnn, "MKL-DNN build is disabled")
 class TestMKLDNNReinplacing(JitTestCase):
@@ -1851,9 +1883,11 @@ class TestMKLDNNReinplacing(JitTestCase):
 
     def test_successful(self):
         # simple conv-relu
-        mod_eager = nn.Sequential(self.getConv(), nn.ReLU(), nn.ReLU())
+
+        mod_eager = nn.Sequential(self.getConv(), nn.Hardswish(), nn.ReLU())
         mod = self.freezeAndConvert(mod_eager)
-        FileCheck().check("mkldnn_convolution").check_next("aten::relu_").check_next("aten::relu_").run(mod.graph)
+        print(mod.graph)
+        FileCheck().check("mkldnn_convolution").check_next("prim::MKLDNNHardSwish_").check_next("aten::relu_").run(mod.graph)
         self.checkResults(mod_eager, mod)
 
     def test_merge_liveness(self):
