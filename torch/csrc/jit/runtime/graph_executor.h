@@ -9,7 +9,6 @@
 #include <torch/csrc/jit/runtime/interpreter.h>
 #include <torch/csrc/jit/runtime/variable_tensor_list.h>
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 C10_DECLARE_bool(torch_jit_enable_new_executor);
 
 namespace torch {
@@ -87,6 +86,8 @@ struct TORCH_API GraphExecutor {
   static size_t getDefaultNumBailOuts();
 
   void debugFlushCompilationCache();
+
+  bool isOptimized() const;
 
  private:
   std::shared_ptr<GraphExecutorImplBase> pImpl;
