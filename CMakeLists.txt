@@ -368,7 +368,7 @@ cmake_dependent_option(
 
 if(NOT USE_SYSTEM_ONNX)
   set(ONNX_NAMESPACE "onnx_torch" CACHE STRING "A namespace for ONNX; needed to build with other frameworks that share ONNX.")
-else()
+elseif()
   set(ONNX_NAMESPACE "onnx" CACHE STRING "A namespace for ONNX; needed to build with other frameworks that share ONNX.")
 endif()
 set(SELECTED_OP_LIST "" CACHE STRING
@@ -463,9 +463,9 @@ if(MSVC)
   list(APPEND CUDA_NVCC_FLAGS "-Xcompiler" "/w" "-w")
 endif(MSVC)
 
-list(APPEND CUDA_NVCC_FLAGS "-Xfatbin" "-compress-all")
-list(APPEND CUDA_NVCC_FLAGS_DEBUG "-Xfatbin" "-compress-all")
-list(APPEND CUDA_NVCC_FLAGS_RELWITHDEBINFO "-Xfatbin" "-compress-all")
+list(APPEND CUDA_NVCC_FLAGS "-Xfatbin" "-compress-all" "-Xcompiler" "-fno-gnu-unique")
+list(APPEND CUDA_NVCC_FLAGS_DEBUG "-Xfatbin" "-compress-all" "-Xcompiler" "-fno-gnu-unique")
+list(APPEND CUDA_NVCC_FLAGS_RELWITHDEBINFO "-Xfatbin" "-compress-all" "-Xcompiler" "-fno-gnu-unique")
 
 if(NOT MSVC)
   list(APPEND CUDA_NVCC_FLAGS_DEBUG "-g" "-lineinfo" "--source-in-ptx")
@@ -634,10 +634,6 @@ if(USE_VULKAN)
   if(USE_VULKAN_SHADERC_RUNTIME)
     string(APPEND CMAKE_CXX_FLAGS " -DUSE_VULKAN_SHADERC_RUNTIME")
   endif()
-endif()
-
-if(BUILD_LITE_INTERPRETER)
-  string(APPEND CMAKE_CXX_FLAGS " -DBUILD_LITE_INTERPRETER")
 endif()
 
 if(USE_PYTORCH_METAL)
