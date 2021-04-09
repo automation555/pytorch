@@ -17,10 +17,6 @@ inline Tensor gammaln(const Tensor& self) {
   return torch::special_gammaln(self);
 }
 
-inline Tensor& gammaln_out(Tensor& result, const Tensor& self) {
-  return torch::special_gammaln_out(result, self);
-}
-
 /// Computes entropy of input, elementwise
 /// See https://pytorch.org/docs/master/special.html#torch.special.entr.
 ///
@@ -31,10 +27,6 @@ inline Tensor& gammaln_out(Tensor& result, const Tensor& self) {
 /// ```
 inline Tensor entr(const Tensor& self) {
   return torch::special_entr(self);
-}
-
-inline Tensor& entr_out(Tensor& result, const Tensor& self) {
-  return torch::special_entr_out(result, self);
 }
 
 /// Computes the error function
@@ -49,10 +41,6 @@ inline Tensor erf(const Tensor& self) {
   return torch::special_erf(self);
 }
 
-inline Tensor& erf_out(Tensor& result, const Tensor& self) {
-  return torch::special_erf_out(result, self);
-}
-
 /// Computes the complementary error function
 /// See https://pytorch.org/docs/master/special.html#torch.special.erfc.
 ///
@@ -63,10 +51,6 @@ inline Tensor& erf_out(Tensor& result, const Tensor& self) {
 /// ```
 inline Tensor erfc(const Tensor& self) {
   return torch::special_erfc(self);
-}
-
-inline Tensor& erfc_out(Tensor& result, const Tensor& self) {
-  return torch::special_erfc_out(result, self);
 }
 
 /// Computes the inverse error function
@@ -81,42 +65,6 @@ inline Tensor erfinv(const Tensor& self) {
   return torch::special_erfinv(self);
 }
 
-inline Tensor& erfinv_out(Tensor& result, const Tensor& self) {
-  return torch::special_erfinv_out(result, self);
-}
-
-/// Computes the logit of input, elementwise.
-/// See https://pytorch.org/docs/master/special.html#torch.special.logit.
-///
-/// Example:
-/// ```
-/// auto t = torch::randn(128, dtype=kDouble);
-/// torch::special::logit(t);
-/// ```
-inline Tensor logit(const Tensor& self) {
-  return torch::special_logit(self);
-}
-
-inline Tensor& logit_out(Tensor& result, const Tensor& self) {
-  return torch::special_logit_out(result, self);
-}
-
-/// Computes the expit (also known as the logistic sigmoid function) of input, elementwise
-/// See https://pytorch.org/docs/master/special.html#torch.special.expit.
-///
-/// Example:
-/// ```
-/// auto t = torch::randn(128, dtype=kDouble);
-/// torch::special::expit(t);
-/// ```
-inline Tensor expit(const Tensor& self) {
-  return torch::special_expit(self);
-}
-
-inline Tensor& expit_out(Tensor& result, const Tensor& self) {
-  return torch::special_expit_out(result, self);
-}
-
 /// Computes the base two exponential function of :attr:`input`, elementwise
 /// See https://pytorch.org/docs/master/special.html#torch.special.exp2.
 ///
@@ -127,10 +75,6 @@ inline Tensor& expit_out(Tensor& result, const Tensor& self) {
 /// ```
 inline Tensor exp2(const Tensor& self) {
   return torch::special_exp2(self);
-}
-
-inline Tensor& exp2_out(Tensor& result, const Tensor& self) {
-  return torch::special_exp2_out(result, self);
 }
 
 /// Computes the exponential of the elements minus 1, elementwise
@@ -145,8 +89,28 @@ inline Tensor expm1(const Tensor& self) {
   return torch::special_expm1(self);
 }
 
-inline Tensor& expm1_out(Tensor& result, const Tensor& self) {
-  return torch::special_expm1_out(result, self);
+inline Tensor xlog1py(const Tensor& self, const Tensor& other) {
+  return torch::special_xlog1py(self, other);
+}
+
+inline Tensor xlog1py(const Scalar& self, const Tensor& other) {
+  return torch::special_xlog1py(self, other);
+}
+
+inline Tensor xlog1py(const Tensor& self, const Scalar& other) {
+  return torch::special_xlog1py(self, other);
+}
+
+inline Tensor& xlog1py_out(Tensor& result, const Tensor& self, const Tensor& other) {
+  return torch::special_xlog1py_out(result, self, other);
+}
+
+inline Tensor& xlog1py_out(Tensor& result, const Scalar& self, const Tensor& other) {
+  return torch::special_xlog1py_out(result, self, other);
+}
+
+inline Tensor& xlog1py_out(Tensor& result, const Tensor& self, const Scalar& other) {
+  return torch::special_xlog1py_out(result, self, other);
 }
 
 }} // torch::special

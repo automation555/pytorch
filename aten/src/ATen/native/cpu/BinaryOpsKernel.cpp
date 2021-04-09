@@ -82,7 +82,7 @@ void add_clamp_kernel(TensorIterator& iter, const Scalar& alpha_scalar, const Sc
     });
 }
 
-void atan2_kernel(TensorIteratorBase& iter) {
+void atan2_kernel(TensorIterator& iter) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "atan2_cpu", [&]() {
     cpu_kernel_vec(iter, [=](scalar_t a, scalar_t b) -> scalar_t {
     return std::atan2(a, b);
@@ -932,7 +932,7 @@ void heaviside_kernel(TensorIterator& iter) {
   });
 }
 
-void copysign_kernel(TensorIteratorBase& iter) {
+void copysign_kernel(TensorIterator& iter) {
   AT_DISPATCH_FLOATING_TYPES_AND2(kBFloat16, kHalf, iter.common_dtype(), "copysign_cpu", [&]() {
     cpu_kernel(iter, [](scalar_t a, scalar_t b) -> scalar_t {
         return copysign(a, b);
@@ -950,6 +950,20 @@ void xlogy_kernel(TensorIterator& iter) {
         return 0;
       }
       return x * std::log(y);
+    });
+  });
+}
+
+void xlog1py_kernel(TensorIteratorBase& iter) {
+  AT_DISPATCH_FLOATING_TYPES_AND2(kBFloat16, kHalf, iter.common_dtype(), "xlog1py_cpu", [&]() {
+    cpu_kernel(iter, [](scalar_t x, scalar_t y) -> scalar_t {
+      if (at::_isnan(y)){
+        return NAN;
+      }
+      if (x == 0){
+        return 0;
+      }
+      return x * std::log1p(y);
     });
   });
 }
@@ -1001,6 +1015,7 @@ REGISTER_DISPATCH(nextafter_stub, &nextafter_kernel);
 REGISTER_DISPATCH(heaviside_stub, &heaviside_kernel);
 REGISTER_DISPATCH(copysign_stub, &copysign_kernel);
 REGISTER_DISPATCH(xlogy_stub, &xlogy_kernel);
+REGISTER_DISPATCH(xlog1py_stub, &xlog1py_kernel);
 
 } // namespace native
 } // namespace at
