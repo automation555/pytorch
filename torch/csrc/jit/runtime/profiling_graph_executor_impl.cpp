@@ -24,6 +24,7 @@
 #include <torch/csrc/jit/passes/lower_tuples.h>
 #include <torch/csrc/jit/passes/pass_manager.h>
 #include <torch/csrc/jit/passes/peephole.h>
+#include <torch/csrc/jit/passes/remove_exceptions.h>
 #include <torch/csrc/jit/passes/remove_expands.h>
 #include <torch/csrc/jit/passes/remove_mutation.h>
 #include <torch/csrc/jit/passes/requires_grad_analysis.h>
@@ -79,6 +80,9 @@ static std::atomic<size_t> num_profiled_runs{kDefaultNumProfiledRuns};
 // NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static std::atomic<size_t> bailout_depth{kDefaultBailoutDepth};
 
+// Controls EliminateExceptions optimization
+static bool exceptions_enabled_ = true;
+
 std::atomic<bool>& getProfilingMode() {
   return profiling_mode;
 }
@@ -105,6 +109,17 @@ std::atomic<size_t>& getBailoutDepth() {
   return bailout_depth;
 }
 
+bool exceptionsEnabled() {
+  static const char* enable_c_str = std::getenv("PYTORCH_JIT_EXCEPTIONS");
+  if (!enable_c_str) {
+    return exceptions_enabled_;
+  }
+  if (std::string(enable_c_str) == "0") {
+    return false;
+  }
+  return true;
+}
+
 static bool needsGradientInProfilingMode(Block* b) {
   for (auto n : b->nodes()) {
     if (n->kind() == prim::BailOut) {
@@ -127,66 +142,6 @@ static bool needsGradientInProfilingMode(Block* b) {
     }
   }
   return false;
-}
-
-// `prim::RequiresGradCheck` guarantees that requires_grad properties
-// of input tensors will match the profiled, otherwise a fallback path
-// will be triggered. This allow us to prune off gradients in backward
-// graph for inputs that don't need gradients. We transfer requires_grad
-// properties from inputs to the `prim::DifferentiableGraph` onto inputs to the
-// differentiable graph. Autodiff will inspect these properties and prune
-// off gradients that aren't required
-// `requires_grad` properties from `dnode->outputs()` will also be transferred
-static void setRequiresGradOnDiffGraph(Node* dnode) {
-  auto gi = dnode->g(attr::Subgraph)->inputs();
-  for (size_t i = 0; i < dnode->inputs().size(); i++) {
-    if (auto ty = dnode->input(i)->type()->cast<TensorType>()) {
-      auto gi_ty = gi[i]->type()->expect<TensorType>();
-      gi[i]->setType(gi_ty->withRequiresGrad(ty->requires_grad()));
-      GRAPH_DEBUG(
-          "Setting ",
-          *gi_ty->withRequiresGrad(ty->requires_grad()),
-          " on ",
-          gi[i],
-          " ",
-          gi[i]->debugName());
-    }
-  }
-
-  // We also need to put requires_grad on outputs within subgraph, so autodiff
-  // can  set df_input_vjps and DifferentiableGraphOp can set `requires_grad=`
-  // properly
-  auto go = dnode->g(attr::Subgraph)->outputs();
-  for (size_t i = 0; i < go.size(); i++) {
-    auto ty = go[i]->type()->cast<TensorType>();
-    if (ty) {
-      auto n = go[i]->node();
-      auto dno = dnode->outputs().at(i);
-      auto dno_use0 = dno->uses().at(0);
-      GRAPH_DEBUG("found first user of ", i, " as ", *dno_use0.user);
-      if (n->kind() == prim::profile) {
-        GRAPH_DEBUG(
-            "setting output ", i, " to type ", *n->ty(attr::profiled_type));
-        go[i]->setType(n->ty(attr::profiled_type));
-      } else if (dno_use0.user->kind() == prim::profile) {
-        GRAPH_DEBUG(
-            "setting output ",
-            i,
-            " to type ",
-            *dno_use0.user->ty(attr::profiled_type));
-        go[i]->setType(dno_use0.user->ty(attr::profiled_type));
-      } else if (dno_use0.user->kind() == prim::DifferentiableGraph) {
-        Value* o =
-            dno_use0.user->g(attr::Subgraph)->inputs().at(dno_use0.offset);
-        auto nn = o->uses().at(0).user;
-        if (nn->kind() == prim::profile) {
-          GRAPH_DEBUG(
-              "setting output ", i, " to type ", *nn->ty(attr::profiled_type));
-          go[i]->setType(nn->ty(attr::profiled_type));
-        }
-      }
-    }
-  }
 }
 
 bool guardDifferentiableGraph(Node* dnode) {
@@ -234,7 +189,6 @@ bool guardDifferentiableGraph(Node* dnode) {
               t->requiresGrad().value_or(true));
         },
         prim::RequiresGradCheck);
-    setRequiresGradOnDiffGraph(dnode);
     return true;
   } else {
     // we inline the differentiable graph as a fallback
@@ -501,6 +455,11 @@ void ProfilingGraphExecutorImpl::runProfilingOptimizations(
   if (!getGraphExecutorOptimize()) {
     runNooptPassPipeline(copy);
     return;
+  }
+
+  if (!exceptionsEnabled()) {
+    GRAPH_DEBUG("Before EliminateExceptions:\n", *copy);
+    EliminateExceptions(copy);
   }
 
   runPreAutodiffPassPipeline(copy);
