@@ -72,6 +72,8 @@ from torch.testing._internal.common_quantized import (
 
 from torch.testing._internal.common_utils import TemporaryFileName
 
+from torch.testing._internal.common_distributed import skip_if_not_multigpu
+
 from torch.testing._internal.common_quantization import NodeSpec as ns
 
 from torch.testing import FileCheck
@@ -1768,13 +1770,7 @@ class TestQuantizeFx(QuantizationTestCase):
                 x = x.view(dims_list)
                 return x
 
-        class M3(torch.nn.Module):
-            def forward(self, x):
-                shape = x.shape
-                x = x.view(shape)
-                return x
-
-        for cls in (M1, M2, M3):
+        for cls in (M1, M2):
             m = cls().eval()
             m(torch.rand(4, 4, 4, 4))
             qconfig_dict = {'': torch.quantization.default_qconfig}
@@ -2791,8 +2787,8 @@ class TestQuantizeFxOps(QuantizationTestCase):
             prepare_custom_config_dict=prepare_custom_config_dict)
 
     @skipIfNoFBGEMM
-    def test_quantized_cat(self):
-        """ quantization of the output of cat will be depend on the
+    def test_cat(self):
+        """ quantization of the output of cat will depend on the
         input of cat. we only quantize the output of cat when its inputs are quantized.
         """
         class QuantizedInput(torch.nn.Module):
@@ -2819,6 +2815,15 @@ class TestQuantizeFxOps(QuantizationTestCase):
         for quant_type in self.static_quant_types:
             self.checkGraphModeFxOp(QuantizedInput(), data, quant_type, quantized_node)
             self.checkGraphModeFxOp(NonQuantizedInput(), data, quant_type, quantized_node)
+
+        # check cat is using the same observer for input and output
+        m = QuantizedInput().eval()
+        m = prepare_fx(m, {"": default_qconfig})
+        # two inputs and one output of torch.cat are using same observer, so we have
+        # 2 observers that's replicated
+        all_observers = len(dict(m.named_modules(remove_duplicate=False)))
+        distinct_observers = len(dict(m.named_modules()))
+        self.assertEqual(all_observers, distinct_observers + 2)
 
 
     @skipIfNoFBGEMM
@@ -3953,8 +3958,8 @@ class TestQuantizeFxModels(QuantizationTestCase):
         # print('----------------------')
 
     @skip_if_no_torchvision
+    @skip_if_not_multigpu
     @skipIfNoFBGEMM
-    @unittest.skip("TODO: Test is always failing - https://github.com/pytorch/pytorch/issues/54979")
     def test_resnet18_ddp(self):
         from torchvision import models
         from torchvision.models import quantization as quantized_models
