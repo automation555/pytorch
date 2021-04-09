@@ -972,18 +972,6 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.rand(3, 3).to(dtype=torch.float32)
         self.run_test(MyModel(), x)
 
-    def test_hardsigmoid(self):
-        model = torch.nn.Hardsigmoid()
-
-        x = torch.rand(3, 3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
-        # corner cases
-        x = torch.tensor(3).to(dtype=torch.float32)
-        self.run_test(model, x)
-        x = torch.tensor(-3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
     def test_clamp(self):
         class ClampModel(torch.nn.Module):
             def forward(self, x):
@@ -1552,8 +1540,8 @@ class TestONNXRuntime(unittest.TestCase):
     def test_div_rounding_mode(self):
         class TrueDivModule(torch.nn.Module):
             def forward(self, x, y):
-                return (x.div(y, rounding_mode=None),
-                        torch.div(x, y, rounding_mode=None))
+                return (x.div(y, rounding_mode='true'),
+                        torch.div(x, y, rounding_mode='true'))
 
         class TruncDivModule(torch.nn.Module):
             def forward(self, x, y):
@@ -3796,6 +3784,15 @@ class TestONNXRuntime(unittest.TestCase):
         y = torch.randn(6, 4)
         self.run_test(ViewModel(), (x, y))
 
+    def test_mv(self):
+        class Mv(torch.nn.Module):
+            def forward(self, mat, vec):
+                return torch.mv(mat, vec)
+        
+        mat = torch.randn(2, 3)
+        vec = torch.randn(3)
+        self.run_test(Mv(), (mat, vec))
+
     def test_linear(self):
         class LinearModel(torch.nn.Module):
             def __init__(self):
@@ -5404,7 +5401,7 @@ class TestONNXRuntime(unittest.TestCase):
     def test_det(self):
         class Det(torch.nn.Module):
             def forward(self, x):
-                return torch.linalg.det(x)
+                return torch.det(x)
 
         x = torch.randn(2, 3, 5, 5)
         self.run_test(Det(), x)
@@ -7788,6 +7785,60 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.randn(3, 16)
         self.run_test(M(), (x,), input_names=['input_ids'],
                       dynamic_axes={'input_ids': {0: 'batch', 1: 'sequence'}})
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    def test_hann_window_periodic(self):
+        class HannWindowModule_Periodic(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule_Periodic, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                self.window_length = window_length
+                return torch.add(x, torch.hann_window(self.window_length, periodic=True, dtype=torch.float))
+
+        win_length = 100
+        x = torch.randn(win_length)
+
+        module = HannWindowModule_Periodic()
+        self.run_test(module, (x, win_length))
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    def test_hann_window_not_periodic(self):
+        class HannWindowModule_NotPeriodic(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule_NotPeriodic, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                self.window_length = window_length
+                return torch.add(x, torch.hann_window(self.window_length, periodic=False, dtype=torch.float))
+
+        win_length = 100
+        x = torch.randn(win_length)
+
+        module = HannWindowModule_NotPeriodic()
+        self.run_test(module, (x, win_length))
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    @disableScriptTest()
+    def test_hann_window_default_values(self):
+        class HannWindowModule(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                import torch.nn.functional as F
+                self.window_length = window_length
+                return torch.add(x, F.relu(torch.hann_window(self.window_length)))
+
+        win_length = 100
+        x = torch.randn(win_length, dtype=torch.float)
+        module = HannWindowModule()
+
+        output = module(x, win_length)
+        self.run_test(module, (x, win_length))
 
 def make_test(name, base, layer, bidirectional, initial_state,
               variable_length, dropout,
