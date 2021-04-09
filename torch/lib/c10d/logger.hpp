@@ -13,6 +13,8 @@ class Logger {
       int output_device,
       bool broadcast_buffers);
 
+  void set_static_graph();
+
   // An interface for users to get DDPLoggingData and log them
   // in the applications. Explanation of logging fields are in
   // "struct DDPLoggingData" of "torch/c10/util/Logging.h".
@@ -30,8 +32,6 @@ class Logger {
   std::vector<int> get_bucket_sizes();
   // Set comm. hook, if used
   void set_comm_hook(const std::string& hook);
-  // Set running with uneven input detection (model.join() context manager)
-  void set_uneven_input_join();
 
   // Calculate avg stats using cpu timer and gpu timer
   // that has been recorded in reducer.
