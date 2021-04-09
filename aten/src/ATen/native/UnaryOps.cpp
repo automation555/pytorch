@@ -36,10 +36,6 @@ namespace meta {
 // extra error checking/have a different signature, etc.
 CREATE_UNARY_META_FUNC(sin)
 CREATE_UNARY_META_FUNC(sinc)
-CREATE_UNARY_META_FUNC(sinh)
-CREATE_UNARY_META_FUNC(cosh)
-CREATE_UNARY_META_FUNC(acosh)
-CREATE_UNARY_META_FUNC(cos)
 
 } // namespace meta
 
@@ -249,7 +245,8 @@ Tensor angle(const Tensor& self) {
 
 Tensor real(const Tensor& self) {
   if (self.is_complex()) {
-    auto real_tensor = at::view_as_real(self);
+    // real is never affected by conjugate bit, safe to use physical version
+    auto real_tensor = at::view_as_real_physical(self);
     return at::select(real_tensor, real_tensor.dim() - 1, 0);
   } else {
     TORCH_CHECK(false, "real is not implemented for tensors with non-complex dtypes.");
@@ -265,17 +262,34 @@ Tensor imag(const Tensor& self) {
   }
 }
 
-Tensor& conj_out(const Tensor& self, Tensor& result) {
-  return unary_op_impl_out(result, self, conj_stub);
+Tensor resolve_conj(const Tensor& self) {
+  if (!self.is_conj()) { return self; }
+  auto result = at::empty_like(self, self.options());
+  // conjugation is handled in `copy_()`
+  return result.copy_(self);
 }
-
-Tensor _conj(const Tensor& self) { return unary_op_impl(self, at::conj_out); }
 
 Tensor conj(const Tensor& self) {
   if (!self.is_complex()) {
     return self;
   }
-  return at::_conj(self);
+  Tensor self_;
+  auto impl = c10::make_intrusive<TensorImpl>(
+    Storage(self.storage()), self.key_set(), self.dtype());
+  impl->set_storage_offset(self.storage_offset());
+  impl->set_sizes_and_strides(self.sizes(), self.strides());
+  impl->set_conj(!self.is_conj());
+  self_ = Tensor(std::move(impl));
+  namedinference::propagate_names(self_, self);
+  return self_;
+}
+
+Tensor& conj_out(Tensor& result, const Tensor& self) {
+  return unary_op_impl_out(result, self, conj_stub);
+}
+
+Tensor& conj_(Tensor& self) {
+  return unary_op_impl_(self, conj_out);
 }
 
 Tensor& bitwise_not_out(const Tensor& self, Tensor& result) { return unary_op_impl_out(result, self, bitwise_not_stub); }
@@ -410,11 +424,24 @@ Tensor sgn(const Tensor& self) { return unary_op_impl(self, at::sgn_out); }
 Tensor& sgn_(Tensor& self) { return unary_op_impl_(self, at::sgn_out); }
 
 CREATE_UNARY_TORCH_IMPL_FUNC(sin)
-CREATE_UNARY_TORCH_IMPL_FUNC(cos)
+
+Tensor& cos_out(const Tensor& self, Tensor& result) { return unary_op_impl_float_out(result, self, cos_stub); }
+Tensor cos(const Tensor& self) { return unary_op_impl_float(self, cos_stub); }
+Tensor& cos_(Tensor& self) { return unary_op_impl_(self, at::cos_out); }
+
 CREATE_UNARY_TORCH_IMPL_FUNC(sinc)
-CREATE_UNARY_TORCH_IMPL_FUNC(sinh)
-CREATE_UNARY_TORCH_IMPL_FUNC(cosh)
-CREATE_UNARY_TORCH_IMPL_FUNC(acosh)
+
+Tensor& sinh_out(const Tensor& self, Tensor& result) { return unary_op_impl_float_out(result, self, sinh_stub); }
+Tensor sinh(const Tensor& self) { return unary_op_impl_float(self, sinh_stub); }
+Tensor& sinh_(Tensor& self) { return unary_op_impl_(self, at::sinh_out); }
+
+Tensor& cosh_out(const Tensor& self, Tensor& result) { return unary_op_impl_float_out(result, self, cosh_stub); }
+Tensor cosh(const Tensor& self) { return unary_op_impl_float(self, cosh_stub); }
+Tensor& cosh_(Tensor& self) { return unary_op_impl_(self, at::cosh_out); }
+
+Tensor& acosh_out(const Tensor& self, Tensor& result) { return unary_op_impl_float_out(result, self, acosh_stub); }
+Tensor acosh(const Tensor& self) { return unary_op_impl_float(self, acosh_stub); }
+Tensor& acosh_(Tensor& self) { return unary_op_impl_(self, at::acosh_out); }
 
 // arccosh, alias for acosh
 Tensor& arccosh_out(const Tensor& self, Tensor& result) { return at::acosh_out(result, self); }
@@ -463,21 +490,6 @@ Tensor logit(const Tensor& self, c10::optional<double> eps) {
 }
 Tensor& logit_(Tensor& self, c10::optional<double> eps) {
   return at::logit_out(self, self, eps);
-}
-
-Tensor& special_logit_out(const Tensor& self, c10::optional<double> eps, Tensor& result) {
-  return at::logit_out(result, self, eps);
-}
-Tensor special_logit(const Tensor& self, c10::optional<double> eps) {
-  return self.logit(eps);
-}
-
-// special_expit, alias for sigmoid
-Tensor& special_expit_out(const Tensor& self, Tensor& result) {
-  return at::sigmoid_out(result, self);
-}
-Tensor special_expit(const Tensor& self) {
-  return self.sigmoid();
 }
 
 Tensor& nan_to_num_out(const Tensor& self,
@@ -778,6 +790,7 @@ DEFINE_DISPATCH(abs_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-va
 DEFINE_DISPATCH(angle_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(real_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(imag_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+// NB: conj_stub IGNORES the conjugate bit on input tenso
 DEFINE_DISPATCH(conj_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(acos_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(acosh_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)

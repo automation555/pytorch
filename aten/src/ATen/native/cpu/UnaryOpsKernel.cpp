@@ -193,6 +193,7 @@ static void imag_kernel(TensorIterator& iter) {
   });
 }
 
+// NB: Ignores the conjugate bit on tensors
 static void conj_kernel(TensorIterator& iter) {
   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND3(
       kBool, kBFloat16, kHalf, iter.common_dtype(), "conj_cpu", [&]() {
@@ -318,7 +319,7 @@ static void sinc_kernel(TensorIteratorBase& iter) {
   });
 }
 
-static void sinh_kernel(TensorIteratorBase& iter) {
+static void sinh_kernel(TensorIterator& iter) {
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(iter.dtype(), "sinh_cpu", [&]() {
     cpu_kernel_vec(
         iter,
@@ -327,7 +328,7 @@ static void sinh_kernel(TensorIteratorBase& iter) {
   });
 }
 
-static void cosh_kernel(TensorIteratorBase& iter) {
+static void cosh_kernel(TensorIterator& iter) {
   AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(iter.dtype(), "cosh_cpu", [&]() {
     cpu_kernel_vec(
         iter,
@@ -336,7 +337,7 @@ static void cosh_kernel(TensorIteratorBase& iter) {
   });
 }
 
-static void acosh_kernel(TensorIteratorBase& iter) {
+static void acosh_kernel(TensorIterator& iter) {
     AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(iter.dtype(), "acosh_cpu", [&]() {
       cpu_kernel(
         iter,
@@ -742,7 +743,7 @@ IMPLEMENT_COMPLEX_KERNEL(acos)
 IMPLEMENT_COMPLEX_KERNEL(asin)
 IMPLEMENT_COMPLEX_KERNEL(atan)
 IMPLEMENT_FLOAT_KERNEL(ceil)
-IMPLEMENT_COMPLEX_STRUCTURED_KERNEL(cos)
+IMPLEMENT_COMPLEX_KERNEL(cos)
 IMPLEMENT_FLOAT_KERNEL(erf)
 IMPLEMENT_FLOAT_KERNEL(erfc)
 IMPLEMENT_FLOAT_KERNEL(erfinv)
