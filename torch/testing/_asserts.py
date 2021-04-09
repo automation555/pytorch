@@ -1,23 +1,26 @@
 import sys
-from collections import namedtuple
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Type
 
 import torch
+
 from ._core import _unravel_index
 
-__all__ = ["assert_tensors_equal", "assert_tensors_allclose"]
+__all__ = ["assert_tensors_equal", "assert_tensors_close"]
 
 
 # The UsageError should be raised in case the test function is not used correctly. With this the user is able to
 # differentiate between a test failure (there is a bug in the tested code) and a test error (there is a bug in the
 # test). If pytest is the test runner, we use the built-in UsageError instead our custom one.
+
 try:
     # The module 'pytest' will be imported if the 'pytest' runner is used. This will only give false-positives in case
     # a previously imported module already directly or indirectly imported 'pytest', but the test is run by another
     # runner such as 'unittest'.
-    pytest = sys.modules["pytest"]
-    UsageError = pytest.UsageError  # type: ignore[attr-defined]
-except KeyError:
+    # 'mypy' is not able to handle this within a type annotation
+    # (see https://mypy.readthedocs.io/en/latest/common_issues.html#variables-vs-type-aliases for details). In case
+    # 'UsageError' is used in an annotation, add a 'type: ignore[valid-type]' comment.
+    UsageError: Type[Exception] = sys.modules["pytest"].UsageError  # type: ignore[attr-defined]
+except (KeyError, AttributeError):
 
     class UsageError(Exception):  # type: ignore[no-redef]
         pass
@@ -43,24 +46,23 @@ def _get_default_rtol_and_atol(a: torch.Tensor, b: torch.Tensor) -> Tuple[float,
     return _DTYPE_PRECISIONS.get(dtype, (0.0, 0.0))
 
 
-def _assert_are_tensors(a: Any, b: Any) -> None:
-    """Asserts that both inputs are tensors.
+def _check_are_tensors(a: Any, b: Any) -> Optional[AssertionError]:
+    """Checks if both inputs are tensors.
 
     Args:
         a (Any): First input.
         b (Any): Second input.
 
-    Raises:
-        AssertionError: If :attr:`a` or :attr:`b` is not a :class:`~torch.Tensor`.
+    Returns:
+        (Optional[AssertionError]): If check did not pass.
     """
-    # Hide this function from the pytest traceback
-    __tracebackhide__ = True
-
     if not (isinstance(a, torch.Tensor) and isinstance(b, torch.Tensor)):
-        raise AssertionError(f"Both inputs have to be tensors, but got {type(a)} and {type(b)} instead.")
+        return AssertionError(f"Both inputs have to be tensors, but got {type(a)} and {type(b)} instead.")
+
+    return None
 
 
-def _check_supported(a: torch.Tensor, b: torch.Tensor) -> None:
+def _check_supported_tensors(a: torch.Tensor, b: torch.Tensor) -> Optional[UsageError]:  # type: ignore[valid-type]
     """Checks if the tensors are supported by the current infrastructure.
 
     All checks are temporary and will be relaxed in the future.
@@ -69,31 +71,31 @@ def _check_supported(a: torch.Tensor, b: torch.Tensor) -> None:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
 
-    Raises:
-        UsageError: If :attr:`a` or :attr:`b` is complex, quantized, or sparse.
+    Returns:
+        (Optional[UsageError]): If check did not pass.
     """
-    # Hide this function from the pytest traceback
-    __tracebackhide__ = True
-
     if any(t.dtype in (torch.complex32, torch.complex64, torch.complex128) for t in (a, b)):
-        raise UsageError("Comparison for complex tensors is not supported yet.")
+        return UsageError("Comparison for complex tensors is not supported yet.")
     if any(t.is_quantized for t in (a, b)):
-        raise UsageError("Comparison for quantized tensors is not supported yet.")
+        return UsageError("Comparison for quantized tensors is not supported yet.")
     if any(t.is_sparse for t in (a, b)):
-        raise UsageError("Comparison for sparse tensors is not supported yet.")
+        return UsageError("Comparison for sparse tensors is not supported yet.")
+
+    return None
 
 
-def _assert_attributes_equal(
+def _check_attributes_equal(
     a: torch.Tensor,
     b: torch.Tensor,
     *,
     check_device: bool = True,
     check_dtype: bool = True,
     check_stride: bool = True,
-) -> None:
-    """Asserts that attributes of two tensors match.
+) -> Optional[AssertionError]:
+    """Checks if the attributes of two tensors match.
 
-    Always checks the :attr:`~torch.Tensor.shape`. Other checks are optional and can be disabled.
+    Always checks the :attr:`~torch.Tensor.shape`. Checks for :attr:`~torch.Tensor.device`,
+    :attr:`~torch.Tensor.dtype`, and :meth:`~torch.Tensor.stride` are optional and can be disabled.
 
     Args:
         a (torch.Tensor): First tensor.
@@ -105,31 +107,24 @@ def _assert_attributes_equal(
         check_stride (bool): If ``True`` (default), asserts that both :attr:`a` and :attr:`b` have the same
             :meth:`~torch.Tensor.stride`.
 
-    Raises:
-        AssertionError: If :attr:`a` and :attr:`b` do not have the same :attr:`~torch.Tensor.shape`.
-        AssertionError: If :attr:`check_device`, but :attr:`a` and :attr:`b` do not live in the same
-            :attr:`~torch.Tensor.device` memory.
-        AssertionError: If :attr:`check_dtype`, but :attr:`a` and :attr:`b` do not have the same
-            :attr:`~torch.Tensor.dtype`.
-        AssertionError: If :attr:`check_stride`, but :attr:`a` and :attr:`b` do not have the same
-            :meth:`~torch.Tensor.stride`.
+    Returns:
+        (Optional[AssertionError]): If check did not pass.
     """
-    # Hide this function from the pytest traceback
-    __tracebackhide__ = True
-
     msg_fmtstr = "The values for attribute '{}' do not match: {} != {}."
 
     if a.shape != b.shape:
-        raise AssertionError(msg_fmtstr.format("shape", a.shape, b.shape))
+        return AssertionError(msg_fmtstr.format("shape", a.shape, b.shape))
 
     if check_device and a.device != b.device:
-        raise AssertionError(msg_fmtstr.format("device", a.device, b.device))
+        return AssertionError(msg_fmtstr.format("device", a.device, b.device))
 
     if check_dtype and a.dtype != b.dtype:
-        raise AssertionError(msg_fmtstr.format("dtype", a.dtype, b.dtype))
+        return AssertionError(msg_fmtstr.format("dtype", a.dtype, b.dtype))
 
     if check_stride and a.stride() != b.stride():
-        raise AssertionError(msg_fmtstr.format("stride()", a.stride(), b.stride()))
+        return AssertionError(msg_fmtstr.format("stride()", a.stride(), b.stride()))
+
+    return None
 
 
 def _equalize_attributes(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -159,85 +154,65 @@ def _equalize_attributes(a: torch.Tensor, b: torch.Tensor) -> Tuple[torch.Tensor
     return a, b
 
 
-_Trace = namedtuple("Trace", ("total", "abs", "rel", "idx", "diff", "a", "b"))
-
-
-def _trace_mismatches(a: torch.Tensor, b: torch.Tensor, mismatches: torch.Tensor) -> _Trace:
-    """Traces mismatches and returns the found information.
-
-    The returned named tuple has the following fields:
-    - total (int): Total number of values in :attr:`a` and :attr:`b`.
-    - abs (int): Absolute number of mismatches.
-    - rel (float): Relative number of mismatches.
-    - idx (Union[int, Tuple[int, ...]]): Index of greatest absolute difference.
-    - diff (Union[int, float]): Greatest absolute difference.
-    - a (Union[int, float]): Value of :attr:`a` at the greatest absolute difference.
-    - b (Union[int, float]): Value of :attr:`a` at the greatest absolute difference.
-
-    For ``diff``, ``a``, and ``b`` the returned type depends on the :attr:`~torch.Tensor.dtype` of :attr:`a` and
-    :attr:`b`.
+def _trace_mismatches(a: torch.Tensor, b: torch.Tensor, mismatches: torch.Tensor) -> str:
+    """Traces mismatches.
 
     Args:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
         mismatches (torch.Tensor): Boolean mask of the same shape as :attr:`a` and :attr:`b` that indicates the
             location of mismatches.
+
+    Returns:
+        (str): Multiline list comprising the absolute and relative number of mismatches, and the maximum absolute and
+            relative difference with the corresponding index.
     """
-    total = mismatches.numel()
-    abs = torch.sum(mismatches).item()
-    rel = abs / total
+    total_elements = mismatches.numel()
+    abs_mismatches = torch.sum(mismatches).item()
+    rel_mismatches = abs_mismatches / total_elements
 
     dtype = torch.float64 if a.dtype.is_floating_point else torch.int64
     a_flat = a.flatten().to(dtype)
     b_flat = b.flatten().to(dtype)
 
-    abs_diff_flat = torch.abs(a_flat - b_flat)
-    idx_flat = torch.argmax(abs_diff_flat)
+    abs_diff = torch.abs(a_flat - b_flat)
+    max_abs_diff, max_abs_diff_flat_idx = torch.max(abs_diff, 0)
 
-    return _Trace(
-        total=total,
-        abs=abs,
-        rel=rel,
-        idx=_unravel_index(idx_flat, a.shape),
-        diff=abs_diff_flat[idx_flat].item(),
-        a=a_flat[idx_flat].item(),
-        b=b_flat[idx_flat].item(),
+    rel_diff = abs_diff / torch.abs(b_flat)
+    max_rel_diff, max_rel_diff_flat_idx = torch.max(rel_diff, 0)
+
+    return (
+        f"Mismatched elements: {abs_mismatches} / {total_elements} ({rel_mismatches:.1%})\n"
+        f"Max. abs. diff.: {max_abs_diff.item()} at {_unravel_index(max_abs_diff_flat_idx.item(), mismatches.shape)}\n"
+        f"Max. rel. diff.: {max_rel_diff.item()} at {_unravel_index(max_rel_diff_flat_idx.item(), mismatches.shape)}"
     )
 
 
-def _assert_values_equal(a: torch.Tensor, b: torch.Tensor):
-    """Asserts that the values of two tensors are bitwise equal.
+def _check_values_equal(a: torch.Tensor, b: torch.Tensor) -> Optional[AssertionError]:
+    """Checks if the values of two tensors are bitwise equal.
 
     Args:
         a (torch.Tensor): First tensor.
         b (torch.Tensor): Second tensor.
 
-    Raises:
-         AssertionError: If the values of :attr:`a` and :attr:`b` are not bitwise equal.
+    Returns:
+        (Optional[AssertionError]): If check did not pass.
     """
-    # Hide this function from the pytest traceback
-    __tracebackhide__ = True
-
     mismatches = torch.ne(a, b)
     if not torch.any(mismatches):
-        return
+        return None
 
-    trace = _trace_mismatches(a, b, mismatches)
-    msg = (
-        f"Found {trace.abs} different element(s) out of {trace.total} ({trace.rel:.1%}). "
-        f"The greatest difference of {trace.diff} ({trace.a} vs. {trace.b}) occurred at index {trace.idx}"
-    )
-    raise AssertionError(msg)
+    return AssertionError(f"Tensors are not equal:\n\n{_trace_mismatches(a, b, mismatches)}")
 
 
-def _assert_values_allclose(
+def _check_values_close(
     a: torch.Tensor,
     b: torch.Tensor,
     *,
     rtol,
     atol,
-) -> None:
-    """Asserts that the values of two tensors are close up to a desired tolerance.
+) -> Optional[AssertionError]:
+    """Checks if the values of two tensors are close up to a desired tolerance.
 
     Args:
         a (torch.Tensor): First tensor.
@@ -245,23 +220,16 @@ def _assert_values_allclose(
         rtol (float): Relative tolerance.
         atol (float): Absolute tolerance.
 
-    Raises:
-         AssertionError: If the values of :attr:`a` and :attr:`b` are close up to a desired tolerance.
+    Returns:
+        (Optional[AssertionError]): If check did not pass.
     """
-    # Hide this function from the pytest traceback
-    __tracebackhide__ = True
-
     mismatches = ~torch.isclose(a, b, rtol=rtol, atol=atol)
     if not torch.any(mismatches):
-        return
+        return None
 
-    trace = _trace_mismatches(a, b, mismatches)
-    msg = (
-        f"With rtol={rtol} and atol={atol}, "
-        f"found {trace.abs} different element(s) out of {trace.total} ({trace.rel:.1%}). "
-        f"The greatest difference of {trace.diff} ({trace.a} vs. {trace.b}) occurred at index {trace.idx}"
+    return AssertionError(
+        f"Tensors are not close according to rtol={rtol} and ator={atol}:\n\n{_trace_mismatches(a, b, mismatches)}"
     )
-    raise AssertionError(msg)
 
 
 def assert_tensors_equal(
@@ -303,18 +271,27 @@ def assert_tensors_equal(
     .. seealso::
 
         To assert that the values in two tensors are are close but are not required to be bitwise equal, use
-        :func:`assert_tensors_allclose` instead.
+        :func:`assert_tensors_close` instead.
     """
-    _assert_are_tensors(a, b)
-    _check_supported(a, b)
+    exc: Optional[Exception] = _check_are_tensors(a, b)
+    if exc:
+        raise exc
 
-    _assert_attributes_equal(a, b, check_device=check_device, check_dtype=check_dtype, check_stride=check_stride)
+    exc = _check_supported_tensors(a, b)
+    if exc:
+        raise exc
+
+    exc = _check_attributes_equal(a, b, check_device=check_device, check_dtype=check_dtype, check_stride=check_stride)
+    if exc:
+        raise exc
     a, b = _equalize_attributes(a, b)
 
-    _assert_values_equal(a, b)
+    exc = _check_values_equal(a, b)
+    if exc:
+        raise exc
 
 
-def assert_tensors_allclose(
+def assert_tensors_close(
     a: torch.Tensor,
     b: torch.Tensor,
     *,
@@ -384,8 +361,13 @@ def assert_tensors_allclose(
 
         To assert that the values in two tensors are bitwise equal, use :func:`assert_tensors_equal` instead.
     """
-    _assert_are_tensors(a, b)
-    _check_supported(a, b)
+    exc: Optional[Exception] = _check_are_tensors(a, b)
+    if exc:
+        raise exc
+
+    exc = _check_supported_tensors(a, b)
+    if exc:
+        raise exc
 
     if (rtol is None) ^ (atol is None):
         # We require both tolerance to be omitted or specified, because specifying only one might lead to surprising
@@ -396,10 +378,14 @@ def assert_tensors_allclose(
     elif rtol is None:
         rtol, atol = _get_default_rtol_and_atol(a, b)
 
-    _assert_attributes_equal(a, b, check_device=check_device, check_dtype=check_dtype, check_stride=check_stride)
+    exc = _check_attributes_equal(a, b, check_device=check_device, check_dtype=check_dtype, check_stride=check_stride)
+    if exc:
+        raise exc
     a, b = _equalize_attributes(a, b)
 
     if (rtol == 0.0) and (atol == 0.0):
-        _assert_values_equal(a, b)
+        exc = _check_values_equal(a, b)
     else:
-        _assert_values_allclose(a, b, rtol=rtol, atol=atol)
+        exc = _check_values_close(a, b, rtol=rtol, atol=atol)
+    if exc:
+        raise exc
