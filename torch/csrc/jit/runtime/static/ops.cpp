@@ -4,12 +4,12 @@
 #include <ATen/InferSize.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/TensorUtils.h>
+#include <ATen/core/stack.h>
 #include <ATen/native/EmbeddingBag.h>
 #include <ATen/native/IndexingUtils.h>
 #include <ATen/native/Resize.h>
 #include <ATen/native/TensorAdvancedIndexing.h>
 #include <ATen/native/quantized/cpu/qembeddingbag.h>
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/runtime/vararg_functions.h>
 #include <torch/csrc/jit/tensorexpr/ir.h>
@@ -78,7 +78,7 @@ at::Tensor& flatten_copy_out(
 
   std::vector<int64_t> shape;
   shape.reserve(self.dim() - end_dim + start_dim);
-  for (const auto i : c10::irange(start_dim)) {
+  for (int64_t i = 0; i < start_dim; i++) {
     shape.push_back(self.sizes()[i]);
   }
   shape.push_back(slice_numel);
@@ -107,11 +107,6 @@ namespace jit {
 
 C10_DEFINE_REGISTRY(SROperatorRegistry, SROperatorFunctor);
 
-bool opIsRegistered(const c10::Symbol& op_name) {
-  const std::string name(op_name.toQualString());
-  return SROperatorRegistry()->Has(name);
-}
-
 bool canRunOutOfPlace(Node* n) {
   auto op_name = std::string(n->kind().toQualString());
   return SROperatorRegistry()->Has(op_name);
@@ -136,7 +131,8 @@ bool canRunNatively(Node* n) {
       "prim::ListConstruct",
       "prim::ListUnpack",
       "prim::TupleConstruct",
-      "prim::DictConstruct"};
+      "prim::DictConstruct",
+      "aten::__getitem__"};
   auto str = std::string(n->kind().toQualString());
   if (!native_nodes.count(str)) {
     return false;
@@ -908,6 +904,24 @@ std::function<void(ProcessedNode*)> getNativeOperation(Node* n) {
           node->output()->type()->expectRef<DictType>(),
           node->inputs().size());
       // put output back
+      p_node->Output(0) = std::move(stack[0]);
+    };
+  } else if (n->kind() == c10::Symbol::fromQualString("aten::__getitem__")) {
+    return [](ProcessedNode* p_node) {
+      std::vector<IValue> stack;
+      const size_t size = p_node->inputs().size();
+      stack.reserve(size);
+      for (size_t i = 0; i < size; i++) {
+        stack.emplace_back(p_node->Input(i));
+      }
+      auto* node = p_node->node();
+      auto key = pop(stack);
+      auto dict = pop(stack).toGenericDict();
+      auto value = dict.find(key);
+      if (value == dict.end()) {
+        AT_ERROR("KeyError: ", key);
+      }
+      push(stack, value->value());
       p_node->Output(0) = std::move(stack[0]);
     };
   } else if (n->kind() == prim::ListConstruct) {
