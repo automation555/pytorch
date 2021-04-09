@@ -128,11 +128,11 @@ class TestLinalg(TestCase):
         else:
             drivers = ('gels', None)
 
-        def check_correctness(a, b, sol):
+        def check_solution_correctness(a, b, sol):
             sol2 = a.pinverse() @ b
             self.assertEqual(sol, sol2, atol=1e-5, rtol=1e-5)
 
-        def check_correctness_ref(a, b, res, ref):
+        def check_correctness_ref(a, b, res, ref, driver="default"):
             def apply_if_not_empty(t, f):
                 if t.numel():
                     return f(t)
@@ -140,7 +140,7 @@ class TestLinalg(TestCase):
                     return t
 
             def select_if_not_empty(t, i):
-                selected = apply_if_not_empty(t, lambda x: x.select(0, i).numpy())
+                selected = apply_if_not_empty(t, lambda x: x.select(0, i))
                 return selected
 
             m = a.size(-2)
@@ -157,42 +157,62 @@ class TestLinalg(TestCase):
             rank_1d = apply_if_not_empty(res.rank, lambda t: t.view(-1))
             singular_values_2d = res.singular_values.view(batch_size, res.singular_values.shape[-1])
 
-            for i in range(batch_size):
-                sol, residuals, rank, singular_values = ref(
-                    a_3d.select(0, i).numpy(),
-                    b_3d.select(0, i).numpy()
-                )
-                # Singular values are None when lapack_driver='gelsy' in SciPy
-                if singular_values is None:
-                    singular_values = []
-                self.assertEqual(sol, solution_3d.select(0, i), atol=1e-5, rtol=1e-5)
-                self.assertEqual(residuals, select_if_not_empty(residuals_2d, i), atol=1e-5, rtol=1e-5)
-                self.assertEqual(rank, select_if_not_empty(rank_1d, i), atol=1e-5, rtol=1e-5)
-                self.assertEqual(singular_values, singular_values_2d.select(0, i), atol=1e-5, rtol=1e-5)
+            if a.numel() > 0:
+                for i in range(batch_size):
+                    sol, residuals, rank, singular_values = ref(
+                        a_3d.select(0, i).numpy(),
+                        b_3d.select(0, i).numpy()
+                    )
+                    # Singular values are None when lapack_driver='gelsy' in SciPy
+                    if singular_values is None:
+                        singular_values = []
+                    self.assertEqual(sol, solution_3d.select(0, i), atol=1e-5, rtol=1e-5)
+                    self.assertEqual(rank, select_if_not_empty(rank_1d, i), atol=1e-5, rtol=1e-5)
+                    self.assertEqual(singular_values, singular_values_2d.select(0, i), atol=1e-5, rtol=1e-5)
+
+                    # SciPy and NumPy operate only on non-batched input and
+                    # return an empty array with shape (0,) if rank(a) != n
+                    # but in PyTorch we can't replicate this behavior for batched inputs
+                    # instead if the corresponding rank for batched input is not equal to n
+                    # we fill residuals with inf
+                    if m > n:
+                        if rank == n:
+                            self.assertEqual(residuals, select_if_not_empty(residuals_2d, i), atol=1e-5, rtol=1e-5)
+                        else:
+                            self.assertTrue(torch.all(torch.isinf(select_if_not_empty(residuals_2d, i))))
+
+            else:
+                self.assertEqual(res.solution.shape, (*a.shape[:-2], n, nrhs))
+                self.assertEqual(res.rank.shape, a.shape[:-2])
+
+                # residuals are not always computed (and have non-zero shape)
+                if m > n and driver != "gelsy":
+                    self.assertEqual(res.residuals.shape, (*a.shape[:-2], 0))
+                else:
+                    self.assertEqual(res.residuals.shape, (0, ))
+
+                # singular_values are not always computed (and have non-zero shape)
+                if driver == "default" or driver == "gelsd" or driver == "gelss":
+                    self.assertEqual(res.singular_values.shape, (*a.shape[:-2], min(m, n)))
+                else:
+                    self.assertEqual(res.singular_values.shape, (0, ))
 
         def check_correctness_scipy(a, b, res, driver, cond):
-            if TEST_SCIPY and driver not in (None, 'gels'):
+            # SciPy provides 3 driver options: gelsd, gelss, gelsy
+            if TEST_SCIPY and driver in ('gelsd', 'gelss', 'gelsy'):
                 import scipy.linalg
 
                 def scipy_ref(a, b):
                     return scipy.linalg.lstsq(a, b, lapack_driver=driver, cond=cond)
-                check_correctness_ref(a, b, res, scipy_ref)
+                check_correctness_ref(a, b, res, scipy_ref, driver=driver)
 
-        def check_correctness_numpy(a, b, res, driver, cond):
-            if driver in ('gelsd', 'gelss'):
-                import numpy.linalg
+        def check_correctness_numpy(a, b, res, driver, rcond):
+            # NumPy uses only gelsd routine
+            if driver == 'gelsd':
 
                 def numpy_ref(a, b):
-                    return numpy.linalg.lstsq(a, b, rcond=-1 if cond is None else cond)
+                    return np.linalg.lstsq(a, b, rcond=rcond)
                 check_correctness_ref(a, b, res, numpy_ref)
-
-        def check_ranks(a, ranks, cond=1e-7):
-            ranks2 = torch.matrix_rank(a, tol=cond)
-            self.assertEqual(ranks, ranks2)
-
-        def check_singular_values(a, sv):
-            sv2 = a.svd()[1]
-            self.assertEqual(sv, sv2)
 
         ms = [2 ** i for i in range(5)]
         m_ge_n_sizes = [(m, m // 2) for m in ms] + [(m, m) for m in ms]
@@ -204,32 +224,44 @@ class TestLinalg(TestCase):
         # that is why we use `cond=1.0`, the mean to cut roughly half of all
         # the singular values and compare whether torch.linalg.lstsq agrees with
         # SciPy and NumPy.
-        cond = (None, 1.0)
+        # if rcond is True then set value for it based on the used algorithm
+        # rcond == -1 or any other negative value forces LAPACK to use machine precision tolerance
+        rconds = (None, True, -1)
 
-        for batch, matrix_size, driver, cond in itertools.product(batches, matrix_sizes, drivers, cond):
+        for batch, matrix_size, driver, rcond in itertools.product(batches, matrix_sizes, drivers, rconds):
+            # keep the rcond value if it is None or -1, set the driver specific value if it is True
+            if rcond and rcond != -1:
+                if driver in ('gelss', 'gelsd'):
+                    # SVD based algorithm; set to zero roughly half of all the singular values
+                    rcond = 1.0
+                else:
+                    # driver == 'gelsy'
+                    # QR based algorithm; setting the value too high might lead to non-unique solutions and flaky tests
+                    rcond = 1e-4
+
+            # specifying rcond value has no effect for gels driver so no need to run the tests again
+            if driver == 'gels' and rcond is not None:
+                continue
+
             shape = batch + matrix_size
             a = random_well_conditioned_matrix(*shape, dtype=dtype, device=device)
             b = torch.rand(*shape, dtype=dtype, device=device)
 
-            cond = 1e-7
             m = a.size(-2)
             n = a.size(-1)
-            res = torch.linalg.lstsq(a, b, cond=cond, driver=driver)
-            sol = res.solution.narrow(-2, 0, n)
+            res = torch.linalg.lstsq(a, b, rcond=rcond, driver=driver)
+            sol = res.solution
 
-            check_correctness_scipy(a, b, res, driver, cond)
-            check_correctness_numpy(a, b, res, driver, cond)
+            # Only checks gelsd, gelss, gelsy drivers
+            check_correctness_scipy(a, b, res, driver, rcond)
 
-            check_correctness(a, b, sol)
-            if self.device_type == 'cpu' and driver != 'gels':
-                # rank-revealing drivers are only available for the CPU.
-                # `gels` is not rank-revealing and is only for full
-                # rank inputs.
-                check_ranks(a, res.rank, cond)
-            if self.device_type == 'cpu' and driver in ('gelsd', 'gelss'):
-                # SVD-based drivers are only available for the CPU.
-                # These are only `gelsd` and `gelss`.
-                check_singular_values(a, res.singular_values)
+            # Only checks gelsd driver
+            check_correctness_numpy(a, b, res, driver, rcond)
+
+            # gels driver is not checked by comparing to NumPy or SciPy implementation
+            # because NumPy and SciPy do not implement this driver
+            if driver == 'gels' and rcond is None:
+                check_solution_correctness(a, b, sol)
 
     @skipCUDAIfNoMagma
     @skipCPUIfNoLapack
@@ -317,16 +349,16 @@ class TestLinalg(TestCase):
         a = torch.rand(2, 3, dtype=dtype, device=device)
         b = torch.rand(3, dtype=dtype, device=device)
 
-        with self.assertRaisesRegex(RuntimeError, 'input `self` Tensor should be at least 2D'):
+        with self.assertRaisesRegex(RuntimeError, 'input must have at least 2 dimensions'):
             torch.linalg.lstsq(b, b)
 
-        with self.assertRaisesRegex(RuntimeError, 'input `b` Tensor should be at least 1D'):
+        with self.assertRaisesRegex(RuntimeError, 'other must have at least 1 dimension'):
             torch.linalg.lstsq(a, torch.tensor(1, dtype=dtype, device=device))
 
-        with self.assertRaisesRegex(RuntimeError, r'self.size\(-2\) should match b.size\(-1\)'):
+        with self.assertRaisesRegex(RuntimeError, r'input.size\(-2\) should match other.size\(-1\)'):
             torch.linalg.lstsq(a, b)
 
-        with self.assertRaisesRegex(RuntimeError, r'self.size\(-2\) should match b.size\(-2\)'):
+        with self.assertRaisesRegex(RuntimeError, r'input.size\(-2\) should match other.size\(-2\)'):
             torch.linalg.lstsq(a, b.unsqueeze(-1))
 
         def complement_device(device):
@@ -338,11 +370,11 @@ class TestLinalg(TestCase):
         a = torch.rand(2, 2, 2, 2, dtype=dtype, device=device)
         b = torch.rand(2, 2, 2, dtype=dtype, device=complement_device(device))
         if a.device != b.device:
-            with self.assertRaisesRegex(RuntimeError, 'input tensors should be on the same device'):
+            with self.assertRaisesRegex(RuntimeError, 'be on the same device'):
                 torch.linalg.lstsq(a, b)
 
         b = (torch.rand(2, 2, 2, dtype=dtype, device=device) * 100).long()
-        with self.assertRaisesRegex(RuntimeError, 'input tensors should be of the same dtype'):
+        with self.assertRaisesRegex(RuntimeError, 'the same dtype'):
             torch.linalg.lstsq(a, b)
 
         a = torch.rand(2, 2, 2, 2, dtype=dtype, device=device)
@@ -359,7 +391,7 @@ class TestLinalg(TestCase):
         if device != 'cpu':
             a = torch.rand(2, 3, dtype=dtype, device=device)
             b = torch.rand(2, 1, dtype=dtype, device=device)
-            with self.assertRaisesRegex(RuntimeError, r'only overdetermined systems \(m >= n\) are allowed on CUDA'):
+            with self.assertRaisesRegex(RuntimeError, r'only overdetermined systems'):
                 torch.linalg.lstsq(a, b)
 
     @skipCUDAIfNoMagma
