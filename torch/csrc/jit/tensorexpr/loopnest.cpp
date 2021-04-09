@@ -30,12 +30,13 @@ LoopNest::LoopNest(const LoopNest& other)
   verify(root_stmt_);
 }
 
-LoopNest::LoopNest(Stmt* stmt, std::unordered_set<const Buf*> output_bufs)
-    : root_stmt_(stmt), output_bufs_(std::move(output_bufs)) {
+LoopNest::LoopNest(
+    Stmt* stmt,
+    const std::unordered_set<const Buf*>& output_bufs)
+    : root_stmt_(stmt), output_bufs_(output_bufs) {
   verify(root_stmt_);
 }
 
-// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 LoopNest::LoopNest(
     const std::vector<Tensor*>& output_tensors,
     const std::vector<Tensor*>& tensors_to_compute) {
@@ -43,7 +44,6 @@ LoopNest::LoopNest(
   verify(root_stmt_);
 }
 
-// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 LoopNest::LoopNest(const std::vector<Tensor*>& output_tensors) {
   initialize(output_tensors, output_tensors);
   verify(root_stmt_);
@@ -1020,11 +1020,8 @@ void LoopNest::vectorizeInnerLoops() {
 
   // vectorize inner loops.
   for (For* loop : innerLoops) {
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
     For* outer1;
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
     For* split1;
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
     For* tail1;
 
     static const int kBodyVectorWidth = 8;
@@ -1032,11 +1029,8 @@ void LoopNest::vectorizeInnerLoops() {
     vectorize(split1);
 
     if (tail1) {
-      // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
       For* outer2;
-      // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
       For* split2;
-      // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
       For* tail2;
       static const int kTailVectorWidth = 4;
       splitWithTail(tail1, kTailVectorWidth, &outer2, &split2, &tail2);
@@ -1080,11 +1074,8 @@ void LoopNest::sliceHead(For* f, int factor, For** head, For** tail) {
       f->loop_options().is_gpu_thread_index()) {
     LoopNest::normalize(*tail, tail);
   }
-
-  // TODO: record history of transformations
 }
 void LoopNest::sliceHead(For* f, int factor) {
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   For *head, *tail;
   sliceHead(f, factor, &head, &tail);
 }
@@ -1128,17 +1119,13 @@ void LoopNest::sliceTail(For* f, int factor, For** head, For** tail) {
       f->loop_options().is_gpu_thread_index()) {
     LoopNest::normalize(*head, head);
   }
-
-  // TODO: record history of transformations
 }
 void LoopNest::sliceTail(For* f, int factor) {
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   For *head, *tail;
   sliceTail(f, factor, &head, &tail);
 }
 
 void LoopNest::splitWithTail(For* f, int factor) {
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   For *outer, *inner, *tail;
   splitWithTail(f, factor, &outer, &inner, &tail);
 }
@@ -1211,7 +1198,6 @@ void LoopNest::splitWithTail(
 }
 
 void LoopNest::splitWithMask(For* f, int factor) {
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   For *outer, *inner;
   splitWithMask(f, factor, &outer, &inner);
 }
@@ -1271,7 +1257,6 @@ void LoopNest::splitWithMask(For* f, int factor, For** outer, For** inner) {
   *outer =
       new For(i_outer, new IntImm(0), split_count, *inner, f->loop_options());
 
-  // TODO: cleanup API for adding/removing statements
   p->replace_stmt(f, *outer);
 }
 
@@ -1477,7 +1462,6 @@ void LoopNest::reorderAxis(For* a, For* b) {
       internal_axes.push_back(f);
     }
 
-    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
     s = s->get_parent();
   }
 
@@ -1680,7 +1664,6 @@ bool LoopNest::flatten(const std::vector<For*>& loops, For** flattened) {
   // loop is normalized, the given pointers to inner loops point to old code.
   // For the same reason, we can't store the normalized inner loops until after
   // the outer-most loop is normalized.
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   For* normalized;
   for (size_t i = 0; i < loops.size(); ++i) {
     size_t idx = loops.size() - i - 1;
@@ -1689,7 +1672,6 @@ bool LoopNest::flatten(const std::vector<For*>& loops, For** flattened) {
 
   // 'normalized' points to the outer-most loop in the normalized loopnest.
   // Collect all the normalized loops.
-  // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
   auto normalized_loops = getLoopStmtsInLoopNest(normalized, loops.size());
 
   auto flat_var = new Var(
@@ -1783,10 +1765,6 @@ Stmt* LoopNest::getLoopBodyFor(const Buf* buf) const {
   }
 
   return (Stmt*)res; // NOLINT
-}
-
-bool LoopNest::hasLoopBodyFor(Tensor* t) const {
-  return getLoopBodyFor(t) != nullptr;
 }
 
 For* LoopNest::getParentLoop(const Stmt* st) {
@@ -2415,30 +2393,26 @@ class BufReplacer : public IRMutator {
   const std::vector<const Expr*>& new_indices_;
 };
 
-void LoopNest::rfactor(
-    const Expr* r,
-    const Var* reduction_var,
-    Block* insertion_point) {
-  ReduceOp* reduce_op = dynamic_cast<ReduceOp*>(
-      const_cast<Expr*>(r)); // NOLINT: TODO add update()
+bool LoopNest::rfactor(Stmt *st, For* target_for) {
+  Buf* tmp_buf;
+  return rfactor(st, target_for, &tmp_buf);
+}
+
+bool LoopNest::rfactor(Stmt *st, For* target_for, Buf** tmp_buf_ptr) {
+  const Var* reduction_var = target_for->var();
+  Store *store = dynamic_cast<Store*>(st);
+  const ReduceOp* reduce_op = dynamic_cast<const ReduceOp*>(store->value());
   if (!reduce_op) {
-    std::cerr << "Must pass in reduce op\n";
-    return;
-  }
-  StoreFinder sf(reduce_op);
-  root_stmt()->accept(&sf);
-  Stmt* st = sf.store();
-  if (!st || !dynamic_cast<Store*>(st)) {
-    std::cerr << "Can't find reduction to rfactor " << *reduce_op << "\n";
-    return;
+    // Not a reduction store
+    return false;
   }
 
-  auto old_acc = dynamic_cast<Store*>(st)->buf();
-  auto old_outer = dynamic_cast<Store*>(st)->indices();
+  auto old_acc = store->buf();
+  auto old_outer = store->indices();
   auto new_outer = old_outer;
 
   For* root_for = nullptr;
-  For* target_for = nullptr;
+  target_for = nullptr;
   std::set<const Var*> reduce_args = {
       reduce_op->reduce_args().begin(), reduce_op->reduce_args().end()};
 
@@ -2467,33 +2441,26 @@ void LoopNest::rfactor(
     }
     st = st->get_parent();
   };
+
   if (!target_for) {
-    std::cerr << "Couldn't find loop over variable: " << *reduction_var << "\n";
-    return;
+    // target_for does not correspond to the reduction
+    return false;
   }
-
-  if (reduce_args.size()) {
-    std::cerr << "Couldn't find all variables associated with the reduction.\n";
-    return;
-  }
-
-  if (!root_for) {
-    std::cerr << "Couldn't deduce the root For loop for this rfactor\n";
-    return;
-  }
+  TORCH_INTERNAL_ASSERT(reduce_args.empty());
+  TORCH_INTERNAL_ASSERT(root_for);
 
   auto& dims = reduce_op->reduce_args();
   if (dims.size() < 2) {
-    std::cerr
-        << "Cannot rfactor reduction with a single reduce variable.  Use split first.\n";
-    return;
+    // Cannot rfactor reduction with a single reduce variable
+    return false;
   }
 
   std::vector<const Expr*> new_dims = {};
   const Expr* init =
       new Cast(reduce_op->dtype(), reduce_op->reducer().initializer());
   TORCH_INTERNAL_ASSERT(init);
-  Buf* tmp_buf = new Buf("tmp_buf", new_dims, reduce_op->dtype(), init);
+  *tmp_buf_ptr = new Buf("tmp_buf", new_dims, reduce_op->dtype(), init);
+  Buf* tmp_buf = *tmp_buf_ptr;
 
   auto new_inner = reduce_op->reduce_args();
   bool found = false;
@@ -2505,18 +2472,8 @@ void LoopNest::rfactor(
     }
   }
   if (!found) {
-    // NOLINTNEXTLINE(clang-analyzer-cplusplus.NewDeleteLeaks)
-    std::stringstream ss;
-    for (auto& v : new_inner) {
-      ss << *v;
-      if (&v != &new_inner.back()) {
-        ss << ", ";
-      }
-    }
-    std::cerr << "Couldn't find target reduction var " << *reduction_var
-              << " in the reduce operation, which reduces over " << ss.str()
-              << "\n";
-    return;
+    // Could not find target reduction var in the reduce operation
+    return false;
   }
   new_outer.emplace_back(reduction_var);
 
@@ -2542,26 +2499,11 @@ void LoopNest::rfactor(
   // variables.
   SwapReduce sr(reduce_op, first_reduce, tmp_buf, new_outer);
   Block* parent_block = dynamic_cast<Block*>(root_for->get_parent());
-  if (!parent_block) {
-    std::cerr << "Cannot rfactor a loop whose parent is not a block.\n";
-    return;
-  }
+  TORCH_INTERNAL_ASSERT(parent_block);
   For* new_root_for = dynamic_cast<For*>(root_for->accept_mutator(&sr));
-  if (!new_root_for) {
-    std::cerr << "Couldn't find new root for in rfactor\n";
-  }
+  TORCH_INTERNAL_ASSERT(new_root_for);
   auto res = parent_block->replace_stmt(root_for, new_root_for);
-  if (!res) {
-    std::cerr << "Couldn't find target loop within parent block of loop nest\n";
-    return;
-  };
-
-  if (insertion_point && insertion_point == root_for->body()) {
-    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-    insertion_point = dynamic_cast<For*>(new_root_for)->body();
-  } else if (insertion_point) {
-    throw std::runtime_error("TODO: enable non-root insertion points");
-  }
+  TORCH_INTERNAL_ASSERT(res);
 
   Stmt* init_stmt = new Store(tmp_buf, new_outer, init, new IntImm(1));
 
@@ -2573,33 +2515,21 @@ void LoopNest::rfactor(
   if (output_contains_target) {
     parent_block->insert_stmt_before(init_stmt, new_root_for);
   } else {
-    // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
     new_root_for->body()->prepend_stmt(init_stmt);
   }
 
   auto second_buf = dynamic_cast<const Buf*>(old_acc);
   auto const& second_indices = old_outer;
-  if (insertion_point &&
-      dynamic_cast<For*>(insertion_point->get_parent())->var() ==
-          target_for->var()) {
-    insertion_point->append_stmt(
-        new Store(second_buf, second_indices, second_reduce, new IntImm(1)));
-  } else {
-    Stmt* body_stmt =
-        new Store(second_buf, second_indices, second_reduce, new IntImm(1));
+  Stmt* body_stmt =
+      new Store(second_buf, second_indices, second_reduce, new IntImm(1));
 
-    for (auto* il : output_loops) {
-      body_stmt = il->cloneWithNewBody(body_stmt);
-    }
-    if (insertion_point) {
-      insertion_point->append_stmt(body_stmt);
-    } else {
-      if (output_contains_target) {
-        parent_block->insert_stmt_after(body_stmt, new_root_for);
-      } else {
-        new_root_for->body()->append_stmt(body_stmt);
-      }
-    }
+  for (auto* il : output_loops) {
+    body_stmt = il->cloneWithNewBody(body_stmt);
+  }
+  if (output_contains_target) {
+    parent_block->insert_stmt_after(body_stmt, new_root_for);
+  } else {
+    new_root_for->body()->append_stmt(body_stmt);
   }
 
   auto loop_bounds_info = inferBounds(root_stmt_);
@@ -2611,6 +2541,7 @@ void LoopNest::rfactor(
 
   std::vector<const Expr*> tmp_dims = getBoundExtents(bounds_it->second);
   tmp_buf->set_dims(tmp_dims);
+  return true;
 }
 
 } // namespace tensorexpr

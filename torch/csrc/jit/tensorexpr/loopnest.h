@@ -34,7 +34,7 @@ class TORCH_API LoopNest {
 
   // A constructor for building a LoopNest from an Stmt and a list of output
   // buffers.
-  LoopNest(Stmt* stmt, std::unordered_set<const Buf*> output_bufs);
+  LoopNest(Stmt* stmt, const std::unordered_set<const Buf*>& output_bufs);
 
   // A constructor for building a LoopNest from another loopnest. It clones the
   // other loopnest's stmt.
@@ -49,7 +49,6 @@ class TORCH_API LoopNest {
   std::vector<For*> getLoopStmtsFor(Stmt*) const;
   Stmt* getLoopBodyFor(Tensor*) const;
   Stmt* getLoopBodyFor(const Buf*) const;
-  bool hasLoopBodyFor(Tensor*) const;
 
   // Returns the For stmt that is immediately enclosing the given stmt.
   static For* getParentLoop(const Stmt* st);
@@ -234,10 +233,8 @@ class TORCH_API LoopNest {
   // the temporary buffer used in the computation.
   void computeAt(Stmt* s, For* at);
 
-  void rfactor(
-      const Expr* f,
-      const Var* reduction_var,
-      Block* insertion_point = nullptr /* optional */);
+  bool rfactor(Stmt* s, For* target_for);
+  bool rfactor(Stmt* s, For* target_for, Buf** tmp_buf_ptr);
 
   void setBufferMap(
       For* f,
