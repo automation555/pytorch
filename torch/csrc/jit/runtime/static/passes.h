@@ -3,12 +3,10 @@
 namespace torch {
 namespace jit {
 
-TORCH_API void FuseInferenceOpsForSparseNN(
-    std::shared_ptr<torch::jit::Graph>& graph);
-TORCH_API void FuseSigridTransformsListUnpack(
-    std::shared_ptr<torch::jit::Graph>& graph);
+void FuseInferenceOpsForSparseNN(std::shared_ptr<torch::jit::Graph>& graph);
+void FuseSigridTransformsListUnpack(std::shared_ptr<torch::jit::Graph>& graph);
 
-TORCH_API void ReplaceWithCopy(std::shared_ptr<torch::jit::Graph>& graph);
+void ReplaceWithCopy(std::shared_ptr<torch::jit::Graph>& graph);
 
 TORCH_API bool HasInplaceOp(
     std::shared_ptr<Graph>& graph,

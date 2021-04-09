@@ -245,7 +245,9 @@ class LLVMCodeGenImpl : public IRVisitor {
   void visit(const Store* v) override;
   void visit(const Broadcast* v) override;
   void visit(const IfThenElse* v) override;
+  void visit(const BaseCallNode* v) override;
   void visit(const Intrinsics* v) override;
+  void visit(const FunctionCall* v) override;
   void visit(const Allocate* v) override;
   void visit(const Free* v) override;
   void visit(const Let* v) override;
@@ -316,7 +318,6 @@ static void* argToPtr(
 #define TYPE_CASE(_1, Name) \
   case ScalarType::Name:    \
     return callArg.Name##Ptr();
-    break;
 
     AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, TYPE_CASE);
 #undef TYPE_CASE
@@ -325,6 +326,11 @@ static void* argToPtr(
       throw unsupported_dtype();
   }
   return nullptr;
+}
+
+void LLVMCodeGen::call_raw(const std::vector<void*>& args) {
+  value<float>(const_cast<void**>(args.data()));
+  USE_TRIGGER(llvm_codegen_executed);
 }
 
 void LLVMCodeGen::call(const std::vector<CallArg>& args) {
@@ -1540,6 +1546,10 @@ void LLVMCodeGenImpl::visit(const IfThenElse* v) {
   value_ = phi;
 }
 
+void LLVMCodeGenImpl::visit(const BaseCallNode* v) {
+  throw unimplemented_lowering(v);
+}
+
 static void applyMathFunctionAttributes(llvm::Function* f) {
   f->addFnAttr(llvm::Attribute::ReadNone);
   f->addFnAttr(llvm::Attribute::NoUnwind);
@@ -1821,6 +1831,10 @@ void LLVMCodeGenImpl::visit(const Intrinsics* v) {
       value_ = irb_.CreateInsertElement(value_, val, i);
     }
   }
+}
+
+void LLVMCodeGenImpl::visit(const FunctionCall* v) {
+  throw unimplemented_lowering(v);
 }
 
 void LLVMCodeGenImpl::visit(const ExternalCall* v) {
