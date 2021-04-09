@@ -13,9 +13,9 @@
 #include <ATen/Utils.h>
 #include <ATen/WrapDimUtils.h>
 #include <ATen/WrapDimUtilsMulti.h>
+#include <ATen/core/grad_mode.h>
 #include <c10/core/TensorOptions.h>
 #include <c10/util/accumulate.h>
-#include <c10/util/irange.h>
 
 #include <ciso646>
 #include <algorithm>
@@ -354,8 +354,8 @@ Tensor mul_tensor_backward(Tensor grad, Tensor other, ScalarType self_st) {
   return handle_r_to_c(self_st, out);
 }
 
-Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st, const c10::optional<std::string>& rounding_mode) {
-  if (rounding_mode.has_value()) {
+Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st, c10::string_view rounding_mode) {
+  if (rounding_mode != "true") {
     return at::zeros_like(grad, grad.options().dtype(self_st));
   }
 
@@ -364,11 +364,11 @@ Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st, c
 }
 
 Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st) {
-  return div_tensor_self_backward(grad, other, self_st, c10::nullopt);
+  return div_tensor_self_backward(grad, other, self_st, "true");
 }
 
-Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other, const c10::optional<std::string>& rounding_mode) {
-  if (rounding_mode.has_value()) {
+Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other, c10::string_view rounding_mode) {
+  if (rounding_mode != "true") {
     return at::zeros_like(grad, grad.options().dtype(other.scalar_type()));
   }
 
@@ -377,7 +377,7 @@ Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other, const c
 }
 
 Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other) {
-  return div_tensor_other_backward(grad, self, other, c10::nullopt);
+  return div_tensor_other_backward(grad, self, other, "true");
 }
 
 Tensor permute_backwards(const Tensor & grad, IntArrayRef fwd_dims) {
@@ -598,7 +598,7 @@ Tensor unsqueeze_to(const Tensor & self, IntArrayRef sizes) {
   auto result = self;
 
   int64_t nDims = sizes.size();
-  for(const auto dim : c10::irange(nDims)) {
+  for (int64_t dim = 0; dim < nDims; dim++) {
     if (sizes[dim] == 1) {
       result = result.unsqueeze(dim);
     }
@@ -1791,7 +1791,7 @@ static inline bool _maybe_overlapping_memory(IntArrayRef sizes, IntArrayRef stri
 static inline int64_t _min_storage_size(IntArrayRef sizes, IntArrayRef strides, int64_t storage_offset) {
   int64_t storage_size = storage_offset + 1;
   int64_t dim = sizes.size();
-  for(const auto i : c10::irange(dim)) {
+  for (int64_t i = 0; i < dim; i++) {
     auto size_i = sizes[i];
     if (size_i == 0) {
       return storage_offset;
@@ -1970,8 +1970,7 @@ std::tuple<Tensor, Tensor, Tensor> prelu_double_backward(
       // so the expand succeeds.
       auto dims_to_unsqueeze = std::max<int64_t>(input.dim() - 2, 0);
       auto ggW_expanded = ggW;
-      for(const auto i : c10::irange(dims_to_unsqueeze)) {
-          (void)i; // Suppress unused variable warning
+      for (int64_t i = 0; i < dims_to_unsqueeze; i++) {
           ggW_expanded = ggW_expanded.unsqueeze(1);
       }
       ggW_expanded = ggW_expanded.expand_as(ggI);
@@ -1990,8 +1989,7 @@ std::tuple<Tensor, Tensor, Tensor> prelu_double_backward(
       if (gO.requires_grad()) {
           // expand weight as input as in ggW/ggI above
           auto weight_expanded = weight;
-          for(const auto i : c10::irange(dims_to_unsqueeze)) {
-              (void)i; // Suppress unused variable warning
+          for (int64_t i = 0; i < dims_to_unsqueeze; i++) {
               weight_expanded = weight_expanded.unsqueeze(1);
           }
           weight_expanded = weight_expanded.expand_as(input);
@@ -2037,9 +2035,10 @@ Tensor slice_backward_wrapper(
 // This makes no assumption on the signs of sigma.
 Tensor svd_backward(const std::vector<torch::autograd::Variable> &grads, const Tensor& self,
           bool some, bool compute_uv, const Tensor& raw_u, const Tensor& sigma, const Tensor& raw_v) {
+
   TORCH_CHECK(compute_uv,
-           "svd_backward: Setting compute_uv to false in torch.svd doesn't compute singular matrices, ",
-           "and hence we cannot compute backward. Please use torch.svd(compute_uv=True)");
+           "svd_backward: Setting compute_uv=False in torch.svd doesn't compute the singular vectors, ",
+           "and hence we cannot compute the backward. Please use torch.svd(compute_uv=True)");
 
   auto m = self.size(-2);
   auto n = self.size(-1);
@@ -2276,49 +2275,76 @@ Tensor eig_backward(const std::vector<torch::autograd::Variable> &grads, const T
   return at::linalg_solve(Uh, at::matmul(U_contrib, Uh) + D_contrib * Uh);
 }
 
-// http://eprints.maths.ox.ac.uk/1079/1/NA-08-01.pdf
-Tensor symeig_backward(const std::vector<torch::autograd::Variable> &grads, const Tensor& self,
-                    bool eigenvectors, bool upper, const Tensor& lambda, const Tensor& v) {
-  // This gradient is symmetric, and not triangular.
-  // symeig operates only on symmetric inputs, which is a subspace of
-  // R^{n x n}, and hence the derivative is not well-defined for off-diagonal
-  // elements. We resolve this by taking the gradient of the functionally independent
-  // elements of the matrix (i.e., the lower triangular portion of the input) and then
-  // reflect it on the upper triangular portion, thereby symmetrizing the gradient of
-  // the symeig operation. The motivation behind this choice is that symmetric gradient
-  // leads to stable gradient updates, and retains symmetry of the updated matrix if it
-  // were updated by a gradient based algorithm.
+// https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pdf
+Tensor eigh_backward(const std::vector<torch::autograd::Variable> &grads, const Tensor& self,
+                     bool eigenvectors, const Tensor& lambda, const Tensor& v) {
+  // This function is used for both torch.symeig and torch.linalg.eigh.
+  // eigh (and torch.symeig) operates only on symmetric (resp. Hermitian) inputs.
+  // This is a _linear_ subspace of R^{n x n} (resp. C^{n x n}),
+  // since A, B \in Sym(n) => A + B \in Sym(n)
+  // This means that, the tangent space to Sym(n) is Sym(n),
+  // so the gradient is symmetric (resp. Hermitian).
+  // For this reason, we disregard the `upper` flag in torch.symeig and the `UPLO` flag
+  // in torch.linalg.eigh, and we simply work with symmetric matrices.
+
+  // This check just can be triggered in the backwards of torch.symeig
   TORCH_CHECK(eigenvectors,
-           "symeig_backward: Setting eigenvectors to false in torch.symeig doesn't compute eigenvectors ",
-           "and hence we cannot compute backward. Please use torch.symeig(eigenvectors=True)");
+           "Setting eigenvectors=False in torch.symeig doesn't compute the eigenvectors, ",
+           "and hence we cannot compute the backward. Please use torch.symeig(eigenvectors=True)");
 
   auto glambda = grads[0];
   auto gv = grads[1];
 
   auto vh = v.conj().transpose(-2, -1);
 
-  Tensor result;
-  if (gv.defined()) {
-      Tensor F = lambda.unsqueeze(-2) - lambda.unsqueeze(-1);
-      F.diagonal(/*offset=*/0, /*dim1=*/-2, /*dim2=*/-1).fill_(INFINITY);
-      F.pow_(-1);
-      result = at::matmul(v, at::matmul(F * at::matmul(vh, gv), vh));
-  } else {
-      result = at::zeros_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+  if (glambda.defined()) {
+    // glambda is real even when the matrix is complex
+    glambda = glambda.to(self.dtype());
   }
 
-  if (glambda.defined()) {
-    glambda = glambda.to(self.dtype());
-    // computes v @ diag(glambda) @ vh
-    Tensor glambda_term = at::matmul(v * glambda.unsqueeze(-2), vh);
-    if (at::inplaceIsVmapCompatible(result, glambda_term)) {
-      result.add_(glambda_term);
+  Tensor result;
+  if (gv.defined()) {
+    // Computes v @ (diag(glambda) + F*(vh @ gv)) @ vh as per the source above
+    Tensor F = lambda.unsqueeze(-2) - lambda.unsqueeze(-1);
+
+    // We compute first the multiplication F*(vh @ gv) and then we zero-out the diagonal.
+    // Otherwise, if vh @ gh has NaNs on the diagonal, these would be propagated to the result
+    // as NaN * 0 = NaN.
+    // We can do this optimization only when we are not in gradgrad mode
+    if (!at::GradMode::is_enabled()) {
+      F.pow_(-1);
+      result = F * at::matmul(vh, gv);
+      if (glambda.defined()) {
+        result.diagonal(/*offset=*/0, /*dim1=*/-2, /*dim2=*/-1).copy_(glambda);
+      }
+      else {
+        result.diagonal(/*offset=*/0, /*dim1=*/-2, /*dim2=*/-1).zero_();
+      }
     } else {
-      result = result + glambda_term;
+      F.diagonal(/*offset=*/0, /*dim1=*/-2, /*dim2=*/-1).fill_(INFINITY);
+      F.pow_(-1);
+      result = F * at::matmul(vh, gv);
+      if (glambda.defined()) {
+        result.diagonal(/*offset=*/0, /*dim1=*/-2, /*dim2=*/-1).copy_(glambda);
+      }
+    }
+
+    result = at::matmul(v, at::matmul(result, vh));
+  }
+  else {
+    if (glambda.defined()) {
+      // If we just glambda is defined, one matmul suffices
+      result = at::matmul(v * glambda.unsqueeze(-2), vh);
+    } else {
+      // If neither is defined, there's nothing to do
+      return at::zeros_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
     }
   }
+  // The result here is alreaday symmetric (resp. Hermitian), but we project it onto the
+  // symmetric (resp. Hermitian) matrices to account for numerical errors
   return result.add(result.conj().transpose(-2, -1)).mul_(0.5);
 }
+
 
 Tensor linalg_qr_backward(const std::vector<torch::autograd::Variable> &grads, const Tensor& self,
                           std::string mode, const Tensor& q, const Tensor& r){
@@ -2438,8 +2464,8 @@ Tensor linalg_qr_backward(const std::vector<torch::autograd::Variable> &grads, c
 }
 
 // Invertible case is derived from Jacobi's formula, and also can be found at:
-// http://eprints.maths.ox.ac.uk/1079/1/NA-08-01.pdf
-Tensor linalg_det_backward(const Tensor & grad, const Tensor& self, const Tensor& det) {
+// https://people.maths.ox.ac.uk/gilesm/files/NA-08-01.pdf
+Tensor det_backward(const Tensor & grad, const Tensor& self, const Tensor& det) {
   auto singular_case_backward = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
     Tensor u, sigma, v;
     std::tie(u, sigma, v) = self.svd();
