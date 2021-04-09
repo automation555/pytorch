@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Adds docstrings to functions defined in the torch._C"""
 
 import re
@@ -1551,7 +1550,7 @@ Returns a new tensor with the ceil of the elements of :attr:`input`,
 the smallest integer greater than or equal to each element.
 
 .. math::
-    \text{out}_{i} = \left\lceil \text{input}_{i} \right\rceil
+    \text{out}_{i} = \left\lceil \text{input}_{i} \right\rceil = \left\lfloor \text{input}_{i} \right\rfloor + 1
 """ + r"""
 Args:
     {input}
@@ -2983,22 +2982,75 @@ add_docstr(torch.erf,
            r"""
 erf(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erf`.
-""")
+Computes the error function of each element. The error function is defined as follows:
+
+.. math::
+    \mathrm{erf}(x) = \frac{2}{\sqrt{\pi}} \int_{0}^{x} e^{-t^2} dt
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erf`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erf(torch.tensor([0, -1., 10.]))
+    tensor([ 0.0000, -0.8427,  1.0000])
+""".format(**common_args))
 
 add_docstr(torch.erfc,
            r"""
 erfc(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erfc`.
-""")
+Computes the complementary error function of each element of :attr:`input`.
+The complementary error function is defined as follows:
+
+.. math::
+    \mathrm{erfc}(x) = 1 - \frac{2}{\sqrt{\pi}} \int_{0}^{x} e^{-t^2} dt
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erfc`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erfc(torch.tensor([0, -1., 10.]))
+    tensor([ 1.0000, 1.8427,  0.0000])
+""".format(**common_args))
 
 add_docstr(torch.erfinv,
            r"""
 erfinv(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erfinv`.
-""")
+Computes the inverse error function of each element of :attr:`input`.
+The inverse error function is defined in the range :math:`(-1, 1)` as:
+
+.. math::
+    \mathrm{erfinv}(\mathrm{erf}(x)) = x
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erfinv`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erfinv(torch.tensor([0, 0.5, -1.]))
+    tensor([ 0.0000,  0.4769,    -inf])
+""".format(**common_args))
 
 add_docstr(torch.exp,
            r"""
@@ -3026,15 +3078,52 @@ add_docstr(torch.exp2,
            r"""
 exp2(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.exp2`.
-""")
+Computes the base two exponential function of :attr:`input`.
+
+.. math::
+    y_{i} = 2^{x_{i}}
+
+.. note:: Alias for :func:`torch.special.exp2`.
+""" + r"""
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.exp2(torch.tensor([0, math.log2(2.), 3, 4]))
+    tensor([ 1.,  2.,  8., 16.])
+""".format(**common_args))
 
 add_docstr(torch.expm1,
            r"""
 expm1(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.expm1`.
-""")
+Returns a new tensor with the exponential of the elements minus 1
+of :attr:`input`.
+
+.. math::
+    y_{i} = e^{x_{i}} - 1
+
+.. note:: This function provides greater precision than exp(x) - 1 for small values of x.
+
+.. note:: Alias for :func:`torch.special.expm1`.
+""" + r"""
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.expm1(torch.tensor([0, math.log(2.)]))
+    tensor([ 0.,  1.])
+""".format(**common_args))
 
 add_docstr(torch.eye,
            r"""
@@ -4489,6 +4578,41 @@ Example::
 
     >>> torch.log2(a)
     tensor([-0.2483, -0.3213, -0.0042, -0.9196, -4.3504])
+
+""".format(**common_args))
+
+add_docstr(torch.log_matmul,
+           r"""
+log_matmul(input, other, *, out=None) -> Tensor
+
+Matrix product of two tensors in log space, i.e.
+`log(matmul(input.exp(), other.exp()))`, but with stable computation like `torch.logsumexp`.
+
+The last two dimensions are the matrix
+multiplication dimensions (so inputs of shape :math:`n \times k` and
+:math:`k \times m` give an output of shape :math:`n \times m`. Additional dimensions follow the usual broadcasting rules.
+
+This is compatible with `torch.matmul` conventions except that 1-dimensional inputs are not allowed.
+
+Arguments:
+    input (Tensor): the first tensor to be multiplied
+    other (Tensor): the second tensor to be multiplied
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> # batched matrix x batched matrix
+    >>> tensor1 = torch.randn(10, 3, 4)
+    >>> tensor2 = torch.randn(10, 4, 5)
+    >>> torch.log_matmul(tensor1, tensor2).size()
+    torch.Size([10, 3, 5])
+    >>> # batched matrix x broadcasted matrix
+    >>> tensor1 = torch.randn(10, 3, 4)
+    >>> tensor2 = torch.randn(4, 5)
+    >>> torch.log_matmul(tensor1, tensor2).size()
+    torch.Size([10, 3, 5])
 
 """.format(**common_args))
 
@@ -7588,15 +7712,58 @@ Sets the number of threads used for interop parallelism
 add_docstr(torch.sigmoid, r"""
 sigmoid(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.expit`.
-""")
+Returns a new tensor with the sigmoid of the elements of :attr:`input`.
+
+.. math::
+    \text{out}_{i} = \frac{1}{1 + e^{-\text{input}_{i}}}
+""" + r"""
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> a = torch.randn(4)
+    >>> a
+    tensor([ 0.9213,  1.0887, -0.8858, -1.7683])
+    >>> torch.sigmoid(a)
+    tensor([ 0.7153,  0.7481,  0.2920,  0.1458])
+""".format(**common_args))
 
 add_docstr(torch.logit,
            r"""
 logit(input, eps=None, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.logit`.
-""")
+Returns a new tensor with the logit of the elements of :attr:`input`.
+:attr:`input` is clamped to [eps, 1 - eps] when eps is not None.
+When eps is None and :attr:`input` < 0 or :attr:`input` > 1, the function will yields NaN.
+
+.. math::
+    y_{i} = \ln(\frac{z_{i}}{1 - z_{i}}) \\
+    z_{i} = \begin{cases}
+        x_{i} & \text{if eps is None} \\
+        \text{eps} & \text{if } x_{i} < \text{eps} \\
+        x_{i} & \text{if } \text{eps} \leq x_{i} \leq 1 - \text{eps} \\
+        1 - \text{eps} & \text{if } x_{i} > 1 - \text{eps}
+    \end{cases}
+""" + r"""
+Args:
+    {input}
+    eps (float, optional): the epsilon for input clamp bound. Default: ``None``
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> a = torch.rand(5)
+    >>> a
+    tensor([0.2796, 0.9331, 0.6486, 0.1523, 0.6516])
+    >>> torch.logit(a, eps=1e-6)
+    tensor([-0.9466,  2.6352,  0.6131, -1.7169,  0.6261])
+""".format(**common_args))
 
 add_docstr(torch.sign,
            r"""

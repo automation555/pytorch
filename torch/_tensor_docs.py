@@ -614,19 +614,22 @@ See :func:`torch.bernoulli`
 
 add_docstr_all('bernoulli_',
                r"""
-bernoulli_(p=0.5, *, generator=None) -> Tensor
+.. function:: bernoulli_(p=0.5, *, generator=None) -> Tensor
 
-Fills each location of :attr:`self` with an independent sample from
-:math:`\text{Bernoulli}(\texttt{p})`. :attr:`self` can have integral
-``dtype``.
+    Fills each location of :attr:`self` with an independent sample from
+    :math:`\text{Bernoulli}(\texttt{p})`. :attr:`self` can have integral
+    ``dtype``.
 
-:attr:`p` should either be a scalar or tensor containing probabilities to be
-used for drawing the binary random number.
+.. function:: bernoulli_(p_tensor, *, generator=None) -> Tensor
 
-If it is a tensor, the :math:`\text{i}^{th}` element of :attr:`self` tensor
-will be set to a value sampled from
-:math:`\text{Bernoulli}(\texttt{p\_tensor[i]})`. In this case `p` must have
-floating point ``dtype``.
+    :attr:`p_tensor` should be a tensor containing probabilities to be used for
+    drawing the binary random number.
+
+    The :math:`\text{i}^{th}` element of :attr:`self` tensor will be set to a
+    value sampled from :math:`\text{Bernoulli}(\texttt{p\_tensor[i]})`.
+
+    :attr:`self` can have integral ``dtype``, but :attr:`p_tensor` must have
+    floating point ``dtype``.
 
 See also :meth:`~Tensor.bernoulli` and :func:`torch.bernoulli`
 """)
@@ -2147,6 +2150,13 @@ add_docstr_all('log2_',
 log2_() -> Tensor
 
 In-place version of :meth:`~Tensor.log2`
+""")
+
+add_docstr_all('log_matmul',
+               r"""
+log_matmul(tensor2) -> Tensor
+
+See :func:`torch.log_matmul`
 """)
 
 add_docstr_all('logaddexp',
