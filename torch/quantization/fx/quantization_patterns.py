@@ -137,10 +137,9 @@ class BinaryOpQuantizeHandler(QuantizeHandler):
         # determine how many of the first two args are Tensors (versus scalars)
         # this distinguishes things like "x + y" from "x + 2" or "2 + x"
         self.num_tensor_args = 0
-        cache_for_no_tensor_check: Dict[Node, bool] = dict()
         for arg_idx in range(len(self.binary_op_node.args)):
             arg = self.binary_op_node.args[arg_idx]
-            if isinstance(arg, Node) and (not all_node_args_have_no_tensors(arg, quantizer.modules, cache_for_no_tensor_check)):
+            if isinstance(arg, Node) and (not all_node_args_have_no_tensors(arg, quantizer.modules)):
                 self.num_tensor_args += 1
         self.all_node_args_are_tensors = \
             (self.num_tensor_args == len(self.binary_op_node.args))
@@ -191,10 +190,7 @@ class BinaryOpQuantizeHandler(QuantizeHandler):
             if self.num_tensor_args == 1:
                 # add/mul scalar
                 first_arg = self.binary_op_node.args[0]
-                cache_for_no_tensor_check: Dict[Node, bool] = dict()
-                if isinstance(first_arg, Node) and (
-                        not all_node_args_have_no_tensors(
-                            first_arg, quantizer.modules, cache_for_no_tensor_check)):
+                if isinstance(first_arg, Node) and (not all_node_args_have_no_tensors(first_arg, quantizer.modules)):
                     quantized_index = 0
                 else:
                     quantized_index = 1
@@ -241,19 +237,8 @@ class CatQuantizeHandler(QuantizeHandler):
                 convert_custom_config_dict: Dict[str, Any] = None) -> Node:
         if not self.all_node_args_are_tensors:
             return NotImplemented
-        cur_idx = quantizer.activation_post_process_indexes[node.name]
-        activation_post_process = \
-            quantizer.modules[quantizer.activation_post_process_map[node.name][cur_idx]]
         quantizer.activation_post_process_indexes[node.name] += 1
-        scale, zero_point = activation_post_process.calculate_qparams()
-        scale = float(scale)
-        zero_point = int(zero_point)
-
-        scale_arg, zero_point_arg = create_qparam_nodes(quantizer, node.name, scale, zero_point)
-
-        kwargs = {**load_arg(quantized=False)(node.kwargs), 'scale': scale_arg, 'zero_point': zero_point_arg}
-        return quantizer.quantized_graph.create_node(
-            'call_function', torch.ops.quantized.cat, load_arg(quantized=[0])(node.args), kwargs)
+        return quantizer.quantized_graph.node_copy(node, load_arg(quantized=True))
 
 # handle conv, maybe followed by relu
 # NB: matching order is reversed, that is we match from the bottom of this list to the beginning
