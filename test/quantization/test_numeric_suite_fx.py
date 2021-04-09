@@ -34,8 +34,10 @@ from torch.quantization._numeric_suite_fx import (
     extract_weights,
     _extract_weights_impl,
     add_loggers,
+    _add_loggers_impl,
     OutputLogger,
     add_shadow_loggers,
+    _add_shadow_loggers_impl,
     extract_logger_info,
     extract_shadow_logger_info,
 )
@@ -232,12 +234,8 @@ class TestFXGraphMatcher(QuantizationTestCase):
         }
         self.assert_types_for_matched_subgraph_pairs(results, expected_types, mp, mq)
 
-    @override_qengines
-    def test_nodes_with_equal_types_do_not_get_matched(self):
-        # verifies that by default, nodes with equivalent types do not get matched.
-        # This is important for user defined types, for which we do not know
-        # the weight extraction functions or input type. In the future, this can
-        # be made configurable.
+    @skipIfNoFBGEMM
+    def test_nodes_with_equal_types_get_matched(self):
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -264,13 +262,16 @@ class TestFXGraphMatcher(QuantizationTestCase):
         mq = convert_fx(mp_copy)
         results = get_matching_subgraph_pairs(mp, mq)
 
-        # Conv2 should not be matched because we disabled quantization for it,
-        # so its type is the same in mp and mq. sigmoid and relu should not be
-        # matched because they use the same function in mp and mq.
+        # all of these should be matched
         expected_types = {
-            'base_op_torch.nn.Conv2d_0':
+            'base_op_torch.nn.Conv2d_1':
                 ((nn.Conv2d, nn.Conv2d), (nnq.Conv2d, nnq.Conv2d)),
+            'base_op_torch.nn.Conv2d_0':
+                ((nn.Conv2d, nn.Conv2d), (nn.Conv2d, nn.Conv2d)),
             'base_op_torch.mul_0': ((torch.mul, torch.mul), (toq.mul, toq.mul)),
+            'base_op_torch.relu_0': ((F.relu, F.relu), (F.relu, F.relu)),
+            'base_op_torch.sigmoid_0':
+                ((torch.sigmoid, torch.sigmoid), (torch.sigmoid, torch.sigmoid)),
         }
         self.assert_types_for_matched_subgraph_pairs(results, expected_types, mp, mq)
 
@@ -323,7 +324,6 @@ class FXNumericSuiteQuantizationTestCase(QuantizationTestCase):
                 len(results) == results_len,
                 f"expected len {results_len}, got len {len(results)}")
             self.assert_ns_compare_dict_valid(results)
-            return results
 
     def _test_match_activations(
         self, m, data, prepared_expected_node_occurrence=None, results_len=0,
@@ -426,6 +426,12 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
                 # conv3d - relu
                 self.conv3d_1 = nn.Conv3d(1, 1, 1)
                 self.relu_2 = nn.ReLU()
+                # linear
+                self.linear_0 = nn.Linear(1, 1)
+                # linear - relu
+                self.linear_1 = nn.Linear(1, 1)
+                self.relu_3 = nn.ReLU()
+
 
             def forward(self, x):
                 x = self.conv1d_0(x)
@@ -439,13 +445,17 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
                 x = self.conv3d_0(x)
                 x = self.conv3d_1(x)
                 x = self.relu_2(x)
+                x = x.reshape(1, 1)
+                x = self.linear_0(x)
+                x = self.linear_1(x)
+                x = self.relu_3(x)
                 return x
 
         m = M().eval()
-        self._test_extract_weights(m, results_len=6)
+        self._test_extract_weights(m, results_len=8)
 
     @skipIfNoFBGEMM
-    def test_extract_weights_fun(self):
+    def test_extract_weights_linear_fun(self):
         class M(nn.Module):
             def __init__(self):
                 super().__init__()
@@ -461,6 +471,72 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
 
         m = M().eval()
         self._test_extract_weights(m, results_len=2)
+
+    @skipIfNoFBGEMM
+    def test_extract_weights_conv_fun(self):
+        class M(torch.nn.Module):
+            def __init__(self, weight1d, weight2d, weight3d, bias1d, bias2d, bias3d):
+                super().__init__()
+                self.weight1d = torch.nn.Parameter(weight1d)
+                self.weight2d = torch.nn.Parameter(weight2d)
+                self.weight3d = torch.nn.Parameter(weight3d)
+                self.bias1d = torch.nn.Parameter(bias1d)
+                self.bias2d = torch.nn.Parameter(bias2d)
+                self.bias3d = torch.nn.Parameter(bias3d)
+                self.stride1d = 1
+                self.padding1d = 0
+                self.dilation1d = 1
+                self.stride2d = (1, 1)
+                self.padding2d = (0, 0)
+                self.dilation2d = (1, 1)
+                self.groups = 1
+                self.stride3d = (1, 1, 1)
+                self.padding3d = (0, 0, 0)
+                self.dilation3d = (1, 1, 1)
+
+            def forward(self, x):
+                x = F.conv1d(
+                    x, self.weight1d, self.bias1d, self.stride1d, self.padding1d,
+                    self.dilation1d, self.groups)
+                x = F.conv1d(
+                    x, self.weight1d, self.bias1d, self.stride1d, self.padding1d,
+                    self.dilation1d, self.groups)
+                x = F.relu(x)
+                x = F.conv2d(
+                    x, self.weight2d, self.bias2d, self.stride2d, self.padding2d,
+                    self.dilation2d, self.groups)
+                x = F.conv2d(
+                    x, self.weight2d, self.bias2d, self.stride2d, self.padding2d,
+                    self.dilation2d, self.groups)
+                x = F.relu(x)
+                x = F.conv3d(
+                    x, self.weight3d, self.bias3d, self.stride3d, self.padding3d,
+                    self.dilation3d, self.groups)
+                x = F.conv3d(
+                    x, self.weight3d, self.bias3d, self.stride3d, self.padding3d,
+                    self.dilation3d, self.groups)
+                x = F.relu(x)
+                return x
+
+        w1d = torch.randn(1, 1, 1)
+        w2d = torch.randn(1, 1, 1, 1)
+        w3d = torch.randn(1, 1, 1, 1, 1)
+        b1d = torch.randn(1)
+        b2d = torch.randn(1)
+        b3d = torch.randn(1)
+        m = M(w1d, w2d, w3d, b1d, b2d, b3d).eval()
+        self._test_extract_weights(m, results_len=6)
+
+    @skipIfNoFBGEMM
+    def test_extract_weights_dynamic(self):
+        # TODO(future PR): add Linear-ReLU, after #55393 is fixed.
+        m = nn.Sequential(nn.Linear(1, 1)).eval()
+        qconfig_dict = {
+            'object_type': [
+                (nn.Linear, default_dynamic_qconfig),
+            ],
+        }
+        self._test_extract_weights(m, results_len=1, qconfig_dict=qconfig_dict)
 
     @skipIfNoFBGEMM
     def test_match_activations_mod(self):
@@ -510,7 +586,7 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
             nn.Conv2d(1, 1, 1),
             nn.Conv2d(1, 1, 1),
         ).eval()
-        self._test_match_shadow_activations(
+        res = self._test_match_shadow_activations(
             m, (torch.randn(1, 1, 4, 4),), results_len=2)
 
     @skipIfNoFBGEMM
@@ -532,7 +608,7 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
                 return x
 
         m = M().eval()
-        self._test_match_shadow_activations(
+        res = self._test_match_shadow_activations(
             m, (torch.randn(4, 4),), results_len=2)
 
     @skipIfNoFBGEMM
@@ -584,6 +660,27 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
             should_log_inputs=True)
 
     @skipIfNoFBGEMM
+    def test_ops_with_same_fp32_and_int8_signature(self):
+        """
+        Verifies that we can match pairs of ops which have the same aten
+        signature for fp32 and int8 tensors.
+        """
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.max_pool_2d = nn.MaxPool2d(2)
+
+            def forward(self, x):
+                x = self.max_pool_2d(x)
+                x = F.relu(x)
+                return x
+
+        m = M().eval()
+        self._test_match_activations(
+            m, (torch.randn(1, 1, 2, 2),),
+            results_len=2)
+
+    @skipIfNoFBGEMM
     def test_linear_fp16_weights(self):
         qconfig_dict = {'': torch.quantization.float16_static_qconfig}
         m = LinearReluFunctional().eval()
@@ -620,6 +717,75 @@ class TestFXNumericSuiteCoreAPIs(FXNumericSuiteQuantizationTestCase):
                 results_len=1,
                 qconfig_dict=qconfig_dict,
                 should_log_inputs=should_log_inputs)
+
+    @skipIfNoFBGEMM
+    def test_user_module(self):
+        """
+        For user defined modules,
+        1. weight extraction should not crash
+        2. unshadowed activations should have loggers, loggers will only log if
+             the output dtype is in the allowlist
+        3. shadowed activations should not have loggers
+             (since I/O dtype is unknown)
+        """
+        class UserModule(nn.Module):
+            def forward(self, x):
+                return x
+
+        class M(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(1, 1)
+                self.user_module = UserModule()
+
+            def forward(self, x):
+                x = self.linear(x)
+                x = self.user_module(x)
+                return x
+
+        m = M().eval()
+
+        # quantize without tracing through UserModule
+        qconfig_dict = {'': torch.quantization.default_qconfig}
+        prepare_custom_config_dict = {'non_traceable_module_name': ['user_module']}
+        mp = prepare_fx(m, qconfig_dict, prepare_custom_config_dict)
+        mp(torch.randn(1, 1, 1))
+        mq = convert_fx(copy.deepcopy(mp))
+
+        # weight extraction should not crash
+        weights = _extract_weights_impl('fp32_prepared', mp, 'int8', mq)
+
+        # unshadowed activations should have loggers
+
+        # add loggers, without retracing
+        # note: converting again because we cannot copy a quantized linear
+        mp_ns, mq_ns = _add_loggers_impl(
+            'fp32_prepared', copy.deepcopy(mp), 'int8',
+            convert_fx(copy.deepcopy(mp)), OutputLogger,
+            should_log_inputs=True)
+        # both fp32 and int8 models should have 4 loggers each, 2 for I/O
+        # of linear, and 2 for I/O of user_module
+        unshadowed_expected_occurrence = {
+            ns.call_module(OutputLogger): 4,
+        }
+        self.checkGraphModuleNodes(
+            mp_ns, expected_node_occurrence=unshadowed_expected_occurrence)
+        self.checkGraphModuleNodes(
+            mq_ns, expected_node_occurrence=unshadowed_expected_occurrence)
+
+        # shadowed activations should only have loggers for nodes where
+        # the types are known and we can do a dtype cast
+
+        # add shadow loggers, without retracing
+        mp_shadows_mq_ns = _add_shadow_loggers_impl(
+            'fp32_prepared', mp, 'int8', mq, OutputLogger,
+            should_log_inputs=True)
+        # 2 loggers for I/O of linear, 0 loggers for I/O of user_module
+        shadowed_expected_occurrence = {
+            ns.call_module(OutputLogger): 2,
+        }
+        self.checkGraphModuleNodes(
+            mp_shadows_mq_ns, expected_node_occurrence=unshadowed_expected_occurrence)
 
 
 class TestFXNumericSuiteCoreAPIsModels(FXNumericSuiteQuantizationTestCase):
@@ -742,7 +908,7 @@ class TestFXNumericSuiteCoreAPIsModels(FXNumericSuiteQuantizationTestCase):
             x = torch.randn(2, 4)
             self._test_match_activations(
                 sparse_nn, (idx, offsets, x),
-                results_len=4,
+                results_len=5,
                 should_log_inputs=should_log_inputs)
 
     @skipIfNoFBGEMM
@@ -752,7 +918,7 @@ class TestFXNumericSuiteCoreAPIsModels(FXNumericSuiteQuantizationTestCase):
             idx = torch.LongTensor([1, 2, 4, 5, 4, 3, 2, 9])
             offsets = torch.LongTensor([0, 4])
             x = torch.randn(2, 4)
-            self._test_match_activations(
+            self._test_match_shadow_activations(
                 sparse_nn, (idx, offsets, x),
                 results_len=4,
                 should_log_inputs=should_log_inputs)
