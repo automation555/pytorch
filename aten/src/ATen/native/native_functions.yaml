@@ -488,15 +488,15 @@
 
 - func: acosh(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: acosh.out
+  dispatch:
+    CPU, CUDA: acosh
 
 - func: acosh_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: acosh.out
+  dispatch:
+    CompositeExplicitAutograd: acosh_
 
 - func: acosh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: acosh_out
 
@@ -1049,29 +1049,29 @@
 
 - func: cos(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: cos.out
+  dispatch:
+    CPU, CUDA: cos
 
 - func: cos_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: cos.out
+  dispatch:
+    CompositeExplicitAutograd: cos_
 
 - func: cos.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: cos_out
 
 - func: cosh(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: cosh.out
+  dispatch:
+    CPU, CUDA: cosh
 
 - func: cosh_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: cosh.out
+  dispatch:
+    CompositeExplicitAutograd: cosh_
 
 - func: cosh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: cosh_out
 
@@ -3201,16 +3201,16 @@
     CPU, CUDA: sinc_out
 
 - func: sinh(Tensor self) -> Tensor
-  structured_delegate: sinh.out
   variants: function, method
+  dispatch:
+    CPU, CUDA: sinh
 
 - func: sinh_(Tensor(a!) self) -> Tensor(a!)
-  structured_delegate: sinh.out
   variants: function, method
+  dispatch:
+    CompositeExplicitAutograd: sinh_
 
 - func: sinh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: sinh_out
 
@@ -6067,25 +6067,25 @@
 - func: sort.values(Tensor self, int dim=-1, bool descending=False, *, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
   dispatch:
     CPU: sort_out_cpu
-    CUDA: sort_out_cuda
+    CUDA: legacy::cuda::_th_sort_out
 
 - func: sort.values_stable(Tensor self, *, bool? stable, int dim=-1, bool descending=False, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
   dispatch:
     CPU: sort_out_cpu_stable
-    CUDA: sort_out_stable_cuda
+    CUDA: legacy::cuda::_th_sort_out_stable
 
 - func: sort(Tensor self, int dim=-1, bool descending=False) -> (Tensor values, Tensor indices)
   variants: method, function
   dispatch:
     CPU: sort_cpu
-    CUDA: sort_cuda
+    CUDA: legacy::cuda::_th_sort
     QuantizedCPU: sort_quantized_cpu
 
 - func: sort.stable(Tensor self, *, bool? stable, int dim=-1, bool descending=False) -> (Tensor values, Tensor indices)
   variants: method, function
   dispatch:
     CPU: sort_cpu_stable
-    CUDA: sort_stable_cuda
+    CUDA: legacy::cuda::_th_sort_stable
     QuantizedCPU: sort_quantized_cpu_stable
 
 - func: sort.dimname_values(Tensor self, Dimname dim, bool descending=False, *, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
@@ -6112,12 +6112,13 @@
 - func: topk.values(Tensor self, int k, int dim=-1, bool largest=True, bool sorted=True, *, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
   dispatch:
     CPU: topk_out_cpu
-    CUDA: legacy::cuda::_th_topk_out
+    CUDA: topk_out_cuda
 
 - func: topk(Tensor self, int k, int dim=-1, bool largest=True, bool sorted=True) -> (Tensor values, Tensor indices)
   variants: method, function
   dispatch:
-    CPU, CUDA: topk
+    CPU: topk
+    CUDA: topk_cuda
     QuantizedCPU: topk_quantized_cpu
 
 - func: all(Tensor self) -> Tensor
@@ -7378,8 +7379,6 @@
 
 - func: adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
   python_module: nn
-
-- func: _adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
   dispatch:
     CPU: adaptive_avg_pool3d_cpu
     CUDA: adaptive_avg_pool3d_cuda
@@ -7391,7 +7390,7 @@
     CPU: adaptive_avg_pool3d_backward_out_cpu
     CUDA: adaptive_avg_pool3d_backward_out_cuda
 
-- func: _adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
+- func: adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
   python_module: nn
   dispatch:
     CPU: adaptive_avg_pool3d_backward_cpu
