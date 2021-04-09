@@ -1166,10 +1166,18 @@ class TestNN(NNTestCase):
         block.add_module('linear1', l1)
         block.add_module('linear2', l2)
         n = Net()
-        s = nn.Sequential(n, n, n, n)
+        s = nn.Sequential(n, n)
         self.assertEqual(list(s.named_modules()), [('', s), ('0', n), ('0.l1', l),
                                                    ('0.block', block), ('0.block.linear1', l1),
                                                    ('0.block.linear2', l2)])
+        # test the option to not remove duplicate module instances
+        self.assertEqual(list(s.named_modules(remove_duplicate=False)), [
+            ('', s), ('0', n), ('0.l1', l), ('0.l2', l),
+            ('0.block', block), ('0.block.linear1', l1),
+            ('0.block.linear2', l2),
+            ('1', n), ('1.l1', l), ('1.l2', l),
+            ('1.block', block), ('1.block.linear1', l1),
+            ('1.block.linear2', l2)])
 
     def test_register_buffer_raises_error_if_name_is_not_string(self):
         m = nn.Module()
@@ -2135,14 +2143,14 @@ class TestNN(NNTestCase):
         # Remove first parametrization.
         # Check that the model is still parametrized and so is the second parameter
         parametrize.remove_parametrizations(model, "weight", leave_parametrized=False)
-        self.assertTrue(parametrize.is_parametrized(model))             # Still parametrized
+        self.assertTrue(parametrize.is_parametrized(model))  # Still parametrized
         self.assertFalse(parametrize.is_parametrized(model, "weight"))  # Parametrization removed
-        self.assertTrue(parametrize.is_parametrized(model, "bias"))     # Still parametrized
-        self.assertEqual(model.bias[0].item(), 0.)                      # Still parametrized
-        self.assertEqual(model.bias[-1].item(), 0.)                     # Still parametrized
-        self.assertNotEqual(model.weight, initial_model.weight)         # Has been updated
-        self.assertEqual(id(model.weight), initial_weight_id)           # Keeps the same id
-        self.assertEqual(len(list(model.parameters())), 2)              # Nothing weird has happened
+        self.assertTrue(parametrize.is_parametrized(model, "bias"))  # Still parametrized
+        self.assertEqual(model.bias[0].item(), 0.)   # Still parametrized
+        self.assertEqual(model.bias[-1].item(), 0.)  # Still parametrized
+        self.assertNotEqual(model.weight, initial_model.weight)  # Has been updated
+        self.assertEqual(id(model.weight), initial_weight_id)  # Keeps the same id
+        self.assertEqual(len(list(model.parameters())), 2)  # Nothing weird has happened
         # Should not throw
         (model.weight.T @ model.bias).sum().backward()
         with torch.no_grad():
@@ -2152,30 +2160,19 @@ class TestNN(NNTestCase):
         # Remove the second parametrization.
         # Check that the module is not parametrized
         parametrize.remove_parametrizations(model, "bias", leave_parametrized=False)
-        self.assertFalse(parametrize.is_parametrized(model))  # Not parametrized
-        self.assertNotEqual(model.bias, initial_model.bias)   # Has been updated
-        self.assertNotEqual(model.bias[0].item(), 0.)         # Not parametrized
-        self.assertNotEqual(model.bias[-1].item(), 0.)        # Not parametrized
-        self.assertEqual(id(model.bias), initial_bias_id)     # Keeps the same id
-        self.assertFalse(hasattr(model, "parametrizations"))  # Not parametrized the module
-        self.assertEqual(model.__class__, nn.Linear)          # Resores the previous class
-        self.assertEqual(len(list(model.parameters())), 2)    # Nothing weird has happeed
+        self.assertFalse(parametrize.is_parametrized(model))  # Still parametrized
+        self.assertNotEqual(model.bias, initial_model.bias)  # Has been updated
+        self.assertNotEqual(model.bias[0].item(), 0.)   # Still parametrized
+        self.assertNotEqual(model.bias[-1].item(), 0.)  # Still parametrized
+        self.assertEqual(id(model.bias), initial_bias_id)
+        self.assertFalse(hasattr(model, "parametrizations"))
+        self.assertEqual(model.__class__, nn.Linear)
+        self.assertEqual(len(list(model.parameters())), 2)
         # Should not throw
         (model.weight.T @ model.bias).sum().backward()
         with torch.no_grad():
             for p in model.parameters():
                 p.add_(- p.grad, alpha=0.01)
-
-        # Test leave_parametrized=True
-        for _ in range(2):
-            parametrize.register_parametrization(model, "weight", Skew())
-            parametrize.register_parametrization(model, "weight", Orthogonal())
-            parametrize.remove_parametrizations(model, "weight", leave_parametrized=True)
-            # Should not throw
-            (model.weight.T @ model.bias).sum().backward()
-            with torch.no_grad():
-                for p in model.parameters():
-                    p.add_(- p.grad, alpha=0.01)
 
     def test_register_and_remove_buffer_parametrization(self):
         r"""Test that it is possible to add and remove parametrizations on buffers"""
@@ -12567,22 +12564,6 @@ class TestNNDeviceType(NNTestCase):
             helper((2, 3, 6, 6), mf)
 
     @onlyOnCPUAndCUDA
-    def test_adaptive_avg_pool3d_output_size_one(self, device):
-        x = torch.randn((2, 3, 6, 6, 6) , dtype=torch.float, device=device, requires_grad=True)
-
-        net = torch.nn.AdaptiveAvgPool3d(1)
-        out = net(x)
-        ref_out = x.contiguous().mean((-1, -2, -3)).view(out.shape)
-
-        out.sum().backward()    # make sure it doesn't crash
-
-        self.assertEqual(out, ref_out)
-        self.assertTrue(out.is_contiguous())
-        c = out.size(1)
-        self.assertEqual(out.stride(), [c, 1, 1, 1, 1])
-
-
-    @onlyOnCPUAndCUDA
     @dtypes(torch.uint8, torch.int8, torch.short, torch.int, torch.long)
     def test_adaptive_pooling_no_suppot_input(self, device, dtype):
         for numel in (2, 3):
@@ -15078,7 +15059,7 @@ class TestNNDeviceType(NNTestCase):
                 grads_before = [p.grad.clone() for p in parameters]
 
                 with self.assertRaisesRegex(RuntimeError, error_msg, msg=msg):
-                    clip_grad_norm_(parameters, 1, norm_type=norm_type, error_if_nonfinite=True)
+                    clip_grad_norm_(parameters, 1, norm_type=norm_type)
 
                 # Grad should not change if error is thrown
                 grads_after = [p.grad for p in parameters]
