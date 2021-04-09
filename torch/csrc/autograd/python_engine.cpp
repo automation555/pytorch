@@ -5,7 +5,6 @@
 #include <torch/csrc/autograd/edge.h>
 #include <torch/csrc/autograd/engine.h>
 #include <torch/csrc/autograd/function.h>
-#include <torch/csrc/autograd/functions/basic_ops.h>
 #include <torch/csrc/autograd/python_anomaly_mode.h>
 #include <torch/csrc/autograd/python_function.h>
 #include <torch/csrc/utils/pycfunction_helpers.h>
@@ -181,12 +180,12 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
     THPUtils_assert(THPVariable_Check(_tensor), "element %d of tensors "
         "tuple is not a Tensor", i);
     auto& variable = ((THPVariable*)_tensor)->cdata;
-    TORCH_CHECK(!isBatchedTensor(variable),
-        "torch.autograd.grad(outputs, inputs, grad_outputs) called inside ",
-        "torch.vmap. We do not support the case where any outputs are ",
-        "vmapped tensors (output ", i, " is being vmapped over). Please "
-        "call autograd.grad() outside torch.vmap or file a bug report "
-        "with your use case.")
+    // TORCH_CHECK(!isBatchedTensor(variable),
+    //     "torch.autograd.grad(outputs, inputs, grad_outputs) called inside ",
+    //     "torch.vmap. We do not support the case where any outputs are ",
+    //     "vmapped tensors (output ", i, " is being vmapped over). Please "
+    //     "call autograd.grad() outside torch.vmap or file a bug report "
+    //     "with your use case.")
     auto gradient_edge = torch::autograd::impl::gradient_edge(variable);
     THPUtils_assert(gradient_edge.function,
         "element %d of tensors does not require grad and does not have a grad_fn", i);
@@ -220,12 +219,12 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       THPUtils_assert(THPVariable_Check(input),
           "all inputs have to be Tensors, but got %s", THPUtils_typename(input));
       THPVariable *input_var = (THPVariable*)input;
-      TORCH_CHECK(!isBatchedTensor(input_var->cdata),
-          "torch.autograd.grad(outputs, inputs, grad_outputs) called inside ",
-          "torch.vmap. We do not support the case where any inputs are ",
-          "vmapped tensors (input ", i, " is being vmapped over). Please "
-          "call autograd.grad() outside torch.vmap or file a bug report "
-          "with your use case.")
+      // TORCH_CHECK(!isBatchedTensor(input_var->cdata),
+      //     "torch.autograd.grad(outputs, inputs, grad_outputs) called inside ",
+      //     "torch.vmap. We do not support the case where any inputs are ",
+      //     "vmapped tensors (input ", i, " is being vmapped over). Please "
+      //     "call autograd.grad() outside torch.vmap or file a bug report "
+      //     "with your use case.")
       const auto output_nr = input_var->cdata.output_nr();
       auto grad_fn = input_var->cdata.grad_fn();
       if (!grad_fn) {
@@ -238,12 +237,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       THPUtils_assert(input_var->cdata.requires_grad(),
           "One of the differentiated Tensors does not require grad");
       if (!grad_fn) {
-        // NOTE [ Autograd Unreachable Input ]
-        // Since input has no grad_accumulator, its guaranteed to be unreachable.
-        // We initialize an edge pointing to a non-nullptr Node so nodes in the graph
-        // (e.g., mul when an operand is scalar) that have edges pointing to nullptr
-        // don't get erroneously assigned `needed = True` in exec_info.
-        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+        output_edges.emplace_back();
       } else {
         output_edges.emplace_back(grad_fn, output_nr);
       }

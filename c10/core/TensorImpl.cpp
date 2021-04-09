@@ -4,7 +4,7 @@
 #include <c10/core/WrapDimMinimal.h>
 #include <c10/core/impl/LocalDispatchKeySet.h>
 #include <c10/util/Optional.h>
-#include <c10/core/InferenceMode.h>
+#include <c10/core/DynamicLayer.h>
 
 C10_DEFINE_bool(
     caffe2_keep_on_shrink,
@@ -30,8 +30,8 @@ const char * const TensorImpl::err_msg_tensor_metadata_change_not_allowed =
     "        x.set_(y)";
 
 at::Tensor& TensorImpl::mutable_grad() {
-  if (!autograd_meta_) autograd_meta_ = impl::GetAutogradMetaFactory()->make();
-  return autograd_meta_->mutable_grad();
+  if (!autograd_meta_accessor()) autograd_meta_accessor() = impl::GetAutogradMetaFactory()->make();
+  return autograd_meta_accessor()->mutable_grad();
 }
 
 const at::Tensor& TensorImpl::grad() const {
@@ -41,27 +41,26 @@ const at::Tensor& TensorImpl::grad() const {
   // is not so easy to fix right now because the mutable counterpart of
   // this function must keep working so that "x.grad() = ..." keeps working
   // (part of public API).
-  if (!autograd_meta_) return impl::GetAutogradMetaFactory()->undefined_tensor();
-  return autograd_meta_->grad();
+  if (!autograd_meta_accessor()) return impl::GetAutogradMetaFactory()->undefined_tensor();
+  return autograd_meta_accessor()->grad();
 }
 
-const at::Tensor& TensorImpl::_fw_grad(uint64_t level, const at::Tensor& self) const {
+const at::Tensor& TensorImpl::fw_grad(uint64_t level, const at::Tensor& self) const {
   // See TensorImpl::grad() above for explanation about the line below
-  if (!autograd_meta_) return impl::GetAutogradMetaFactory()->undefined_tensor();
-  return autograd_meta_->fw_grad(level, self);
+  if (!autograd_meta_accessor()) return impl::GetAutogradMetaFactory()->undefined_tensor();
+  return autograd_meta_accessor()->fw_grad(level, self);
 }
 
-void TensorImpl::_set_fw_grad(const at::Tensor& new_grad, const at::Tensor& self, uint64_t level, bool is_inplace_op) {
-  if (!autograd_meta_) autograd_meta_ = impl::GetAutogradMetaFactory()->make();
-  autograd_meta_->set_fw_grad(new_grad, self, level, is_inplace_op);
+void TensorImpl::set_fw_grad(const at::Tensor& new_grad, const at::Tensor& self, uint64_t level, bool is_inplace_op) {
+  if (!autograd_meta_accessor()) autograd_meta_accessor() = impl::GetAutogradMetaFactory()->make();
+  autograd_meta_accessor()->set_fw_grad(new_grad, self, level, is_inplace_op);
 }
 
 TensorImpl::TensorImpl(
     Storage&& storage,
     DispatchKeySet key_set,
     const caffe2::TypeMeta data_type)
-    // Use std::forward to suppress static analyzer false positive.
-    : TensorImpl(std::forward<Storage>(storage), key_set, data_type, storage.device()) {}
+    : TensorImpl(std::move(storage), key_set, data_type, storage.device()) {}
 
 TensorImpl::TensorImpl(DispatchKeySet key_set, const caffe2::TypeMeta data_type, c10::optional<c10::Device> device_opt)
     : TensorImpl({}, key_set, data_type, std::move(device_opt)) {}
@@ -85,15 +84,10 @@ TensorImpl::TensorImpl(Storage&& storage, DispatchKeySet key_set, const caffe2::
   // a backend DispatchKey and an AutogradBackend key.
   // We automatically add the corresponding autograd key to key_set_ so that backends can stay
   // in the old way of only registering with backend key like DispatchKey::CPU.
-  if (c10::InferenceMode::is_enabled()) {
-    // See Note [Expected TLS state in InferenceMode] for why we don't add Autograd & InplaceOrView keys.
-    key_set_ = key_set;
-  } else {
-    // TODO: Ideally we only add AutogradBackend key when the tensor requires grad.
-    //       See Note [Dream: skip VariableType kernel when requires_grad=false]
-    DispatchKey k = key_set.highestPriorityBackendTypeId();
-    key_set_ = key_set | getAutogradRelatedKeySetFromBackend(k);
-  }
+  // TODO: Ideally this logic fits best in Variable/Autograd layer so that we only
+  // add AutogradBackend key when the tensor requires grad.
+  DispatchKey k = key_set.highestPriorityBackendTypeId();
+  key_set_ = key_set.add(getAutogradKeyFromBackend(k));
 
   // we would also like to check that non-cpu devices have an index, but some Caffe2 operators create
   // Storages with default devices.
@@ -107,29 +101,6 @@ IntArrayRef TensorImpl::sizes() const {
 
 IntArrayRef TensorImpl::strides() const {
   return sizes_and_strides_.strides_arrayref();
-}
-
-void TensorImpl::HandleResize() {
-  // If needed, we will free the data. the next mutable_data() call
-  // will create the data storage.
-  bool reset_tensor = false;
-  if (reserved_) {
-    // If tensor is reserved then don't claim its memeory unless nbytes()
-    // is smaller than new size
-    reset_tensor = storage_.nbytes() <
-      (storage_offset_ + numel_) * data_type_.itemsize();
-  } else {
-    reset_tensor = storage_.nbytes() <
-      (storage_offset_ + numel_) * data_type_.itemsize() ||
-      !FLAGS_caffe2_keep_on_shrink ||
-      storage_.nbytes() -
-      (storage_offset_ + numel_) * data_type_.itemsize() >
-      static_cast<size_t>(FLAGS_caffe2_max_keep_on_shrink_memory);
-  }
-
-  if (reset_tensor && storage_initialized()) {
-    FreeMemory();
-  }
 }
 
 bool TensorImpl::compute_contiguous() const {
@@ -244,7 +215,7 @@ bool TensorImpl::compute_non_overlapping_and_dense() const {
 }
 
 void TensorImpl::release_resources() {
-  autograd_meta_.reset();
+  autograd_meta_accessor().reset();
   if (storage_) {
     storage_ = {};
   }
@@ -266,32 +237,25 @@ int64_t TensorImpl::stride(int64_t d) const {
   return sizes_and_strides_.stride_at_unchecked(d);
 }
 
-#ifndef C10_DISABLE_TENSORIMPL_EXTENSIBILITY
 bool TensorImpl::has_storage() const {
   return storage_;
 }
+
+bool TensorImpl::is_contiguous(at::MemoryFormat memory_format) const {
+#ifdef DEBUG
+  AT_ASSERT(compute_contiguous() == is_contiguous_);
 #endif
-
-void TensorImpl::throw_storage_access_error() const {
-  TORCH_CHECK_NOT_IMPLEMENTED(false, "Cannot access storage of ", tensorimpl_type_name());
-}
-
-bool TensorImpl::is_contiguous_nondefault_policy_impl(at::MemoryFormat memory_format) const {
-  if (has_contiguity_ == static_cast<uint8_t>(HasContiguityPolicy::ContiguityNotSupported)) {
-    TORCH_CHECK_NOT_IMPLEMENTED(
-        false, "Tensors of type ", tensorimpl_type_name(),
-        " do not have is_contiguous");
-  } else {
-    TORCH_INTERNAL_ASSERT_DEBUG_ONLY(has_contiguity_ == static_cast<uint8_t>(HasContiguityPolicy::CustomBehavior));
-    return is_contiguous_custom(memory_format);
+  if (memory_format == at::MemoryFormat::ChannelsLast) {
+      return is_channels_last_contiguous_;
   }
+  else if (memory_format == at::MemoryFormat::ChannelsLast3d) {
+      return is_channels_last_3d_contiguous_;
+  }
+  return is_contiguous_;
 }
 
-bool TensorImpl::is_contiguous_custom(at::MemoryFormat memory_format) const {
-  TORCH_INTERNAL_ASSERT(
-      false,
-      "TensorImpl::is_contiguous_custom should never be called; did you "
-      "set_has_contiguity_policy and forget to override is_contiguous_custom?");
+const Storage& TensorImpl::storage() const {
+  return storage_;
 }
 
 static void deletePlacementDeleteContext(void* ptr) {
@@ -313,8 +277,8 @@ at::DataPtr PlacementDeleteContext::makeDataPtr(
 AutogradMetaInterface::~AutogradMetaInterface() {}
 
 void TensorImpl::set_requires_grad(bool requires_grad) {
-  if (!requires_grad && !autograd_meta_) return;
-  if (!autograd_meta_) autograd_meta_ = impl::GetAutogradMetaFactory()->make();
+  if (!requires_grad && !autograd_meta_accessor()) return;
+  if (!autograd_meta_accessor()) autograd_meta_accessor() = impl::GetAutogradMetaFactory()->make();
   // NB: In principle, setting requires_grad to false could result in
   // the AutogradMeta becoming equal to a default constructed state,
   // in which case we could apply the nullptr AutogradMeta optimization
@@ -324,23 +288,57 @@ void TensorImpl::set_requires_grad(bool requires_grad) {
   // information content in the other fields; for example, we may
   // have set the string name for a Variable, or there may be hooks
   // registered for it.
-  autograd_meta_->set_requires_grad(requires_grad, this);
+  autograd_meta_accessor()->set_requires_grad(requires_grad, this);
+}
+
+std::unique_ptr<c10::AutogradMetaInterface> kConstNullPtr;
+
+const std::unique_ptr<c10::AutogradMetaInterface>& TensorImpl::autograd_meta_accessor() const {
+  auto maybe_current_dynamic_layer = at::maybeCurrentDynamicLayer();
+  if (!maybe_current_dynamic_layer) {
+    return autograd_meta_; 
+  }
+  auto layer_id = maybe_current_dynamic_layer->layerId();
+  if (dynlayer_autograd_meta_.find(layer_id) != dynlayer_autograd_meta_.end()) {
+    const auto& result = *dynlayer_autograd_meta_.at(layer_id).get();
+    return result;
+  }
+  // Not sure how to get const correctness to work here
+  return kConstNullPtr;
+}
+
+std::unique_ptr<c10::AutogradMetaInterface>& TensorImpl::autograd_meta_accessor() {
+  auto maybe_current_dynamic_layer = at::maybeCurrentDynamicLayer();
+  if (!maybe_current_dynamic_layer) {
+    return autograd_meta_; 
+  }
+  auto layer_id = maybe_current_dynamic_layer->layerId();
+  if (dynlayer_autograd_meta_.find(layer_id) != dynlayer_autograd_meta_.end()) {
+    return *dynlayer_autograd_meta_[layer_id].get();
+  }
+  dynlayer_autograd_meta_[layer_id] = std::make_shared<std::unique_ptr<c10::AutogradMetaInterface>>();
+  
+  std::lock_guard<std::mutex> guard(at::getGlobalDynmetaDataMutex());
+  std::weak_ptr<std::unique_ptr<c10::AutogradMetaInterface>> bar = dynlayer_autograd_meta_[layer_id];
+  at::getGlobalDynmetaData()[layer_id].push_back(bar);
+
+  return *dynlayer_autograd_meta_[layer_id].get();
 }
 
 bool TensorImpl::requires_grad() const {
-  if (!autograd_meta_) return false;
-  return autograd_meta_->requires_grad();
+  if (!autograd_meta_accessor()) return false;
+  return autograd_meta_accessor()->requires_grad();
 }
 
 void TensorImpl::set_autograd_meta(std::unique_ptr<c10::AutogradMetaInterface> autograd_meta) {
   // NB: autograd_meta may be null!  That just means it's the default
   // constructor
-  autograd_meta_ = std::move(autograd_meta);
+  autograd_meta_accessor() = std::move(autograd_meta);
 }
 
 c10::AutogradMetaInterface* TensorImpl::autograd_meta() const {
   // NB: Might return null!
-  return autograd_meta_.get();
+  return autograd_meta_accessor().get();
 }
 
 c10::intrusive_ptr<TensorImpl> TensorImpl::shallow_copy_and_detach(
@@ -354,6 +352,25 @@ c10::intrusive_ptr<TensorImpl> TensorImpl::shallow_copy_and_detach(
       /*dest_impl=*/impl.get(),
       /*version_counter=*/version_counter,
       /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
+
+  // "detach" = don't copy meta for the current dyn layer
+  const auto dynlayer = at::maybeCurrentDynamicLayer();
+  for (auto it = dynlayer_autograd_meta_.begin(); it != dynlayer_autograd_meta_.end(); it++) {
+    if (dynlayer && (dynlayer->layerId() > it->first) && *it->second.get()) {
+      impl.get()->dynlayer_autograd_meta_[it->first] = 
+        std::make_shared<std::unique_ptr<c10::AutogradMetaInterface>>(
+          (*it->second.get())->shallow_copy());
+
+      std::lock_guard<std::mutex> guard(at::getGlobalDynmetaDataMutex());
+      std::weak_ptr<std::unique_ptr<c10::AutogradMetaInterface>> bar = impl.get()->dynlayer_autograd_meta_[it->first];
+      at::getGlobalDynmetaData()[it->first].push_back(bar);
+
+    }
+  }
+  if (dynlayer && autograd_meta_) {
+    impl.get()->autograd_meta_ = autograd_meta_->shallow_copy();
+  }
+
   impl->refresh_numel();
   impl->refresh_contiguous();
   return impl;
@@ -370,6 +387,23 @@ c10::intrusive_ptr<TensorImpl> TensorImpl::shallow_copy_and_detach(
       /*dest_impl=*/impl.get(),
       /*version_counter=*/std::move(version_counter),
       /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
+
+  // "detach" = don't copy meta for the current dyn layer
+  const auto dynlayer = at::maybeCurrentDynamicLayer();
+  for (auto it = dynlayer_autograd_meta_.begin(); it != dynlayer_autograd_meta_.end(); it++) {
+    if (dynlayer && (dynlayer->layerId() > it->first) && *it->second.get()) {
+      impl.get()->dynlayer_autograd_meta_[it->first] = 
+        std::make_shared<std::unique_ptr<c10::AutogradMetaInterface>>(
+          (*it->second.get())->shallow_copy());
+      std::lock_guard<std::mutex> guard(at::getGlobalDynmetaDataMutex());
+      std::weak_ptr<std::unique_ptr<c10::AutogradMetaInterface>> bar = impl.get()->dynlayer_autograd_meta_[it->first];
+      at::getGlobalDynmetaData()[it->first].push_back(bar);
+    }
+  }
+  if (dynlayer && autograd_meta_) {
+    impl.get()->autograd_meta_ = autograd_meta_->shallow_copy();
+  }
+
   impl->refresh_numel();
   impl->refresh_contiguous();
   return impl;
@@ -379,6 +413,10 @@ void TensorImpl::copy_tensor_metadata_except_version_counter(
     const TensorImpl* src_impl,
     TensorImpl* dest_impl,
     bool allow_tensor_metadata_change) {
+  // [NEW!]
+  // dest_impl->autograd_meta_ = src_impl->autograd_meta_;
+  // dest_impl->dynlayer_autograd_meta_ = src_impl->dynlayer_autograd_meta_;
+
   dest_impl->storage_ = src_impl->storage_;
   dest_impl->sizes_and_strides_ = src_impl->sizes_and_strides_;
   dest_impl->storage_offset_ = src_impl->storage_offset_;
@@ -386,7 +424,6 @@ void TensorImpl::copy_tensor_metadata_except_version_counter(
   dest_impl->device_opt_ = src_impl->device_opt_;
   dest_impl->key_set_ = src_impl->key_set_;
   dest_impl->is_contiguous_ = src_impl->is_contiguous_;
-  dest_impl->has_contiguity_ = src_impl->has_contiguity_;
   dest_impl->is_channels_last_contiguous_ = src_impl->is_channels_last_contiguous_;
   dest_impl->is_channels_last_3d_contiguous_ = src_impl->is_channels_last_3d_contiguous_;
   dest_impl->is_channels_last_ = src_impl->is_channels_last_;
@@ -395,7 +432,6 @@ void TensorImpl::copy_tensor_metadata_except_version_counter(
   dest_impl->is_wrapped_number_ = src_impl->is_wrapped_number_;
   dest_impl->reserved_ = src_impl->reserved_;
   dest_impl->set_allow_tensor_metadata_change(allow_tensor_metadata_change);
-  dest_impl->storage_access_should_throw_ = src_impl->storage_access_should_throw_;
   if (src_impl->named_tensor_meta_ != nullptr) {
     dest_impl->named_tensor_meta_ = src_impl->named_tensor_meta_->clone();
   }

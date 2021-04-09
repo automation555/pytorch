@@ -5,6 +5,58 @@
 
 namespace at {
 
+/**
+ * Return a TensorImpl that is a shallow-copy of this TensorImpl.
+ *
+ * For usage of `version_counter` and `allow_tensor_metadata_change`,
+ * see NOTE [ TensorImpl Shallow-Copying ].
+ */
+c10::intrusive_ptr<TensorImpl> BatchedTensorImpl::shallow_copy_and_detach(
+    const c10::VariableVersion& version_counter,
+    bool allow_tensor_metadata_change) const {
+  Tensor v = value();
+  BatchDims b(bdims().begin(), bdims().end());
+  auto impl = c10::make_intrusive<BatchedTensorImpl>(v, b);
+  copy_tensor_metadata(
+    /*src_impl=*/this,
+    /*dest_impl=*/impl.get(),
+    /*version_counter=*/version_counter,
+    /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
+  impl->refresh_numel();
+  return impl;
+}
+
+/**
+ * Return a TensorImpl that is a shallow-copy of this TensorImpl.
+ *
+ * For usage of `version_counter` and `allow_tensor_metadata_change`,
+ * see NOTE [ TensorImpl Shallow-Copying ].
+ */
+c10::intrusive_ptr<TensorImpl> BatchedTensorImpl::shallow_copy_and_detach(
+    c10::VariableVersion&& version_counter,
+    bool allow_tensor_metadata_change) const {
+  Tensor v = value();
+  BatchDims b(bdims().begin(), bdims().end());
+  auto impl = c10::make_intrusive<BatchedTensorImpl>(v, b);
+  copy_tensor_metadata(
+    /*src_impl=*/this,
+    /*dest_impl=*/impl.get(),
+    /*version_counter=*/std::move(version_counter),
+    /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
+  impl->refresh_numel();
+  return impl;
+}
+
+/**
+ * Shallow-copies data from another TensorImpl into this TensorImpl.
+ *
+ * For why this function doesn't check this TensorImpl's `allow_tensor_metadata_change_`,
+ * see NOTE [ TensorImpl Shallow-Copying ].
+ */
+void BatchedTensorImpl::shallow_copy_from(const c10::intrusive_ptr<TensorImpl>& impl) {
+  TORCH_INTERNAL_ASSERT(false);
+}
+
 BatchedTensorImpl::BatchedTensorImpl(Tensor value, BatchDims bdims)
   : TensorImpl(
       c10::DispatchKeySet(DispatchKey::Batched),
@@ -15,10 +67,30 @@ BatchedTensorImpl::BatchedTensorImpl(Tensor value, BatchDims bdims)
   , bdims_(std::move(bdims))
 {
   TORCH_INTERNAL_ASSERT(value_.defined());
-  set_storage_access_should_throw();
-  set_has_contiguity_policy(HasContiguityPolicy::CustomBehavior);
   checkInvariants();
 
+  TORCH_INTERNAL_ASSERT(bdims_.size() == 1);
+
+  refreshSizesAndStrides();
+}
+
+BatchedTensorImpl::BatchedTensorImpl(DispatchKeySet key_set, Tensor value, BatchDims bdims)
+  : TensorImpl(
+      key_set.add(DispatchKey::Batched),
+      value.dtype(),
+      value.device()
+    )
+  , value_(std::move(value))
+  , bdims_(std::move(bdims))
+{
+  TORCH_INTERNAL_ASSERT(value_.defined());
+  checkInvariants();
+
+  TORCH_INTERNAL_ASSERT(bdims_.size() == 1);
+  refreshSizesAndStrides();
+}
+
+void BatchedTensorImpl::refreshSizesAndStrides() {
   const auto public_dims = value_.dim() - bdims_.size();
   const auto value_sizes = value_.sizes();
   const auto value_strides = value_.strides();
@@ -75,13 +147,20 @@ void BatchedTensorImpl::checkInvariants() const {
 }
 
 // The following are publically exposed as methods of Tensor
-bool BatchedTensorImpl::is_contiguous_custom(at::MemoryFormat memory_format) const {
+bool BatchedTensorImpl::is_contiguous(at::MemoryFormat memory_format) const {
   TORCH_CHECK(memory_format == MemoryFormat::Contiguous,
       "NYI: querying is_contiguous inside of vmap for memory_format ",
       "other than torch.contiguous_format");
   return is_contiguous_;
 }
 
+const Storage& BatchedTensorImpl::storage() const {
+  TORCH_CHECK(false, "Due to limitations, we cannot access the storage() of a tensor from inside of vmap.");
+}
+// int64_t BatchedTensorImpl::storage_offset() const {
+//   TORCH_CHECK(false, "Due to limitations, we cannot access the storage_offset() of a tensor from inside of vmap.");
+// }
+// 
 // The following are some internal inherited methods that we do not support.
 // They should never get called.
 void BatchedTensorImpl::set_size(int64_t dim, int64_t new_size) {
@@ -93,42 +172,50 @@ void BatchedTensorImpl::set_stride(int64_t dim, int64_t new_stride) {
 void BatchedTensorImpl::set_storage_offset(int64_t storage_offset) {
   TORCH_INTERNAL_ASSERT(false, "Can't set_storage_offset for BatchedTensorImpl");
 }
-#ifdef DEBUG
 bool BatchedTensorImpl::has_storage() const {
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!storage_, "BatchedTensorImpl assumes that storage_ is never set");
+  // TODO: what are the implications of this?
   return false;
-}
-#endif
-
-const char* BatchedTensorImpl::tensorimpl_type_name() const {
-  return "BatchedTensorImpl";
+  // TORCH_INTERNAL_ASSERT(false, "Can't query has_storage for BatchedTensorImpl");
 }
 
 Tensor makeBatched(const Tensor& tensor, BatchDims bdims) {
-  TORCH_INTERNAL_ASSERT(!isBatchedTensor(tensor));
-  auto tensor_dim = tensor.dim();
-  TORCH_CHECK(
-      tensor_dim <= kVmapMaxTensorDims,
-      "vmap only supports tensors of dimensionality up to ", kVmapMaxTensorDims,
-      "; got a tensor with dim ", tensor_dim);
-  TORCH_INTERNAL_ASSERT(
-      std::all_of(bdims.begin(), bdims.end(),
-          [](const BatchDim& bdim) { return bdim.level() < kVmapNumLevels; }),
-      "We only support up to ", kVmapNumLevels, " nested vmaps");
-  return at::detail::make_tensor<BatchedTensorImpl>(tensor, std::move(bdims));
+  TORCH_INTERNAL_ASSERT(bdims.size() == 1);
+
+  // NB: temporarily disable 
+  // TORCH_INTERNAL_ASSERT(!isBatchedTensor(tensor));
+  // auto tensor_dim = tensor.dim();
+  // TORCH_CHECK(
+  //     tensor_dim <= kVmapMaxTensorDims,
+  //     "vmap only supports tensors of dimensionality up to ", kVmapMaxTensorDims,
+  //     "; got a tensor with dim ", tensor_dim);
+  // TORCH_INTERNAL_ASSERT(
+  //     std::all_of(bdims.begin(), bdims.end(),
+  //         [](const BatchDim& bdim) { return bdim.level() < kVmapNumLevels; }),
+  //     "We only support up to ", kVmapNumLevels, " nested vmaps");
+  // propagate the CUDA key for the is_cuda check.
+  // TODO: probably need to propagate other backend keys as well...
+  DispatchKeySet key_set;
+  if (tensor.is_cuda()) {
+    key_set = key_set.add(DispatchKey::CUDA);
+  }
+  return at::detail::make_tensor<BatchedTensorImpl>(key_set, tensor, std::move(bdims));
 }
 
 Tensor addBatchDim(const Tensor& tensor, int64_t level, int64_t dim) {
-  const auto* batched = maybeGetBatchedImpl(tensor);
-  if (!batched) {
-    BatchDims bdims;
-    bdims.emplace_back(level, dim);
-    return at::detail::make_tensor<BatchedTensorImpl>(tensor, std::move(bdims));
-  }
-  BatchDims new_bdims(batched->bdims().begin(), batched->bdims().end());
-  auto actual_bdim = batched->actualDim(dim, /*wrap_dim=*/true);
-  new_bdims.emplace_back(level, actual_bdim);
-  return makeBatched(batched->value(), std::move(new_bdims));
+  BatchDims new_bdims = { { level, dim } };
+  TORCH_INTERNAL_ASSERT(new_bdims.size() == 1);
+  return makeBatched(tensor, std::move(new_bdims));
+
+  // const auto* batched = maybeGetBatchedImpl(tensor);
+  // if (!batched) {
+  //   BatchDims bdims;
+  //   bdims.emplace_back(level, dim);
+  //   return at::detail::make_tensor<BatchedTensorImpl>(tensor, std::move(bdims));
+  // }
+  // BatchDims new_bdims(batched->bdims().begin(), batched->bdims().end());
+  // auto actual_bdim = batched->actualDim(dim, /*wrap_dim=*/true);
+  // new_bdims.emplace_back(level, actual_bdim);
+  // return makeBatched(batched->value(), std::move(new_bdims));
 }
 
 bool inplaceIsVmapCompatible(const Tensor& self, const Tensor& other) {

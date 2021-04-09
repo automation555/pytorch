@@ -6,6 +6,10 @@ const char* toString(DispatchKey t) {
   switch (t) {
     case DispatchKey::Undefined:
       return "Undefined";
+    case DispatchKey::DynamicLayerFront:
+      return "DynamicLayerFront";
+    case DispatchKey::DynamicLayerBack:
+      return "DynamicLayerBack";
 
     case DispatchKey::CPU:
       return "CPU";
@@ -21,8 +25,6 @@ const char* toString(DispatchKey t) {
       return "MSNPU";
     case DispatchKey::XLA:
       return "XLA";
-    case DispatchKey::MLC:
-      return "MLC";
     case DispatchKey::Vulkan:
       return "Vulkan";
     case DispatchKey::Metal:
@@ -41,6 +43,11 @@ const char* toString(DispatchKey t) {
       return "QuantizedCUDA";
     case DispatchKey::QuantizedXPU:
       return "QuantizedXPU";
+
+    case DispatchKey::ComplexCPU:
+      return "ComplexCPU";
+    case DispatchKey::ComplexCUDA:
+      return "ComplexCUDA";
 
     case DispatchKey::CustomRNGKeyId:
       return "CustomRNGKeyId";
@@ -69,9 +76,6 @@ const char* toString(DispatchKey t) {
     case DispatchKey::Meta:
       return "Meta";
 
-    case DispatchKey::InplaceOrView:
-      return "InplaceOrView";
-
     case DispatchKey::Autograd:
       return "Autograd";
     case DispatchKey::AutogradCPU:
@@ -80,8 +84,6 @@ const char* toString(DispatchKey t) {
       return "AutogradCUDA";
     case DispatchKey::AutogradXLA:
       return "AutogradXLA";
-    case DispatchKey::AutogradMLC:
-      return "AutogradMLC";
     case DispatchKey::AutogradNestedTensor:
       return "AutogradNestedTensor";
     case DispatchKey::AutogradPrivateUse1:
@@ -109,11 +111,11 @@ const char* toString(DispatchKey t) {
     case DispatchKey::VmapMode:
       return "VmapMode";
 
-    case DispatchKey::CompositeImplicitAutograd:
-      return "CompositeImplicitAutograd";
+    case DispatchKey::Math:
+      return "Math";
 
-    case DispatchKey::CompositeExplicitAutograd:
-      return "CompositeExplicitAutograd";
+    case DispatchKey::DefaultBackend:
+      return "DefaultBackend";
 
     case DispatchKey::TESTING_ONLY_GenericWrapper:
       return "TESTING_ONLY_GenericWrapper";
@@ -145,8 +147,6 @@ DispatchKey getAutogradKeyFromBackend(DispatchKey t) {
       return DispatchKey::AutogradCUDA;
     case DispatchKey::XLA:
       return DispatchKey::AutogradXLA;
-    case DispatchKey::MLC:
-      return DispatchKey::AutogradMLC;
     case DispatchKey::NestedTensor:
       return DispatchKey::AutogradNestedTensor;
     case DispatchKey::PrivateUse1:

@@ -55,6 +55,7 @@ using BatchDimsRef = ArrayRef<BatchDim>;
 // dim 0, which is equivalent to dim 3 in the underlying ones(2, 3, 5, 7) tensor.
 struct TORCH_API BatchedTensorImpl : public c10::TensorImpl {
   explicit BatchedTensorImpl(Tensor value, BatchDims bdims);
+  explicit BatchedTensorImpl(at::DispatchKeySet key_set, Tensor value, BatchDims bdims);
 
   // Returns a reference to BatchDims that represent which dimensions of this
   // tensor are private.
@@ -73,18 +74,27 @@ struct TORCH_API BatchedTensorImpl : public c10::TensorImpl {
   int64_t actualDim(int64_t dim, bool wrap_dim = true) const;
 
   // Override a bunch of methods inherited from TensorImpl to return error messages.
-  bool is_contiguous_custom(at::MemoryFormat memory_format) const override;
+  bool is_contiguous(at::MemoryFormat memory_format=at::MemoryFormat::Contiguous) const override;
   void set_size(int64_t dim, int64_t new_size) override;
   void set_stride(int64_t dim, int64_t new_stride) override;
   void set_storage_offset(int64_t storage_offset) override;
-#ifdef DEBUG
   bool has_storage() const override;
-#endif
+  const Storage& storage() const override;
+  // int64_t storage_offset() const override;
+
+  c10::intrusive_ptr<TensorImpl> shallow_copy_and_detach(
+      const c10::VariableVersion& version_counter,
+      bool allow_tensor_metadata_change) const override;
+  c10::intrusive_ptr<TensorImpl> shallow_copy_and_detach(
+      c10::VariableVersion&& version_counter,
+      bool allow_tensor_metadata_change) const override;
+  void shallow_copy_from(const c10::intrusive_ptr<TensorImpl>& impl) override;
+
+  void refreshSizesAndStrides();
 
  private:
   // see NOTE: [BatchedTensorImpl levels invariant]
   void checkInvariants() const;
-  const char* tensorimpl_type_name() const override;
 
   Tensor value_;
 
