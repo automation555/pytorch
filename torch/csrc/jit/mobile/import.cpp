@@ -44,10 +44,14 @@
 //  ...)
 
 // In addition, the module debugging information can be saved
-// in mobile_debug.pkl. An example for it looks like:
+// in mobile_debug_handles.pkl. An example for it looks like:
 // (4,
 //  ('__torch__.m.forward',
-//   (('module_debug_info', (top(A).foo(B).forward)))))
+//   (('module_debug_handles', 10))))
+//   Here 10 is the debug handle.
+// We also store separately and optionally callstack_debug_map.
+// This serializes inlined callstack (InlinedCallStack dats structure)
+// corresponding to the debug handles.
 
 // Note that currently the backward compatibility is not supported by bytecode.
 // This format and process need to be revisited and redesigned if we want to
@@ -129,7 +133,7 @@ class BytecodeDeserializer final {
   TypePtr resolveTypeName(const c10::QualifiedName& qn);
   void parseMethods(
       const std::vector<IValue>& vals,
-      const c10::optional<std::vector<IValue>>& debug_info_vals,
+      const c10::optional<std::vector<IValue>>& debug_handles,
       mobile::CompilationUnit& mcu);
   c10::IValue readArchive(
       const std::string& archive_name,
@@ -206,7 +210,7 @@ TypePtr BytecodeDeserializer::resolveTypeName(const c10::QualifiedName& qn) {
 
 void BytecodeDeserializer::parseMethods(
     const std::vector<IValue>& vals,
-    const c10::optional<std::vector<IValue>>& debug_info_vals,
+    const c10::optional<std::vector<IValue>>& debug_handles,
     mobile::CompilationUnit& mcu) {
   TORCH_CHECK(vals.size() > 0, "Bytecode has no elements. ");
   // Initialized with the version number when kProducedBytecodeVersion was
@@ -229,10 +233,10 @@ void BytecodeDeserializer::parseMethods(
       "But the model version is ",
       model_version);
 
-  bool has_debug_info = debug_info_vals.has_value();
-  if (has_debug_info) {
+  bool has_debug_handles = debug_handles.has_value();
+  if (has_debug_handles) {
     TORCH_CHECK(
-        debug_info_vals->size() == vals.size(),
+        debug_handles->size() == vals.size(),
         "The numbers of bytecode values and debug info values do not match.");
   }
 
@@ -270,28 +274,30 @@ void BytecodeDeserializer::parseMethods(
         expect_field(codeTable, "register_size", BYTECODE_INDEX_REGISTER_SIZE)
             .toInt();
 
-    std::vector<IValue> module_debug_info_list;
-    if (has_debug_info) {
-      const auto& debug_info_element = (*debug_info_vals)[i];
-      const auto& debug_info_m_tuple = debug_info_element.toTuple()->elements();
+    std::vector<IValue> debug_handles_list;
+    if (has_debug_handles) {
+      const auto& debug_handles_element = (*debug_handles)[i];
+      const auto& debug_handles_m_tuple =
+          debug_handles_element.toTuple()->elements();
       const std::string& debug_info_function_name =
-          debug_info_m_tuple[0].toStringRef();
+          debug_handles_m_tuple[0].toStringRef();
       TORCH_CHECK(
           debug_info_function_name == function_name,
           "The function names in the bytecode table and the debug info table do not match.");
-      IValue debug_info_table = debug_info_m_tuple[1];
-      module_debug_info_list = expect_field(
-                                   debug_info_table,
-                                   "module_debug_info",
-                                   BYTECODE_INDEX_MODULE_DEBUG_INFO)
-                                   .toTuple()
-                                   ->elements();
+      IValue debug_handles_table = debug_handles_m_tuple[1];
+      debug_handles_list = (expect_field(
+                                debug_handles_table,
+                                "function_debug_handles",
+                                BYTECODE_INDEX_MODULE_DEBUG_HANDLES)
+                                .toTuple()
+                                ->elements())[0]
+                               .toList()
+                               .vec();
       TORCH_CHECK(
-          module_debug_info_list.size() == ops_list.size(),
-          "The numbers of operators and module info strings do not match.");
+          debug_handles_list.size() == ops_list.size(),
+          "The numbers of operators and debug handles strings do not match.");
     }
 
-    function->set_module_debug_info_list_size(ins_list.size());
     for (size_t i = 0; i < ins_list.size(); ++i) {
       auto ins_item = ins_list[i].toTuple()->elements();
       TORCH_CHECK(
@@ -301,12 +307,22 @@ void BytecodeDeserializer::parseMethods(
       OpCode op_code = parseOpCode(ins_item[0].toString()->string().c_str());
       int X = ins_item[1].toInt();
       int N = ins_item[2].toInt();
-      function->append_instruction(op_code, X, N);
+      // TODO: Save debug handles for all instructions, not just for OP
       if (op_code == OP) {
-        std::string module_debug_info = (has_debug_info)
-            ? module_debug_info_list[X].toString()->string()
-            : "";
-        function->set_module_info(module_debug_info, i);
+        if (has_debug_handles) {
+          // Why X is used to index into debug_handles?
+          // X is the offset into opnames table and since debug handles
+          // were "appended" in the debug handles vector, during seriralization,
+          // only for OP/OPN X is safe to index into it.
+          // This is not super reliable and once we move to saving debug
+          // handles for all instructions we can remove this strange behavior.
+          int64_t debug_handle = debug_handles_list[X].toInt();
+          function->append_instruction(op_code, X, N, debug_handle);
+        } else {
+          function->append_instruction(op_code, X, N);
+        }
+      } else {
+        function->append_instruction(op_code, X, N);
       }
     }
 
@@ -431,13 +447,20 @@ mobile::Module BytecodeDeserializer::deserialize(
   //
   auto bvals = readArchive("bytecode", mcu).toTuple()->elements();
 
-  c10::optional<std::vector<IValue>> debug_info_bvals;
-  if (reader_->hasRecord("mobile_debug.pkl")) {
-    debug_info_bvals = readArchive("mobile_debug", mcu).toTuple()->elements();
+  c10::optional<std::vector<IValue>> debug_handles;
+  if (reader_->hasRecord("mobile_debug_handles.pkl")) {
+    debug_handles =
+        readArchive("mobile_debug_handles", mcu).toTuple()->elements();
   }
-  parseMethods(bvals, debug_info_bvals, *mcu);
+  parseMethods(bvals, debug_handles, *mcu);
   auto meta_dict = readMobileMetadata(mcu);
-  return mobile::Module(readArchive("data", mcu).toObject(), meta_dict, mcu);
+  auto m = mobile::Module(readArchive("data", mcu).toObject(), meta_dict, mcu);
+#if defined(SYMBOLICATE_MOBILE_DEBUG_HANDLE)
+  std::unique_ptr<MobileDebugTable> debug_table =
+      std::make_unique<MobileDebugTable>(reader_, compilation_unit_);
+  m.setDebugTable(std::move(debug_table));
+#endif
+  return m;
 }
 
 std::unordered_map<std::string, std::string> BytecodeDeserializer::
