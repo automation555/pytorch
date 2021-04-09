@@ -269,7 +269,6 @@ core_sources_full_mobile = [
     "torch/csrc/jit/tensorexpr/loopnest.cpp",
     "torch/csrc/jit/tensorexpr/mem_arena.cpp",
     "torch/csrc/jit/tensorexpr/mem_dependency_checker.cpp",
-    "torch/csrc/jit/tensorexpr/operators/conv2d.cpp",
     "torch/csrc/jit/tensorexpr/reduction.cpp",
     "torch/csrc/jit/tensorexpr/registerizer.cpp",
     "torch/csrc/jit/tensorexpr/tensor.cpp",
@@ -328,6 +327,9 @@ libtorch_distributed_sources = [
     "torch/csrc/distributed/rpc/types.cpp",
     "torch/csrc/distributed/rpc/utils.cpp",
     "torch/csrc/distributed/rpc/metrics/registry.cpp",
+    "torch/csrc/distributed/spmd/engine.cpp",
+    "torch/csrc/distributed/spmd/event_impl.cpp",
+    "torch/csrc/distributed/spmd/event.cpp",
 ]
 
 jit_sources_full = [
@@ -637,6 +639,8 @@ libtorch_python_distributed_sources = libtorch_python_distributed_core_sources +
     "torch/csrc/distributed/rpc/testing/init.cpp",
     "torch/csrc/distributed/rpc/unpickled_python_call.cpp",
     "torch/csrc/distributed/rpc/unpickled_python_remote_call.cpp",
+    "torch/csrc/distributed/spmd/event_handler_impl.cpp",
+    "torch/csrc/distributed/spmd/init.cpp",
     "torch/csrc/jit/runtime/register_distributed_ops.cpp",
 ]
 
@@ -723,7 +727,6 @@ aten_cpu_source_non_codegen_list = [
     "aten/src/ATen/native/mkl/SpectralOps.cpp",
     "aten/src/ATen/native/mkldnn/BinaryOps.cpp",
     "aten/src/ATen/native/mkldnn/Conv.cpp",
-    "aten/src/ATen/native/mkldnn/Copy.cpp",
     "aten/src/ATen/native/mkldnn/IDeepRegistration.cpp",
     "aten/src/ATen/native/mkldnn/Linear.cpp",
     "aten/src/ATen/native/mkldnn/MKLDNNCommon.cpp",
