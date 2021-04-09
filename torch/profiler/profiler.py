@@ -111,7 +111,7 @@ class profile(object):
 
         After profiling, result files can be found in the specified directory. Use the command:
 
-        ``tensorboard --logdir dir_name``
+        ``tensorboard --log_dir=dir_name``
 
         to see the results in TensorBoard.
         For more information, see `Pytorch Profiler <https://github.com/pytorch/kineto/tree/master/tb_plugin>`__
@@ -361,7 +361,7 @@ class profile(object):
             with_stack=self.with_stack,
             use_kineto=True,
         )
-        self.profiler._prepare_kineto_trace()
+        self.profiler._prepare_kineto_trace(self._collect_metadata())
 
     def _start_trace(self):
         assert self.profiler is not None
@@ -370,3 +370,33 @@ class profile(object):
     def _stop_trace(self):
         assert self.profiler is not None
         self.profiler.__exit__(None, None, None)
+
+    def _collect_metadata(self):
+        # TODO: need we add option to control which kinds of metadata need to be captured?
+        metadata = torch.autograd.Metadata()
+        metadata.gpus = self.get_cuda_devices()
+        metadata.distributed = self.get_distributed_info()
+        return metadata
+
+    @staticmethod
+    def get_cuda_devices():
+        device_count = torch.cuda.device_count()
+        if device_count == 0:
+            return []
+        else:
+            devices = []
+            for i in range(device_count):
+                device_prop = torch.cuda.get_device_properties(i)
+                devices.append(torch.autograd.GpuInfo(i, device_prop.name, device_prop.total_memory))
+        return devices
+
+    @staticmethod
+    def get_distributed_info():
+        import torch.distributed as dist
+        if not dist.is_available() or not dist.is_initialized():
+            return None
+
+        return torch.autograd.DistributedMetadata(
+            dist.get_backend(),
+            dist.get_rank(),
+            dist.get_world_size())

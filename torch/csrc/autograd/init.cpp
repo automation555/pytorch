@@ -172,6 +172,26 @@ PyObject* THPAutograd_initExtension(PyObject* _unused, PyObject *unused) {
     .def("legacy_events", &ProfilerResult::legacy_events)
     .def("save", &ProfilerResult::save);
 
+  // DistributedMetadata
+  py::class_<DistributedMetadata>(m, "DistributedMetadata")
+    .def(py::init<std::string, int, int>())
+    .def_readwrite("backend", &DistributedMetadata::backend_)
+    .def_readwrite("rank", &DistributedMetadata::rank_)
+    .def_readwrite("world_size", &DistributedMetadata::worldSize_);
+
+  // GpuInfo
+  py::class_<GpuInfo>(m, "GpuInfo")
+    .def(py::init<int, std::string, uint64_t>())
+    .def_readwrite("id", &GpuInfo::id_)
+    .def_readwrite("name", &GpuInfo::name_)
+    .def_readwrite("total_memory", &GpuInfo::totalMemory_);
+
+  // Metadata
+  py::class_<Metadata>(m, "Metadata")
+    .def(py::init<>())
+    .def_readwrite("gpus", &Metadata::gpus_)
+    .def_readwrite("distributed", &Metadata::distributed_);
+
   m.def("_enable_profiler", enableProfiler);
   m.def("_disable_profiler", disableProfiler);
   m.def("_prepare_profiler", prepareProfiler);

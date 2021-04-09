@@ -253,9 +253,31 @@ std::string stacksToStr(const std::vector<std::string>& stacks) {
 
 } // namespace
 
+std::unique_ptr<libkineto::Metadata> convertMetadata(const c10::optional<Metadata>& metadata){
+  if (!metadata.has_value()){
+    return nullptr;
+  }
+
+  // TODO: add options to config collect which options in future?
+  auto result = std::make_unique<libkineto::Metadata>();
+  if (metadata->distributed_.has_value()){
+    result->distributed_ = std::make_unique<libkineto::DistributedMetadata>();
+    result->distributed_->backend_ = metadata->distributed_->backend_;
+    result->distributed_->worldSize_ = metadata->distributed_->worldSize_;
+    result->distributed_->rank_ = metadata->distributed_->rank_;
+  }
+
+  for (auto&& gpu : metadata->gpus_){
+      result->gpus_.push_back({gpu.id_, gpu.name_, gpu.totalMemory_});
+  }
+
+  return result;
+}
+
 void prepareProfiler(
     const ProfilerConfig& config,
-    const std::set<ActivityType>& activities) {
+    const std::set<ActivityType>& activities,
+    c10::optional<Metadata> metadata) {
   TORCH_CHECK(config.state == ProfilerState::KINETO,
       "Supported only in Kineto profiler");
 
@@ -290,7 +312,7 @@ void prepareProfiler(
     libkineto::api().initProfilerIfRegistered();
   }
 
-  libkineto::api().activityProfiler().prepareTrace(k_activities);
+  libkineto::api().activityProfiler().prepareTrace(k_activities, convertMetadata(metadata));
 }
 
 void enableProfiler(
@@ -331,7 +353,7 @@ std::unique_ptr<ProfilerResult> disableProfiler() {
     at::removeCallback(state_ptr->callbackHandle());
   }
 
-  state_ptr->mark("__stop_profile", false);
+  state_ptr->mark("__stop_profile");
 
   state_ptr->cpu_trace->span.endTime = getTimeUs();
 
