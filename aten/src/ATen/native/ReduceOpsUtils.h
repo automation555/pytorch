@@ -2,7 +2,6 @@
 
 #include <limits>
 #include <ATen/ATen.h>
-#include <ATen/native/Resize.h>
 #include <ATen/native/TensorIterator.h>
 #include <ATen/WrapDimUtilsMulti.h>
 
@@ -149,13 +148,13 @@ inline DimVector shape_from_dim_mask(const Tensor& self, DimMask mask, bool keep
   return shape;
 }
 
-static void resize_reduction_result(
+static void allocate_reduction_result(
     Tensor& result, const Tensor& self, DimMask mask, bool keepdim,
     ScalarType dtype)
 {
   auto shape = shape_from_dim_mask(self, mask, keepdim);
   TORCH_CHECK(result.defined(), "Cannot create a new tensor inside a reduction op. You likely tried to call an operator with an out argument but the out argument was an undefined tensor.");
-  at::native::resize_output(result, shape);
+  result.resize_(shape);
 }
 
 inline Tensor create_reduction_result(
@@ -195,7 +194,7 @@ static TensorIterator make_reduction(
       ".");
   int64_t ndim = self.dim();
   auto mask = make_dim_mask(dim, ndim);
-  resize_reduction_result(result, self, mask, keepdim, out_dtype);
+  allocate_reduction_result(result, self, mask, keepdim, out_dtype);
   auto viewed_result = review_reduce_result(result, ndim, mask, keepdim);
   namedinference::propagate_names_for_reduction(result, self, dim, keepdim);
   if (self.scalar_type() == in_dtype) {
@@ -233,10 +232,10 @@ static TensorIterator make_reduction(
 
   int64_t ndim = self.dim();
   DimMask mask = make_dim_mask(dim, ndim);
-  resize_reduction_result(result1, self, mask, keepdim, dtype1);
+  allocate_reduction_result(result1, self, mask, keepdim, dtype1);
   auto viewed_result1 = review_reduce_result(result1, ndim, mask, keepdim);
 
-  resize_reduction_result(result2, self, mask, keepdim, dtype2);
+  allocate_reduction_result(result2, self, mask, keepdim, dtype2);
   auto viewed_result2 = review_reduce_result(result2, ndim, mask, keepdim);
 
   namedinference::propagate_names_for_reduction(result1, self, dim, keepdim);
