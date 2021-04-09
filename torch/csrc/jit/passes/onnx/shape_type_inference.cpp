@@ -1,6 +1,5 @@
 #include <torch/csrc/jit/passes/onnx/shape_type_inference.h>
 
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/onnx/constant_fold.h>
 #include <torch/csrc/jit/passes/onnx/constant_map.h>
@@ -368,7 +367,7 @@ bool IsBlockReturnTypeSame(Node* n) {
   TORCH_INTERNAL_ASSERT(n->kind() == ::c10::onnx::If);
   auto then_block = n->blocks()[0];
   auto else_block = n->blocks()[1];
-  for (size_t i = 0; i < n->outputs().size(); i++) {
+  for (const auto i : c10::irange(n->outputs().size())) {
     // check the type
     auto then_block_type = then_block->outputs()[i]->type();
     auto else_block_type = else_block->outputs()[i]->type();
@@ -594,7 +593,7 @@ c10::optional<std::vector<int64_t>> GetValueFromListConstructNode(
     Node* lc_node) {
   auto rank = lc_node->inputs().size();
   std::vector<int64_t> shape_size;
-  for (size_t i = 0; i < rank; i++) {
+  for (const auto i : c10::irange(rank)) {
     if (TensorTypePtr shape_type =
             lc_node->input(i)->type()->cast<TensorType>()) {
       if (ConstantValueMap::HasValue(lc_node->input(i)->debugName())) {
@@ -739,7 +738,7 @@ void ProcessSliceNode(Node* n, int opset_version) {
       std::vector<int64_t> start_vector;
       std::vector<int64_t> end_vector;
       std::vector<int64_t> axes_vector(input0_shape_value.size(), 0);
-      for (const auto i : c10::irange(input0_shape_value.size())) {
+      for (int64_t i = 0; i < input0_shape_value.size(); i++) {
         axes_vector[i] = i;
       }
       std::vector<int64_t> step_vector;
@@ -1135,7 +1134,7 @@ void SpecialPostProcess(Node* n) {
       if (!IsBlockReturnTypeSame(n) && IsStaticConditionONNX(n)) {
         auto cond = ConditionValueONNX(n);
         auto block_idx = cond ? 0 : 1;
-        for (size_t i = 0; i < n->outputs().size(); i++) {
+        for (const auto i : c10::irange(n->outputs().size())) {
           n->outputs()[i]->setType(
               n->blocks()[block_idx]->outputs()[i]->type());
         }

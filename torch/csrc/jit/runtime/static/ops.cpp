@@ -9,7 +9,6 @@
 #include <ATen/native/Resize.h>
 #include <ATen/native/TensorAdvancedIndexing.h>
 #include <ATen/native/quantized/cpu/qembeddingbag.h>
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/runtime/vararg_functions.h>
 #include <torch/csrc/jit/tensorexpr/ir.h>
@@ -78,7 +77,7 @@ at::Tensor& flatten_copy_out(
 
   std::vector<int64_t> shape;
   shape.reserve(self.dim() - end_dim + start_dim);
-  for (const auto i : c10::irange(start_dim)) {
+  for (int64_t i = 0; i < start_dim; i++) {
     shape.push_back(self.sizes()[i]);
   }
   shape.push_back(slice_numel);
@@ -106,11 +105,6 @@ namespace torch {
 namespace jit {
 
 C10_DEFINE_REGISTRY(SROperatorRegistry, SROperatorFunctor);
-
-bool opIsRegistered(const c10::Symbol& op_name) {
-  const std::string name(op_name.toQualString());
-  return SROperatorRegistry()->Has(name);
-}
 
 bool canRunOutOfPlace(Node* n) {
   auto op_name = std::string(n->kind().toQualString());
@@ -193,7 +187,7 @@ REGISTER_OPERATOR_FUNCTOR(
         const size_t size = p_node->inputs().size();
         c10::List<IValue> vals(type.getElementType());
         vals.reserve(size);
-        for (size_t i = 0; i < size; i++) {
+        for (const auto i : c10::irange(size)) {
           vals.push_back(p_node->Input(i));
         }
         p_node->Output(0) = std::move(vals);
@@ -214,7 +208,7 @@ REGISTER_OPERATOR_FUNCTOR(
         const size_t size = p_node->inputs().size();
         std::vector<IValue> vals;
         vals.reserve(size);
-        for (size_t i = 0; i < size; i++) {
+        for (const auto i : c10::irange(size)) {
           vals.push_back(p_node->Input(i));
         }
         p_node->Output(0) = c10::ivalue::Tuple::create(std::move(vals));
@@ -878,7 +872,7 @@ std::function<void(ProcessedNode*)> getNativeOperation(Node* n) {
       std::vector<IValue> stack;
       const size_t size = p_node->inputs().size();
       stack.reserve(size);
-      for (size_t i = 0; i < size; i++) {
+      for (const auto i : c10::irange(size)) {
         stack.emplace_back(p_node->Input(i));
       }
       // run op
@@ -898,7 +892,7 @@ std::function<void(ProcessedNode*)> getNativeOperation(Node* n) {
       std::vector<IValue> stack;
       const size_t size = p_node->inputs().size();
       stack.reserve(size);
-      for (size_t i = 0; i < size; i++) {
+      for (const auto i : c10::irange(size)) {
         stack.emplace_back(p_node->Input(i));
       }
       // run op
@@ -916,7 +910,7 @@ std::function<void(ProcessedNode*)> getNativeOperation(Node* n) {
       std::vector<IValue> stack;
       const size_t size = p_node->inputs().size();
       stack.reserve(size);
-      for (size_t i = 0; i < size; i++) {
+      for (const auto i : c10::irange(size)) {
         stack.emplace_back(p_node->Input(i));
       }
       // run op
@@ -933,7 +927,7 @@ std::function<void(ProcessedNode*)> getNativeOperation(Node* n) {
       std::vector<IValue> stack;
       const size_t size = p_node->inputs().size();
       stack.reserve(size);
-      for (size_t i = 0; i < size; i++) {
+      for (const auto i : c10::irange(size)) {
         stack.emplace_back(p_node->Input(i));
       }
       // run op

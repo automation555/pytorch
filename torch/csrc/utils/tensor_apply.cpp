@@ -2,7 +2,6 @@
 
 #include <ATen/TensorUtils.h>
 #include <ATen/ExpandUtils.h>
-#include <c10/util/irange.h>
 
 #include <torch/csrc/Exceptions.h>
 #include <torch/csrc/utils/python_numbers.h>
@@ -34,7 +33,7 @@ static void recursive_apply(IntArrayRef sizes, ScalarType scalarType, int64_t di
   if (dim == ndim) {
     auto args = THPObjectPtr(PyTuple_New(N));
     if (!args) throw python_error();
-    for (size_t i = 0; i < N; i++) {
+    for(const auto i : c10::irange(N)) {
       PyObject* arg = load_scalar(strided_data[i].data, scalarType);
       if (!arg) throw python_error();
       PyTuple_SET_ITEM(args.get(), i, arg);
@@ -46,8 +45,7 @@ static void recursive_apply(IntArrayRef sizes, ScalarType scalarType, int64_t di
   }
 
   auto n = sizes[dim];
-  for(const auto i : c10::irange(n)) {
-    (void)i; // Suppress unused variable warning
+  for (int64_t i = 0; i < n; i++) {
     recursive_apply(sizes, scalarType, dim + 1, fn, strided_data);
     for (auto& td : strided_data) {
       td.step(dim);
