@@ -1050,18 +1050,15 @@ class TestFX(JitTestCase):
         # Make sure we're testing all opcodes
         opcodes = set()
         output_shape : Optional[torch.Shape] = None
-        output_stride : Optional[Tuple[int]] = None
         for node in tc_traced.graph.nodes:
             opcodes.add(node.op)
             if node.op == 'output':
-                output_shape = node.args[0].meta['shape']
-                output_stride = node.args[0].meta['stride']
+                output_shape = node.args[0].shape
         self.assertEqual(opcodes, set(['placeholder', 'get_attr', 'call_function', 'call_method',
                                        'call_module', 'output']))
 
         # Test shape propogation and make sure results match actual
         self.assertEqual(output_shape, ref_out.shape)
-        self.assertEqual(output_stride, ref_out.stride())
 
     def test_interpreter(self):
         class MyModule(torch.nn.Module):
@@ -1168,15 +1165,6 @@ class TestFX(JitTestCase):
         transformed = torch.fx.Transformer(symbolic_trace(rn18)).transform()
         inp = torch.randn(5, 3, 224, 224)
         self.assertEqual(transformed(inp), rn18(inp))
-
-    @skipIfNoTorchVision
-    def test_interpreter_gc_values(self):
-        rn18 = resnet18()
-        interp = Interpreter(symbolic_trace(rn18))
-        inp = torch.rand(5, 3, 224, 224)
-        out = interp.run(inp)
-        env_key_names = set(n.name for n in interp.env.keys())
-        self.assertEqual(env_key_names, set(['output']))
 
     def test_transformer_noop(self):
         class MyModule(torch.nn.Module):
@@ -1860,7 +1848,7 @@ class TestFX(JitTestCase):
                 traced(5)
 
         self.assertIn("Call using an FX-traced Module, line 4 of the "
-                      "traced Module's generated forward function:",
+                      "traced Module’s generated forward function:",
                       captured[0])
 
     def test_custom_traceback_not_raised_when_exception_source_is_submodule(self):
@@ -1882,7 +1870,7 @@ class TestFX(JitTestCase):
             captured = traceback.format_exc()
 
         self.assertNotIn("Call using an FX-traced Module, line 4 of the"
-                         " traced Module's generated forward function:",
+                         " traced Module’s generated forward function:",
                          captured)
 
     def test_ast_rewriter_rewrites_assert(self):
@@ -2168,7 +2156,6 @@ class TestFX(JitTestCase):
         finally:
             del sys.modules["__future__"]
 
-    @skipIfNoTorchVision
     def test_cpatcher(self):
 
         cnt = 0
@@ -2234,19 +2221,20 @@ class TestOperatorSignatures(JitTestCase):
     @onlyCPU
     @ops(op_db, allowed_dtypes=(torch.float,))
     def test_get_torch_func_signature_exhaustive(self, device, dtype, op):
-        known_no_schema = {'stack', 'hstack', 'vstack', 'dstack', 'repeat', '__getitem__', 'linalg.multi_dot'}
+        known_no_schema = {'stack', 'hstack', 'vstack', 'dstack', 'repeat'}
 
         try:
             sample_inputs_itr = op.sample_inputs(device, dtype, requires_grad=False)
             schemas = get_signature_for_torch_op(op.op)
             if not schemas:
-                raise RuntimeError('No Schemas Returned')
+                assert op.name in known_no_schema
+                return
             for sample_input in sample_inputs_itr:
                 # Iterate through overloads until we hit a match. If we exit this
                 # loop via `else`, we haven't found a match
                 for schema in schemas:
                     try:
-                        bound_args = schema.bind(sample_input.input, *sample_input.args, **sample_input.kwargs)
+                        bound_args = schema.bind(*sample_input.input, *sample_input.args, **sample_input.kwargs)
                         bound_args.apply_defaults()
                         op(*bound_args.args, **bound_args.kwargs)
                         break
@@ -2256,7 +2244,7 @@ class TestOperatorSignatures(JitTestCase):
                     raise RuntimeError(f'Did not match any schemas for op {op.name}!')
 
         except Exception as e:
-            assert op.name in known_no_schema
+            assert op.name in known_failing_tests
 
 instantiate_device_type_tests(TestOperatorSignatures, globals())
 

@@ -557,7 +557,7 @@ PyObject *THPModule_getDefaultDtype(PyObject *_unused, PyObject *arg) {
 PyObject *THPModule_getDefaultDevice(PyObject *_unused, PyObject *arg) {
   HANDLE_TH_ERRORS
   return THPUtils_packString(
-          c10::DeviceTypeName(dispatchKeyToDeviceType(torch::tensors::get_default_dispatch_key()),
+          c10::DeviceTypeName(computeDeviceType(torch::tensors::get_default_dispatch_key()),
                               /*lower_case=*/true));
   END_HANDLE_TH_ERRORS
 }
@@ -771,20 +771,6 @@ static void LogAPIUsageOnceFromPython(const std::string& event) {
   }
 }
 
-// Weak reference to tensor, used to test a tensor isn't leaked
-class WeakTensorRef {
-  c10::weak_intrusive_ptr<c10::TensorImpl> weakref_;
-
-public:
-  WeakTensorRef(const at::Tensor& t):
-    weakref_(t.getIntrusivePtr()) {
-  }
-
-  bool expired() {
-    return weakref_.expired();
-  }
-};
-
 extern "C"
 #ifdef _WIN32
 __declspec(dllexport)
@@ -969,26 +955,6 @@ Call this whenever a new thread is created in order to propagate values from
       #endif
     }
   );
-
-  py_module.def(
-    "_valgrind_toggle_and_dump_stats", [](){
-      #if defined(USE_VALGRIND)
-      // NB: If we don't toggle collect around dump stats, callgrind_annotate
-      //     won't process the results correctly. Specifically,
-      //     `callgrind_annotate --inclusive=no` will be almost completely empty.
-      CALLGRIND_TOGGLE_COLLECT;
-      CALLGRIND_DUMP_STATS;
-      #else
-      TORCH_CHECK(false, "Valgrind is not supported.");
-      #endif
-    }
-  );
-
-  py::class_<WeakTensorRef>(py_module, "_WeakTensorRef")
-    .def(py::init([](py::object tensor) {
-      return WeakTensorRef(THPVariable_Unpack(tensor.ptr()));
-    }))
-    .def("expired", &WeakTensorRef::expired);
 
 #ifdef USE_CUDA
   PyObject *has_cuda = Py_True;
