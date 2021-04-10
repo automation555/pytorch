@@ -8,11 +8,11 @@
 
 namespace torch { namespace autograd {
 
-TORCH_API std::vector<c10::optional<Variable>> _wrap_outputs(
+TORCH_API variable_list _wrap_outputs(
   const variable_list &input_vars,
   const std::unordered_set<at::TensorImpl*> &non_differentiable,
   const std::unordered_set<at::TensorImpl*> &dirty_inputs,
-  const at::ArrayRef<c10::optional<Variable>> raw_outputs,
+  const at::ArrayRef<Variable> raw_outputs,
   const std::shared_ptr<Node> &cdata);
 
 TORCH_API void check_variable_result(const Variable& original,
@@ -137,7 +137,6 @@ private:
 };
 
 struct TORCH_API VariableInfo {
-  explicit VariableInfo();
   explicit VariableInfo(const Variable& var);
 
   Variable zeros(at::OptionalDeviceGuard& device_guard) const;
@@ -145,9 +144,8 @@ struct TORCH_API VariableInfo {
   at::Layout layout = at::Layout::Strided;
   at::Device device = at::kCPU;
   at::ScalarType scalar_type = at::kFloat;
-  std::vector<int64_t> size;
+  c10::optional<std::vector<int64_t>> sizes;
   bool requires_grad;
-  bool is_empty;
 };
 
 // CppNode<T> is the Node in the autograd graph that represents the user defined
@@ -173,7 +171,7 @@ struct ExtractVariables : IterArgs<ExtractVariables> {
   variable_list& list_;
   ExtractVariables(std::vector<bool>& is_var, variable_list& list) : is_var_(is_var), list_(list) {}
   void operator()(const c10::optional<at::Tensor>& x) {
-    if (x.has_value() && x.value().defined()) {
+    if (x) {
       is_var_.push_back(true);
       list_.emplace_back(x.value());
     } else {
@@ -196,30 +194,10 @@ inline void extract_vars(std::vector<bool> &is_var, variable_list& list, Args&&.
 }
 
 template <typename T>
-typename std::enable_if<std::is_same<T, variable_list>::value, T>::type to_output_type(
-  std::vector<c10::optional<Variable>>& output_list) {
-    variable_list result;
-    std::transform(output_list.begin(), output_list.end(), std::back_inserter(result),
-      [](const c10::optional<Variable>& var) { return *var; });
-    return result;
-}
+typename std::enable_if<std::is_same<T, variable_list>::value, T&>::type to_output_type(variable_list& output_list) { return output_list; }
 
 template <typename T>
-typename std::enable_if<std::is_same<T, Variable>::value, T>::type to_output_type(
-  std::vector<c10::optional<Variable>>& output_list) {
-    return *output_list[0];
-}
-
-inline std::vector<c10::optional<Variable>> to_optional(Variable& output) {
-  return std::vector<c10::optional<Variable>>{output};
-}
-
-inline std::vector<c10::optional<Variable>> to_optional(variable_list& output) {
-  std::vector<c10::optional<Variable>> result;
-  std::transform(output.begin(), output.end(), std::back_inserter(result),
-    [](const Variable& var) { return var; });
-  return result;
-}
+typename std::enable_if<std::is_same<T, Variable>::value, T>::type to_output_type(variable_list& output_list) { return output_list[0]; }
 
 template<class T>
 template<typename X, typename... Args>
@@ -234,7 +212,7 @@ auto Function<T>::apply(Args&&... args) -> std::enable_if_t<std::is_same<X,T>::v
   extract_vars(node->is_variable_input_, input_vars, args...);
 
   bool is_executable =  GradMode::is_enabled() && any_variable_requires_grad(input_vars);
-  auto next_edges = (is_executable ? collect_next_edges(input_vars) : edge_list());
+  auto next_edges = collect_next_edges(input_vars);
   node->set_ctx_grad_fn(node);
   node->set_next_edges(std::move(next_edges));
   node->clear_input_metadata();
@@ -251,19 +229,12 @@ auto Function<T>::apply(Args&&... args) -> std::enable_if_t<std::is_same<X,T>::v
     outputs = T::forward(&node->ctx_, std::forward<Args>(args)...);
   }
 
-  auto wrapped_outputs = _wrap_outputs(
-    input_vars,
-    node->ctx_.get_non_differentiable(),
-    node->ctx_.get_and_bump_dirty(),
-    to_optional(outputs),
-    is_executable ? node : nullptr);
+  auto wrapped_outputs = _wrap_outputs(input_vars, node->ctx_.get_non_differentiable(), node->ctx_.get_and_bump_dirty(), outputs, is_executable ? node : nullptr);
 
   node->output_info_.reserve(wrapped_outputs.size());
   for (auto& output : wrapped_outputs) {
-    if (is_executable && output.has_value()) {
-      node->output_info_.emplace_back(output.value());
-    } else if (is_executable) {
-      node->output_info_.emplace_back();
+    if (is_executable) {
+      node->output_info_.emplace_back(output);
     }
   }
 

@@ -8,7 +8,8 @@
 
 #include <cstdint>
 
-namespace torch { namespace autograd {
+namespace torch {
+namespace autograd {
 
 /**
  * Records type, shape, and device of tensor and, where applicable,
@@ -20,20 +21,46 @@ namespace torch { namespace autograd {
 struct InputMetadata {
   InputMetadata() = default;
 
-  InputMetadata(const at::TensorOptions options, at::IntArrayRef shape, at::Device device)
-  : options_{options}, shape_{shape}, device_{device} {
+  InputMetadata(
+      const at::TensorOptions options,
+      c10::optional<std::vector<int64_t>> shape,
+      at::Device device,
+      bool is_nested_tensor,
+      at::Tensor nested_size_tensor)
+      : options_{options},
+        shape_{shape},
+        device_{device},
+        is_nested_tensor_(is_nested_tensor),
+        nested_size_(
+            nested_size_tensor.data_ptr<int64_t>(),
+            nested_size_tensor.data_ptr<int64_t>() + 
+                     nested_size_tensor.numel()) {
     stream_ = c10::impl::getDeviceGuardImpl(device_.type())->getStream(device_);
   }
 
   InputMetadata(const at::Tensor& t)
-  : InputMetadata(t.options(), t.sizes(), t.device()) { }
+      : InputMetadata(
+            t.options(),
+            at::is_nested_tensor_impl(t) 
+              ? c10::nullopt
+              : c10::optional<std::vector<int64_t>>(t.sizes().vec()),
+            t.device(),
+            at::is_nested_tensor_impl(t),
+            at::serialize_nested_size(t)) {}
 
   const at::TensorOptions options() const {
     return options_;
   }
 
   at::IntArrayRef shape() const {
-    return shape_;
+    TORCH_CHECK(!is_nested_tensor(), "NestedTensor doesn't have a shape.");
+    TORCH_CHECK(shape_, "internal error: Expected non-NestedTensor to have shape.");
+    return at::IntArrayRef(*shape_);
+  }
+
+  at::IntArrayRef nested_size() const {
+    TORCH_CHECK(is_nested_tensor(), "Only available to NestedTensors.");
+    return at::IntArrayRef(nested_size_);
   }
 
   at::Device device() const {
@@ -45,14 +72,22 @@ struct InputMetadata {
   }
 
   at::Tensor zeros_like() const {
-    return at::zeros(shape_, options_);
+    TORCH_CHECK(shape_, "zeros_like is only supported if not a NestedTensor.");
+    return at::zeros(*shape_, options_);
   }
 
-private:
+  bool is_nested_tensor() const {
+    return is_nested_tensor_;
+  }
+
+ private:
   const at::TensorOptions options_;
-  at::DimVector shape_;
+  c10::optional<std::vector<int64_t>> shape_;
   at::Device device_ = at::kCPU;
   c10::Stream stream_ = c10::Stream(c10::Stream::Default::DEFAULT, device_);
+  bool is_nested_tensor_;
+  std::vector<int64_t> nested_size_;
 };
 
-}} // torch::autograd
+} // namespace autograd
+} // namespace torch
