@@ -39,21 +39,45 @@ if(USE_MPI)
   endif()
 endif()
 
+if(USE_UCX)
+  find_package(UCX)
+  if(UCX_FOUND)
+    message(STATUS "UCX_INCLUDE_PATH: ${UCX_INCLUDE_DIR}")
+    message(STATUS "UCX_LIBRARIES: ${UCX_LIBRARIES}")
+    option(USE_C10D_UCC "USE C10D UCC" ON)
+  else()
+    message(STATUS "Not able to find UCX")
+    message(STATUS "Will compile c10d without UCX support")
+  endif()
+endif()
+
+# TODO: replace with UCC
+if(USE_XCCL)
+  find_package(XCCL)
+  if(XCCL_FOUND)
+    message(STATUS "XCCL_INCLUDE_PATH: ${XCCL_INCLUDE_DIR}")
+    message(STATUS "XCCL_LIBRARIES: ${XCCL_LIBRARIES}")
+    option(USE_C10D_UCC "USE C10D UCC" ON)
+  else()
+    message(STATUS "Not able to find XCCL")
+    message(STATUS "Will compile c10d without XCCL support")
+  endif()
+endif()
+
 function(copy_header file)
   configure_file(${file} ${CMAKE_BINARY_DIR}/include/c10d/${file} COPYONLY)
 endfunction()
 
 set(C10D_SRCS
   FileStore.cpp
-  PrefixStore.cpp
   ProcessGroup.cpp
   Store.cpp
-  TCPStore.cpp
+  PrefixStore.cpp
   Utils.cpp
   )
 
 if(NOT WIN32)
-  list(APPEND C10D_SRCS HashStore.cpp ProcessGroupRoundRobin.cpp)
+  list(APPEND C10D_SRCS HashStore.cpp ProcessGroupRoundRobin.cpp TCPStore.cpp)
 endif()
 
 set(C10D_LIBS torch)
@@ -74,6 +98,15 @@ if(USE_C10D_GLOO)
   if(USE_CUDA)
     list(APPEND C10D_LIBS gloo_cuda)
   endif()
+endif()
+
+if(USE_C10D_UCC)
+  list(APPEND C10D_SRCS ProcessGroupUCC.cpp
+                        UCCSendRecv.cpp
+                        UCXAllToAll.cpp
+                        UCXColl.cpp
+                        XCCLUtils.cpp)
+  list(APPEND C10D_LIBS ${UCC_LIBRARIES})
 endif()
 
 add_library(c10d STATIC ${C10D_SRCS})
@@ -120,11 +153,14 @@ if(USE_C10D_GLOO)
   target_compile_definitions(c10d INTERFACE USE_C10D_GLOO)
 endif()
 
+if(USE_C10D_UCC)
+  target_compile_definitions(c10d INTERFACE USE_C10D_UCC)
+endif()
+
 copy_header(FileStore.hpp)
 copy_header(PrefixStore.hpp)
 copy_header(ProcessGroup.hpp)
 copy_header(Store.hpp)
-copy_header(TCPStore.hpp)
 copy_header(Types.hpp)
 copy_header(Utils.hpp)
 if(USE_GLOO)
@@ -133,9 +169,7 @@ if(USE_GLOO)
 endif()
 if(NOT WIN32)
   copy_header(HashStore.hpp)
-  copy_header(UnixSockUtils.hpp)
-else()
-  copy_header(WinSockUtils.hpp)
+  copy_header(TCPStore.hpp)
 endif()
 
 if(USE_C10D_NCCL)
@@ -146,6 +180,16 @@ endif()
 if(USE_C10D_MPI)
   target_include_directories(c10d PUBLIC ${MPI_INCLUDE_PATH})
   copy_header(ProcessGroupMPI.hpp)
+endif()
+
+if(USE_C10D_UCC)
+  target_include_directories(c10d PUBLIC ${UCC_INCLUDE_DIR})
+  copy_header(ProcessGroupUCC.hpp)
+  copy_header(UCCOps.hpp)
+  copy_header(UCCSendRecv.hpp)
+  copy_header(UCCStatus.hpp)
+  copy_header(UCXColl.hpp)
+  copy_header(XCCLUtils.hpp)
 endif()
 
 target_link_libraries(c10d PUBLIC ${C10D_LIBS})
