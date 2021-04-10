@@ -1,6 +1,5 @@
 #include <torch/csrc/jit/passes/onnx/shape_type_inference.h>
 
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/onnx/constant_fold.h>
 #include <torch/csrc/jit/passes/onnx/constant_map.h>
@@ -739,7 +738,7 @@ void ProcessSliceNode(Node* n, int opset_version) {
       std::vector<int64_t> start_vector;
       std::vector<int64_t> end_vector;
       std::vector<int64_t> axes_vector(input0_shape_value.size(), 0);
-      for (const auto i : c10::irange(input0_shape_value.size())) {
+      for (int64_t i = 0; i < input0_shape_value.size(); i++) {
         axes_vector[i] = i;
       }
       std::vector<int64_t> step_vector;
@@ -1256,7 +1255,8 @@ void ONNXShapeTypeInference(
     n_graph->registerOutput(output);
   }
 
-  ScalarTypeAnalysisForONNX(n_graph);
+  // Use scalar_type_analysis without low precision cast
+  ScalarTypeAnalysisForONNX(n_graph, false, opset_version);
 
   GRAPH_DEBUG("Original torch graph: ", n->owningGraph()->toString());
   GRAPH_DEBUG(
