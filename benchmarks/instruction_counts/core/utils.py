@@ -1,12 +1,14 @@
 import atexit
-import shutil
 import re
+import shutil
 import tempfile
 import textwrap
-from typing import List, Optional, Tuple
+from typing import Iterator, List, Optional, Tuple
+import uuid
 
-from core.api import GroupedBenchmark, TimerArgs
-from core.types import Definition, FlatIntermediateDefinition, Label
+from core.api import AutogradMode, AutoLabels, RuntimeMode, TimerArgs, GroupedBenchmark
+from core.jit import generate_torchscript_file
+from core.types import Definition, FlatDefinition, FlatIntermediateDefinition, Label
 
 
 _TEMPDIR: Optional[str] = None
@@ -44,7 +46,6 @@ def _flatten(
 
 
 def flatten(schema: Definition) -> FlatIntermediateDefinition:
-    """See types.py for an explanation of nested vs. flat definitions."""
     result: FlatIntermediateDefinition = {}
     _flatten(key_prefix=(), sub_schema=schema, result=result)
 
@@ -56,8 +57,36 @@ def flatten(schema: Definition) -> FlatIntermediateDefinition:
     return result
 
 
+def unpack(definitions: FlatIntermediateDefinition) -> FlatDefinition:
+    results: List[Tuple[Label, AutoLabels, TimerArgs]] = []
+
+    for label, args in definitions.items():
+        if isinstance(args, TimerArgs):
+            auto_labels = AutoLabels(
+                RuntimeMode.EXPLICIT,
+                AutogradMode.EXPLICIT,
+                args.language
+            )
+            results.append((label, auto_labels, args))
+
+        else:
+            assert isinstance(args, GroupedBenchmark)
+
+            model_path: Optional[str] = None
+            ts_model_setup = args.ts_model_setup
+            if ts_model_setup is not None:
+                name: str = re.sub(r'[^a-z0-9_]', '_', '_'.join(label).lower())
+                name = f"{name}_{uuid.uuid4()}"
+                model_path = generate_torchscript_file(ts_model_setup, name=name, temp_dir=get_temp_dir())
+
+            for auto_labels, timer_args in args.flatten(model_path):
+                results.append((label, auto_labels, timer_args))
+
+    return tuple(results)
+
+
 def parse_stmts(stmts: str) -> Tuple[str, str]:
-    """Helper function for side-by-side Python and C++ stmts.
+    """Parser for side-by-side Python and C++ stmts.
 
     For more complex statements, it can be useful to see Python and C++ code
     side by side. To this end, we provide an **extremely restricted** way
@@ -97,3 +126,11 @@ def parse_stmts(stmts: str) -> Tuple[str, str]:
         assert l_from_stmts == l.rstrip(), f"Failed to round trip `{l}`"
 
     return "\n".join(py_lines), "\n".join(cpp_lines)
+
+
+def iter_parsed_lines(stmts: str) -> Iterator[Tuple[str, str]]:
+    py_stmt, cpp_stmt = parse_stmts(stmts)
+    py_lines = [l.rstrip() for l in py_stmt.splitlines(keepends=False)]
+    cpp_lines = [l.rstrip() for l in cpp_stmt.splitlines(keepends=False)]
+    assert len(py_lines) == len(cpp_lines)
+    return zip(py_lines, cpp_lines)
