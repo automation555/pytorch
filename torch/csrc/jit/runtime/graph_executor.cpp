@@ -131,7 +131,7 @@ struct CaptureList {
       auto tensors = val.toTensorList();
       sizes_.push_back(tensors.size());
 
-      for (const at::Tensor tensor : tensors) {
+      for (const at::Tensor& tensor : tensors) {
         captureTensor(tensor, is_output);
       }
     } else {
@@ -269,14 +269,12 @@ struct DifferentiableGraphBackward : public autograd::Node {
     size_t output_index = 0;
     for (IValue& v : stack) {
       if (v.isTensorList()) {
-        for (at::Tensor tensor : v.toTensorList()) {
+        for (const at::Tensor& tensor : v.toTensorList()) {
           produceOutput(output_index++, std::move(tensor), outputs);
         }
       } else if (v.isTensor()) {
         produceOutput(output_index++, std::move(v).toTensor(), outputs);
       } else {
-        TORCH_INTERNAL_ASSERT_DEBUG_ONLY(v.isNone());
-        output_index++;
         // Input grad can also be None even if it requires grad
         // Example: `other` in expand_as(self, other)
         outputs.emplace_back();
@@ -297,14 +295,11 @@ struct DifferentiableGraphBackward : public autograd::Node {
   }
   void addOutputForIValue(const IValue& value) {
     if (value.isTensorList()) {
-      for (const at::Tensor tensor : value.toTensorList()) {
+      for (const at::Tensor& tensor : value.toTensorList()) {
         addOutputForTensor(tensor);
       }
-    } else if (value.isTensor()) {
-      addOutputForTensor(value.toTensor());
     } else {
-      // We could have None passed here via `Optional[Tensor]`
-      add_next_edge(autograd::Edge{});
+      addOutputForTensor(value.toTensor());
     }
   }
 
@@ -324,7 +319,7 @@ struct DifferentiableGraphBackward : public autograd::Node {
     if (v.isTensorList()) {
       auto tensors = v.toTensorList();
       input_instructions_.pushTensorList(tensors.size());
-      for (const at::Tensor tensor : tensors) {
+      for (const at::Tensor& tensor : tensors) {
         addInputVariable(tensor);
       }
     } else if (v.isTensor()) {
@@ -367,8 +362,7 @@ struct DifferentiableGraphBackward : public autograd::Node {
 // to the output Variables if present.
 struct DifferentiableGraphOp {
   DifferentiableGraphOp(Gradient grad)
-      : f_ptr(std::make_shared<GraphExecutor>(grad.f, "<foward op>")),
-        legacy_f(grad.f, "<foward op>"),
+      : f(grad.f, "<foward op>"),
         grad(std::move(grad)),
         grad_executor(this->grad.df, "<backward op>"),
         num_inputs(this->grad.f->inputs().size()),
@@ -393,13 +387,7 @@ struct DifferentiableGraphOp {
     }
 
     detachVariables(*stack);
-    if (IsNewExecutorEnabled()) {
-      ExecutionPlan plan =
-          f_ptr->getPlanFor(*stack, GraphExecutor::getDefaultNumBailOuts());
-      InterpreterState(plan.code).run(*stack);
-    } else {
-      InterpreterState(legacy_f).run(*stack);
-    }
+    InterpreterState(f).run(*stack);
 
     {
       auto outputs = last(stack, num_outputs);
@@ -423,7 +411,6 @@ struct DifferentiableGraphOp {
 
  private:
   friend GraphExecutor* detail::getGradExecutor(Operation& op);
-  friend GraphExecutor* detail::getDifferentiableGraphOpExecutor(Operation& op);
 
   at::Tensor detach(at::Tensor t) const {
     if (!t.defined()) {
@@ -470,8 +457,7 @@ struct DifferentiableGraphOp {
     }
   }
 
-  std::shared_ptr<GraphExecutor> f_ptr;
-  Code legacy_f;
+  Code f;
   Gradient grad;
   GraphExecutor grad_executor;
 
@@ -510,17 +496,6 @@ GraphExecutor* getGradExecutor(Operation& op) {
   }
   return nullptr;
 }
-
-GraphExecutor* getDifferentiableGraphOpExecutor(Operation& op) {
-  TORCH_INTERNAL_ASSERT(
-      IsNewExecutorEnabled(),
-      __FUNCTION__,
-      " is only accessible under profiling executor\n");
-  if (auto diff_op = op.target<DifferentiableGraphOp>()) {
-    return diff_op->f_ptr.get();
-  }
-  return nullptr;
-}
 } // namespace detail
 
 void GraphExecutorImplBase::run(Stack& stack) {
@@ -535,15 +510,13 @@ void GraphExecutorImplBase::run(Stack& stack) {
   logging::getLogger()->addStatValue(
       logging::runtime_counters::GRAPH_EXECUTOR_INVOCATIONS, 1.0);
 
-  const ExecutionPlan& plan =
+  ExecutionPlan plan =
       getPlanFor(stack, GraphExecutor::getDefaultNumBailOuts());
   InterpreterState(plan.code).run(stack);
   last_executed_optimized_graph = plan.graph;
 }
 
-c10::intrusive_ptr<Future> GraphExecutorImplBase::runAsync(
-    Stack& stack,
-    TaskLauncher taskLauncher) {
+c10::intrusive_ptr<Future> GraphExecutorImplBase::runAsync(Stack& stack) {
   TORCH_CHECK(
       stack.size() >= num_inputs,
       "expected ",
@@ -556,14 +529,13 @@ c10::intrusive_ptr<Future> GraphExecutorImplBase::runAsync(
       logging::runtime_counters::GRAPH_EXECUTOR_INVOCATIONS, 1.0);
 
   struct Frame {
-    explicit Frame(ExecutionPlan eplan, TaskLauncher taskLauncher)
-        : plan(std::move(eplan)), state(plan.code, std::move(taskLauncher)) {}
+    explicit Frame(ExecutionPlan eplan)
+        : plan(std::move(eplan)), state(plan.code) {}
     ExecutionPlan plan;
     InterpreterState state;
   };
   auto frame = std::make_shared<Frame>(
-      getPlanFor(stack, GraphExecutor::getDefaultNumBailOuts()),
-      std::move(taskLauncher));
+      getPlanFor(stack, GraphExecutor::getDefaultNumBailOuts()));
   auto res = frame->state.runAsync(stack);
   last_executed_optimized_graph = frame->plan.graph;
   if (!res->completed()) {
@@ -588,7 +560,7 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
         logging::runtime_counters::GRAPH_EXECUTORS_CONSTRUCTED, 1.0);
   }
 
-  const ExecutionPlan& getPlanFor(Stack& stack, size_t remaining_bailout_depth)
+  ExecutionPlan getPlanFor(Stack& stack, size_t remaining_bailout_depth)
       override {
     return getGraphExecutorOptimize() ? getOrCompile(stack)
                                       : getOrCompileFallback();
@@ -642,7 +614,7 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
 
   ExecutionPlan compileSpec(const ArgumentSpec& spec) {
     auto opt_graph = graph->copy();
-    GRAPH_DUMP("Optimizing the following function:", opt_graph);
+    // GRAPH_DUMP("Optimizing the following function:", opt_graph);
     arg_spec_creator_.specializeTypes(*opt_graph, spec);
 
     // Phase 0. Inline functions, then clean up any artifacts that the inliner
@@ -744,7 +716,7 @@ struct GraphExecutorImpl : public GraphExecutorImplBase {
 };
 
 GraphExecutor::GraphExecutor(
-    const std::shared_ptr<Graph>& graph,
+    std::shared_ptr<Graph> graph,
     std::string function_name)
     : pImpl(
           IsNewExecutorEnabled()
@@ -759,17 +731,15 @@ void GraphExecutor::run(Stack& inputs) {
   return pImpl->run(inputs);
 }
 
-c10::intrusive_ptr<Future> GraphExecutor::runAsync(
-    Stack& stack,
-    TaskLauncher taskLauncher) {
-  return pImpl->runAsync(stack, std::move(taskLauncher));
+c10::intrusive_ptr<Future> GraphExecutor::runAsync(Stack& stack) {
+  return pImpl->runAsync(stack);
 }
 
 size_t GraphExecutor::getDefaultNumBailOuts() {
   return getProfilingMode() ? getBailoutDepth().load() : 0;
 }
 
-const ExecutionPlan& GraphExecutor::getPlanFor(
+ExecutionPlan GraphExecutor::getPlanFor(
     Stack& inputs,
     size_t remaining_bailout_depth) {
   return pImpl->getPlanFor(inputs, remaining_bailout_depth);
@@ -781,16 +751,6 @@ std::shared_ptr<Graph> GraphExecutor::graph() const {
 
 GraphExecutorState GraphExecutor::getDebugState() {
   return pImpl->getDebugState();
-}
-
-void GraphExecutor::debugFlushCompilationCache() {
-  if (auto ppImpl =
-          std::dynamic_pointer_cast<ProfilingGraphExecutorImpl>(pImpl)) {
-    ppImpl->debugFlushCompilationCache();
-  } else {
-    // we are deprecating legacy executor
-    TORCH_INTERNAL_ASSERT("Not Implemented for Legacy Executor");
-  }
 }
 
 TORCH_API bool IsNewExecutorEnabled() {
@@ -900,10 +860,7 @@ void runNondiffOptimization(
       "After customPostPassses (end of runNondiffOptimization)\n", *graph);
 }
 
-void runOptimization(
-    std::shared_ptr<Graph>& graph,
-    bool unroll,
-    bool const_prop_user_classes) {
+void runOptimization(std::shared_ptr<Graph>& graph, bool unroll) {
   // Basic graph preprocessing to eliminate noise.
   GRAPH_DEBUG(
       "Before EliminateDeadCode (beginning of runOptimization)\n", *graph);
@@ -916,14 +873,8 @@ void runOptimization(
 
   PeepholeOptimize(graph);
   GRAPH_DEBUG("After PeepholeOptimize, before ConstantPropagation\n", *graph);
-
-  if (const_prop_user_classes) {
-    ConstantPropagation(graph);
-  } else {
-    ConstantPropagation(graph, true);
-  }
+  ConstantPropagation(graph);
   GRAPH_DEBUG("After ConstantPropagation, before ConstantPooling\n", *graph);
-
   ConstantPooling(graph);
   GRAPH_DEBUG("After ConstantPooling\n", *graph);
 
