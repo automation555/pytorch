@@ -6,12 +6,14 @@ torch.testing._internal.common_cuda.py can freely initialize CUDA context when i
 """
 
 import sys
+import bz2
 import os
 import platform
 import re
 import gc
 import types
 import math
+from datetime import datetime, timedelta
 from functools import partial
 import inspect
 import io
@@ -38,14 +40,14 @@ import json
 from urllib.request import urlopen
 import __main__  # type: ignore[import]
 import errno
-from typing import cast, Any, Dict, Iterable, Iterator, Optional
+from typing import cast, Any, Dict, List, Iterable, Iterator, Optional, Tuple
 
 import numpy as np
 
-from torch.testing import floating_types_and, integral_types, complex_types
 from torch.testing._internal import expecttest
-from .._core import \
-    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type)
+from torch.testing import \
+    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type,
+     floating_types_and, integral_types, complex_types)
 
 import torch
 import torch.cuda
@@ -54,6 +56,13 @@ from torch._six import string_classes
 import torch.backends.cudnn
 import torch.backends.mkl
 from enum import Enum
+
+try:
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../.."))
+    from tools.stats_utils.s3_stat_parser import (get_S3_bucket_readonly, HAVE_BOTO3, Report, Version2Report)
+except ImportError:
+    print("Unable to import s3_stat_parser from tools. Running without S3 stats...")
+    HAVE_BOTO3 = False
 
 torch.backends.disable_global_flags()
 
@@ -690,30 +699,6 @@ def is_iterable(obj):
     except TypeError:
         return False
 
-
-def is_iterable_of_tensors(iterable, include_empty=False):
-    """ Returns True if iterable is an iterable of tensors and False o.w.
-
-        If the iterable is empty, the return value is :attr:`include_empty`
-    """
-    # Tensor itself is iterable so we check this first
-    if isinstance(iterable, torch.Tensor):
-        return False
-
-    try:
-        if len(iterable) == 0:
-            return include_empty
-
-        for t in iter(iterable):
-            if not isinstance(t, torch.Tensor):
-                return False
-
-    except TypeError as te:
-        return False
-
-    return True
-
-
 class CudaNonDefaultStream():
     def __enter__(self):
         # Before starting CUDA test save currently active streams on all
@@ -817,24 +802,91 @@ except ImportError:
     print('Fail to import hypothesis in common_utils, tests are not derandomized')
 
 
-slow_tests_dict: Optional[Dict[str, float]] = None
-def check_slow_test_from_stats(test):
-    global slow_tests_dict
-    if slow_tests_dict is None:
-        url = 'https://raw.githubusercontent.com/pytorch/test-infra/master/stats/.pytorch-slow-tests'
-        try:
-            contents = urlopen(url, timeout=1).read().decode('utf-8')
-            slow_tests_dict = json.loads(contents)
-        except Exception as e:
-            print(f'Could not download slow test stats because of error {e}. Proceeding with no added slow tests.')
-            slow_tests_dict = {}
+# COPIED FROM RUN_TEST.PY --> should refactor.
+# This function returns a list of S3 test time reports. This function can run into errors if HAVE_BOTO3 = False
+# or the S3 bucket is somehow unavailable. Even though this function goes through ten nightly commits' reports
+# to find a non-empty report, it is still conceivable (though highly unlikely) for this function to return no reports.
+def get_test_time_reports_from_S3() -> List[Report]:
+    commit_date_ts = subprocess.check_output(
+        ['git', 'show', '-s', '--format=%ct', 'HEAD'],
+        encoding="ascii").strip()
+    commit_date = datetime.fromtimestamp(int(commit_date_ts))
+    day_before_commit = str(commit_date - timedelta(days=1)).split(' ')[0]
+    # something like git rev-list --before="2021-03-04" --max-count=10 --remotes="*origin/nightly"
+    nightly_commits = subprocess.check_output(
+        ["git", "rev-list", f"--before={day_before_commit}", "--max-count=10", "--remotes=*origin/nightly"],
+        encoding="ascii").splitlines()
+
+    job = os.environ.get("CIRCLE_JOB", "")
+    job_minus_shard_number = job.rstrip('0123456789')
+
+    bucket = get_S3_bucket_readonly('ossci-metrics')
+    reports: List[Report] = []
+    commit_index = 0
+    while len(reports) == 0 and commit_index < len(nightly_commits):
+        nightly_commit = nightly_commits[commit_index]
+        print(f'Grabbing reports from nightly commit: {nightly_commit}')
+        summaries = bucket.objects.filter(Prefix=f"test_time/{nightly_commit}/{job_minus_shard_number}")
+        for summary in summaries:
+            binary = summary.get()["Body"].read()
+            string = bz2.decompress(binary).decode("utf-8")
+            reports.append(json.loads(string))
+        commit_index += 1
+    return reports
+
+
+def calculate_test_case_times(reports: List[Report]) -> Dict[str, float]:
+    # an entry will be like ("test_doc_examples (__main__.TestTypeHints)" -> (current_avg, # values))
+    test_names_to_times: Dict[str, Tuple[float, int]] = dict()
+    for report in reports:
+        if 'format_version' not in report:  # version 1 implicitly
+            raise RuntimeError("S3 format currently handled is version 2 only")
+        else:
+            v2report = cast(Version2Report, report)
+            for _, test_file in v2report['files'].items():
+                for suitename, test_suite in test_file['suites'].items():
+                    for casename, test_case in test_suite['cases'].items():
+                        name = f'{casename} (__main__.{suitename})'
+                        succeeded: bool = test_case['status'] is None
+                        if succeeded:
+                            if name not in test_names_to_times:
+                                test_names_to_times[name] = (test_case['seconds'], 1)
+                            else:
+                                curr_avg, curr_count = test_names_to_times[name]
+                                new_count = curr_count + 1
+                                new_avg = (curr_avg * curr_count + test_case['seconds']) / new_count
+                                test_names_to_times[name] = (new_avg, new_count)
+    return {test_case: time for test_case, (time, _) in test_names_to_times.items()}
+
+
+# ALSO TAKEN FROM RUN_TEST.PY, but returns dictionaries of testMethodNames to their times
+def pull_test_times_from_S3() -> Dict[str, float]:
+    if HAVE_BOTO3:
+        s3_reports = get_test_time_reports_from_S3()
+    else:
+        print('Uh oh, boto3 is not found. Either it is not installed or we failed to import s3_stat_parser.')
+        print('If not installed, please install boto3 for automatic sharding and test categorization.')
+        s3_reports = []
+
+    if len(s3_reports) == 0:
+        print('Gathered no reports from S3. Please proceed without them.')
+        return dict()
+
+    return calculate_test_case_times(s3_reports)
+
+
+slow_tests_from_s3: Optional[Dict[str, float]] = None
+SLOW_TEST_THRESHOLD: float = 60.0
+def check_slow_test_from_S3(test):
+    global slow_tests_from_s3
+    if slow_tests_from_s3 is None and HAVE_BOTO3:
+        slow_tests_from_s3 = pull_test_times_from_S3()
+    slow_tests_from_s3 = cast(Dict[str, float], slow_tests_from_s3)
     test_suite = str(test.__class__).split('\'')[1]
     test_name = f'{test._testMethodName} ({test_suite})'
 
-    if test_name in slow_tests_dict:
+    if test_name in slow_tests_from_s3 and slow_tests_from_s3[test_name] > SLOW_TEST_THRESHOLD:
         getattr(test, test._testMethodName).__dict__['slow_test'] = True
-        if not TEST_WITH_SLOW:
-            raise unittest.SkipTest("test is slow; run with PYTORCH_TEST_WITH_SLOW to enable test")
 
 
 disabled_test_from_issues: Optional[Dict[str, Any]] = None
@@ -904,7 +956,7 @@ def get_comparison_dtype(a, b):
 class AssertRaisesContextIgnoreNotImplementedError(unittest.case._AssertRaisesContext):
     def __exit__(self, exc_type, exc_value, tb):
         if exc_type is not None and issubclass(exc_type, NotImplementedError):
-            self.test_case.skipTest(f"not_implemented: {exc_value}")  # type: ignore[attr-defined]
+            self.test_case.skipTest("not_implemented: {exc_value}")  # type: ignore[attr-defined]
         return super().__exit__(exc_type, exc_value, tb)
 
 class TestCase(expecttest.TestCase):
@@ -1011,13 +1063,13 @@ class TestCase(expecttest.TestCase):
 
     def setUp(self):
 
-        check_slow_test_from_stats(self)
-        if TEST_SKIP_FAST:
-            if not getattr(self, self._testMethodName).__dict__.get('slow_test', False):
-                raise unittest.SkipTest("test is fast; we disabled it with PYTORCH_TEST_SKIP_FAST")
-        check_disabled(str(self))
+        check_slow_test_from_S3(self)
+        # if TEST_SKIP_FAST:
+        #     if not getattr(self, self._testMethodName).__dict__.get('slow_test', False):
+        #         raise unittest.SkipTest("test is fast; we disabled it with PYTORCH_TEST_SKIP_FAST")
+        # check_disabled(str(self))
 
-        set_rng_seed(SEED)
+        # set_rng_seed(SEED)
 
     def genSparseTensor(self, size, sparse_dim, nnz, is_uncoalesced, device='cpu'):
         # Assert not given impossible combination, where the sparse dims have
@@ -1671,6 +1723,7 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
             result = (torch.rand(size, device=device, dtype=torch.float32) * span + low).to(torch.bfloat16)
         else:
             result = torch.rand(size, device=device, dtype=dtype) * span + low
+        result.requires_grad = requires_grad
     else:
         assert dtype in complex_types()
         low = -9 if low is None else max(low, -9)
@@ -1680,14 +1733,11 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
         real = torch.rand(size, device=device, dtype=float_dtype) * span + low
         imag = torch.rand(size, device=device, dtype=float_dtype) * span + low
         result = torch.complex(real, imag)
+        result.requires_grad = requires_grad
 
     if discontiguous and result.numel() > 1:
         result = torch.repeat_interleave(result, 2, dim=-1)
         result = result[..., ::2]
-
-    if dtype in floating_types_and(torch.half, torch.bfloat16) or\
-       dtype in complex_types():
-        result.requires_grad = requires_grad
 
     return result
 
