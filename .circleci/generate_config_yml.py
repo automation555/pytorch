@@ -112,10 +112,7 @@ def gen_build_workflows_tree():
                 "when": r"<< pipeline.parameters.run_binary_tests >>",
                 "jobs": [f() for f in binary_build_functions],
             },
-            "build": {
-                "when": r"<< pipeline.parameters.run_build >>",
-                "jobs": [f() for f in build_workflows_functions]
-            },
+            # "build": {"jobs": [f() for f in build_workflows_functions]},
         }
     }
 
@@ -139,7 +136,6 @@ YAML_SOURCES = [
     File("job-specs/docker_jobs.yml"),
     Header("Workflows"),
     Treegen(gen_build_workflows_tree, 0),
-    File("workflows/workflows-scheduled-ci.yml"),
     File("workflows/workflows-ecr-gc.yml"),
     File("workflows/workflows-promote.yml"),
 ]
