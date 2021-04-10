@@ -118,7 +118,7 @@ void batch_norm_cpu_inference_channels_last(Tensor& output, const Tensor& input,
   // output(n, c, h, w) = input(n, c, h, w) * alpha(c) + beta(c)
   // No need to use parallel_for as this function is supposed to be
   // memory-limited.
-  // Keep the loop structure simple to make sure compiler vectorization kicks in.
+  // Keep the loop struture simple to make sure compiler vectorization kicks in.
   if (n_channel != 1) {
     for (int64_t n = 0; n < n_batch; ++n) {
       for (int64_t i = 0; i < image_size; ++i) {
@@ -392,14 +392,9 @@ std::tuple<Tensor, Tensor, Tensor> batch_norm_backward_cpu_template(const Tensor
 // use its corresponding backward implementation.
 // XXX: The indices of backends need to be kept synchronized between this function and its _backward.
 std::tuple<Tensor, Tensor, Tensor, Tensor, int64_t> _batch_norm_impl_index(
-    const Tensor& input, const c10::optional<Tensor>& weight_opt /* optional */, const c10::optional<Tensor>& bias_opt /* optional */, const c10::optional<Tensor>& running_mean_opt /* optional */, const c10::optional<Tensor>& running_var_opt /* optional */,
+    const Tensor& input, const Tensor& weight /* optional */, const Tensor& bias /* optional */,
+    const Tensor& running_mean /* optional */, const Tensor& running_var /* optional */,
     bool training, double momentum, double eps, bool cudnn_enabled) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& bias = c10::value_or_else(bias_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
-
   auto num_features = input.sizes()[1];
   if (running_mean.defined()) {
     check_dims_match_num_input_features("running_mean", num_features, running_mean.numel());
@@ -420,7 +415,6 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, int64_t> _batch_norm_impl_index(
 
   bool use_cudnn = false;
   use_cudnn = (input.is_cuda()
-               && input.scalar_type() != at::kBFloat16 && weight.scalar_type() != at::kBFloat16
                && (input.scalar_type() != at::kHalf
                  || weight.scalar_type() == at::kFloat)
                && weight.defined() && bias.defined()
@@ -478,15 +472,10 @@ std::tuple<Tensor, Tensor, Tensor, Tensor, int64_t> _batch_norm_impl_index(
 
 std::tuple<Tensor, Tensor, Tensor> _batch_norm_impl_index_backward(
     int64_t impl_index,
-    const Tensor& input, const Tensor& grad_output, const c10::optional<Tensor>& weight_opt /* optional */, const c10::optional<Tensor>& running_mean_opt /* optional */, const c10::optional<Tensor>& running_var_opt /* optional */, const c10::optional<Tensor>& save_mean_opt /* optional */, const c10::optional<Tensor>& save_var_transform_opt /* optional */,
+    const Tensor& input, const Tensor& grad_output, const Tensor& weight /* optional */,
+    const Tensor& running_mean /* optional */, const Tensor& running_var /* optional */,
+    const Tensor& save_mean /* optional */, const Tensor& save_var_transform /* optional */,
     bool train, double epsilon, std::array<bool, 3> output_mask, const Tensor &reservedSpace) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
-  const Tensor& save_mean = c10::value_or_else(save_mean_opt, [] {return Tensor();});
-  const Tensor& save_var_transform = c10::value_or_else(save_var_transform_opt, [] {return Tensor();});
-
   if (impl_index == 0) {
     return at::native_batch_norm_backward(grad_output, input, weight, running_mean, running_var, save_mean, save_var_transform, train, epsilon, output_mask);
   } else if (impl_index == 1) {
@@ -496,17 +485,13 @@ std::tuple<Tensor, Tensor, Tensor> _batch_norm_impl_index_backward(
   } else if (impl_index == 2) {
     return at::miopen_batch_norm_backward(input, grad_output, weight, running_mean, running_var, save_mean, save_var_transform, epsilon);
   }
-  TORCH_INTERNAL_ASSERT(false, "Unsupported impl_index in _batch_norm_impl_index_backward: ", impl_index);
+  AT_ASSERTM(false, "Unsupported impl_index in _batch_norm_impl_index_backward: ", impl_index);
 }
 
 Tensor batch_norm(
-    const Tensor& input, const c10::optional<Tensor>& weight_opt, const c10::optional<Tensor>& bias_opt,
-    const c10::optional<Tensor>& running_mean_opt, const c10::optional<Tensor>& running_var_opt,
+    const Tensor& input, const Tensor& weight /* optional */, const Tensor& bias /* optional */,
+    const Tensor& running_mean /* optional */, const Tensor& running_var /* optional */,
     bool training, double momentum, double eps, bool cudnn_enabled) {
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& bias = c10::value_or_else(bias_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
   if (input.numel()==0){
     //don't return view of input, don't return empty tensor because it will break gradient chain
     auto out = input.clone();
@@ -518,15 +503,102 @@ Tensor batch_norm(
                                                 training, momentum, eps, cudnn_enabled));
 }
 
-Tensor instance_norm(
-    const Tensor& input, const c10::optional<Tensor>& weight_opt /* optional */, const c10::optional<Tensor>& bias_opt /* optional */, const c10::optional<Tensor>& running_mean_opt /* optional */, const c10::optional<Tensor>& running_var_opt /* optional */,
-    bool use_input_stats, double momentum, double eps, bool cudnn_enabled) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& bias = c10::value_or_else(bias_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
+std::vector<int64_t> make_reduce_dims(int64_t input_dim) {
+  std::vector<int64_t> result;
+  result.push_back(0);
+  for (int64_t i = 2; i < input_dim; i++) {
+    result.push_back(i);
+  }
+  return result;
+}
 
+std::vector<int64_t> make_scalar_shape(int64_t input_dim, int64_t n_input) {
+  std::vector<int64_t> result;
+  result.push_back(1);
+  result.push_back(n_input);
+  for (int64_t i = 2; i < input_dim; i++) {
+    result.push_back(1);
+  }
+  return result;
+}
+
+Tensor math_batch_norm(
+    const Tensor& input, const Tensor& weight /* optional */, const Tensor& bias /* optional */,
+    const Tensor& running_mean /* optional */, const Tensor& running_var /* optional */,
+    bool training, double momentum, double eps, bool cudnn_enabled) {
+
+  auto num_features = input.sizes()[1];
+  if (running_mean.defined()) {
+    check_dims_match_num_input_features("running_mean", num_features, running_mean.numel());
+  } else if (!training) {
+    AT_ERROR("running_mean must be defined in evaluation mode");
+  }
+  if (running_var.defined()) {
+    check_dims_match_num_input_features("running_var", num_features, running_var.numel());
+  } else if (!training) {
+    AT_ERROR("running_var must be defined in evaluation mode");
+  }
+  if (weight.defined()) {
+    check_dims_match_num_input_features("weight", num_features, weight.numel());
+  }
+  if (bias.defined()) {
+    check_dims_match_num_input_features("bias", num_features, bias.numel());
+  }
+
+  Tensor output = at::empty_like(input, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+
+  int64_t n_input = input.size(1);
+  auto scalar_shape = make_scalar_shape(input.dim(), n_input);
+
+  at::Tensor mean;
+  at::Tensor invstd;
+  at::Tensor save_mean;
+  at::Tensor save_invstd;
+
+  if (training) {
+    auto reduce_dims = make_reduce_dims(input.dim());
+    save_mean = at::mean(input, IntArrayRef(reduce_dims));
+
+    save_invstd = 1 / at::sqrt(
+        at::var(input, IntArrayRef(reduce_dims), false) + eps);
+
+    if (running_mean.defined()) {
+      at::Tensor running_mean_(running_mean.getIntrusivePtr());
+      running_mean_ = running_mean_.detach();
+      running_mean_.copy_(momentum * save_mean + (1 - momentum) * running_mean);
+    }
+
+    if (running_var.defined()) {
+      Tensor unbiased_var = at::var(input, IntArrayRef(reduce_dims));
+      at::Tensor running_var_(running_var.getIntrusivePtr());
+      running_var_ = running_var_.detach();
+      running_var_.copy_(momentum * unbiased_var + (1 - momentum) * running_var);
+    }
+
+    mean = save_mean;
+    invstd = save_invstd;
+  } else {
+    mean = running_mean;
+    invstd = 1 / at::sqrt(running_var + eps);
+  }
+
+  output = input;
+  output = output - mean.reshape(IntArrayRef(scalar_shape));
+  output = output * invstd.reshape(IntArrayRef(scalar_shape));
+
+  if (weight.defined()) {
+    output = output * weight.reshape(IntArrayRef(scalar_shape));
+  }
+  if (bias.defined()) {
+    output = output + bias.reshape(IntArrayRef(scalar_shape));
+  }
+  return output;
+}
+
+Tensor instance_norm(
+    const Tensor& input, const Tensor& weight /* optional */, const Tensor& bias /* optional */,
+    const Tensor& running_mean /* optional */, const Tensor& running_var /* optional */,
+    bool use_input_stats, double momentum, double eps, bool cudnn_enabled) {
   TORCH_CHECK(use_input_stats || (running_mean.defined() && running_var.defined()),
            "Expected running_mean and running_var to be defined when use_input_stats is false");
   std::vector<int64_t> shape = input.sizes().vec();
@@ -556,24 +628,15 @@ Tensor instance_norm(
 }
 
 std::tuple<Tensor, Tensor> batch_norm_update_stats_cpu(
-        const Tensor& self, const c10::optional<Tensor>& running_mean_opt, const c10::optional<Tensor>& running_var_opt, double momentum) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
-
+        const Tensor& self, const Tensor& running_mean, const Tensor& running_var, double momentum) {
   return AT_DISPATCH_FLOATING_TYPES(self.scalar_type(), "batch_norm_update_stats_cpu", [&] {
       return batch_norm_cpu_update_stats_template<scalar_t, Var>(self, running_mean, running_var, momentum, 0);
     });
 }
 
-std::tuple<Tensor, Tensor, Tensor> batch_norm_cpu(const Tensor& self, const c10::optional<Tensor>& weight_opt, const c10::optional<Tensor>& bias_opt, const c10::optional<Tensor>& running_mean_opt, const c10::optional<Tensor>& running_var_opt,
+std::tuple<Tensor, Tensor, Tensor> batch_norm_cpu(const Tensor& self, const Tensor& weight, const Tensor& bias,
+                                                  const Tensor& running_mean, const Tensor& running_var,
                                                   bool train, double momentum, double eps) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& bias = c10::value_or_else(bias_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
-
   checkBackend("batch_norm_cpu", {self, weight, bias, running_mean, running_var}, Backend::CPU);
 
   return AT_DISPATCH_FLOATING_TYPES(self.scalar_type(), "batch_norm", [&] {
@@ -586,15 +649,9 @@ std::tuple<Tensor, Tensor, Tensor> batch_norm_cpu(const Tensor& self, const c10:
     });
 }
 
-std::tuple<Tensor, Tensor, Tensor> batch_norm_backward_cpu(const Tensor& grad_out, const Tensor& self, const c10::optional<Tensor>& weight_opt, const c10::optional<Tensor>& running_mean_opt, const c10::optional<Tensor>& running_var_opt, const c10::optional<Tensor>& save_mean_opt, const c10::optional<Tensor>& save_invstd_opt,
+std::tuple<Tensor, Tensor, Tensor> batch_norm_backward_cpu(const Tensor& grad_out, const Tensor& self, const Tensor& weight,
+                                                           const Tensor& running_mean, const Tensor& running_var, const Tensor& save_mean, const Tensor& save_invstd,
                                                            bool train, double eps, std::array<bool,3> grad_input_mask) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weight = c10::value_or_else(weight_opt, [] {return Tensor();});
-  const Tensor& running_mean = c10::value_or_else(running_mean_opt, [] {return Tensor();});
-  const Tensor& running_var = c10::value_or_else(running_var_opt, [] {return Tensor();});
-  const Tensor& save_mean = c10::value_or_else(save_mean_opt, [] {return Tensor();});
-  const Tensor& save_invstd = c10::value_or_else(save_invstd_opt, [] {return Tensor();});
-
   return AT_DISPATCH_FLOATING_TYPES(self.scalar_type(), "batch_norm_backward_cpu", [&] {
       return batch_norm_backward_cpu_template<scalar_t>(grad_out, self, weight, running_mean, running_var, save_mean, save_invstd, train, eps, grad_input_mask);
     });
