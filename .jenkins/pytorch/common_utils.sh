@@ -18,7 +18,7 @@ function cleanup {
 function assert_git_not_dirty() {
     # TODO: we should add an option to `build_amd.py` that reverts the repo to
     #       an unmodified state.
-    if [[ "$BUILD_ENVIRONMENT" != *rocm* ]] && [[ "$BUILD_ENVIRONMENT" != *xla* ]] ; then
+    if ([[ "$BUILD_ENVIRONMENT" != *rocm* ]] && [[ "$BUILD_ENVIRONMENT" != *xla* ]]) ; then
         git_status=$(git status --porcelain)
         if [[ $git_status ]]; then
             echo "Build left local git repository checkout dirty"
@@ -52,9 +52,9 @@ function get_exit_code() {
 function file_diff_from_base() {
   # The fetch may fail on Docker hosts, but it's not always necessary.
   set +e
-  git fetch origin master --quiet
+  git fetch origin release/1.7 --quiet
   set -e
-  git diff --name-only "$(git merge-base origin/master HEAD)" > "$1"
+  git diff --name-only "$(git merge-base origin/release/1.7 HEAD)" > "$1"
 }
 
 function get_bazel() {
@@ -66,12 +66,7 @@ function get_bazel() {
   chmod +x tools/bazel
 }
 
-function install_monkeytype {
-  # Install MonkeyType
-  pip_install MonkeyType
-}
-
-TORCHVISION_COMMIT=8a2dc6f22ac4389ccba8859aa1e1cb14f1ee53db
+TORCHVISION_COMMIT=291f7e20339510cfa956b5782741697eb8e6d554
 
 function install_torchvision() {
   # Check out torch/vision at Jun 11 2020 commit

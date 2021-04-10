@@ -42,28 +42,7 @@ fi
 
 echo "install_path: $install_path  version: $version"
 
-
-build_docs () {
-  set +e
-  set -o pipefail
-  make $1 2>&1 | tee /tmp/docs_build.txt
-  code=$?
-  if [ $code -ne 0 ]; then
-    set +x
-    echo =========================
-    grep "WARNING:" /tmp/docs_build.txt
-    echo =========================
-    echo Docs build failed. If the failure is not clear, scan back in the log
-    echo for any WARNINGS or for the line "build finished with problems"
-    echo "(tried to echo the WARNINGS above the ==== line)"
-    echo =========================
-  fi
-  set -ex
-  return $code
-}
-
-
-git clone https://github.com/pytorch/pytorch.github.io -b $branch --depth 1
+git clone https://github.com/pytorch/pytorch.github.io -b $branch
 pushd pytorch.github.io
 
 export LC_ALL=C
@@ -73,13 +52,15 @@ rm -rf pytorch || true
 
 # Get all the documentation sources, put them in one place
 pushd "$pt_checkout"
+checkout_install_torchvision
 pushd docs
+rm -rf source/torchvision
+cp -a ../vision/docs/source source/torchvision
 
 # Build the docs
 pip -q install -r requirements.txt
 if [ "$is_master_doc" = true ]; then
-  build_docs html
-  [ $? -eq 0 ] || exit $?
+  make html
   make coverage
   # Now we have the coverage report, we need to make sure it is empty.
   # Count the number of lines in the file and turn that number into a variable
@@ -100,9 +81,8 @@ if [ "$is_master_doc" = true ]; then
     exit 1
   fi
 else
-  # skip coverage, format for stable or tags
-  build_docs html-stable
-  [ $? -eq 0 ] || exit $?
+  # Don't fail the build on coverage problems
+  make html-stable
 fi
 
 # Move them into the docs repo
@@ -110,6 +90,14 @@ popd
 popd
 git rm -rf "$install_path" || true
 mv "$pt_checkout/docs/build/html" "$install_path"
+
+# Add the version handler by search and replace.
+# XXX: Consider moving this to the docs Makefile or site build
+if [ "$is_master_doc" = true ]; then
+  find "$install_path" -name "*.html" -print0 | xargs -0 perl -pi -w -e "s@master\s+\((\d\.\d\.[A-Fa-f0-9]+\+[A-Fa-f0-9]+)\s+\)@<a href='http://pytorch.org/docs/versions.html'>\1 \&#x25BC</a>@g"
+else
+  find "$install_path" -name "*.html" -print0 | xargs -0 perl -pi -w -e "s@master\s+\((\d\.\d\.[A-Fa-f0-9]+\+[A-Fa-f0-9]+)\s+\)@<a href='http://pytorch.org/docs/versions.html'>$version \&#x25BC</a>@g"
+fi
 
 # Prevent Google from indexing $install_path/_modules. This folder contains
 # generated source files.
@@ -122,7 +110,7 @@ git status
 git config user.email "soumith+bot@pytorch.org"
 git config user.name "pytorchbot"
 # If there aren't changes, don't make a commit; push is no-op
-git commit -m "Generate Python docs from pytorch/pytorch@$CIRCLE_SHA1" || true
+git commit -m "auto-generating sphinx docs" || true
 git status
 
 popd
