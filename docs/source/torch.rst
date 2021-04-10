@@ -31,7 +31,7 @@ Tensors
 .. _tensor-creation-ops:
 
 Creation Ops
-~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
     Random sampling creation ops are listed under :ref:`random-sampling` and
@@ -77,8 +77,6 @@ Creation Ops
     polar
     heaviside
 
-.. _indexing-slicing-joining:
-
 Indexing, Slicing, Joining, Mutating Ops
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. autosummary::
@@ -87,9 +85,11 @@ Indexing, Slicing, Joining, Mutating Ops
 
     cat
     chunk
+    dsplit
     column_stack
     dstack
     gather
+    hsplit
     hstack
     index_select
     masked_select
@@ -108,12 +108,12 @@ Indexing, Slicing, Joining, Mutating Ops
     swapdims
     t
     take
-    take_along_dim
     tensor_split
     tile
     transpose
     unbind
     unsqueeze
+    vsplit
     vstack
     where
 
