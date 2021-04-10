@@ -488,15 +488,15 @@
 
 - func: acosh(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: acosh.out
+  dispatch:
+    CPU, CUDA: acosh
 
 - func: acosh_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: acosh.out
+  dispatch:
+    CompositeExplicitAutograd: acosh_
 
 - func: acosh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: acosh_out
 
@@ -1041,7 +1041,6 @@
   variants: method
   device_guard: False
   dispatch:
-    MkldnnCPU: copy_mkldnn_
     CompositeExplicitAutograd: copy_
 
 - func: _copy_from(Tensor self, Tensor dst, bool non_blocking=False) -> Tensor
@@ -1049,29 +1048,29 @@
 
 - func: cos(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: cos.out
+  dispatch:
+    CPU, CUDA: cos
 
 - func: cos_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: cos.out
+  dispatch:
+    CompositeExplicitAutograd: cos_
 
 - func: cos.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: cos_out
 
 - func: cosh(Tensor self) -> Tensor
   variants: function, method
-  structured_delegate: cosh.out
+  dispatch:
+    CPU, CUDA: cosh
 
 - func: cosh_(Tensor(a!) self) -> Tensor(a!)
   variants: function, method
-  structured_delegate: cosh.out
+  dispatch:
+    CompositeExplicitAutograd: cosh_
 
 - func: cosh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: cosh_out
 
@@ -2809,7 +2808,23 @@
 
 - func: pixel_shuffle(Tensor self, int upscale_factor) -> Tensor
 
+- func: _pixel_shuffle_cpu(Tensor self, int[] output_sizes, int upscale_factor) -> Tensor
+  dispatch:
+    CPU: _pixel_shuffle_cpu
+
+- func: _pixel_shuffle_backward_cpu(Tensor grad_output, int[] input_sizes, int upscale_factor) -> Tensor
+  dispatch:
+    CPU: _pixel_shuffle_backward_cpu
+
 - func: pixel_unshuffle(Tensor self, int downscale_factor) -> Tensor
+
+- func: _pixel_unshuffle_cpu(Tensor self, int[] output_sizes, int downscale_factor) -> Tensor
+  dispatch:
+    CPU: _pixel_unshuffle_cpu
+
+- func: _pixel_unshuffle_backward_cpu(Tensor grad_output, int[] input_sizes, int downscale_factor) -> Tensor
+  dispatch:
+    CPU: _pixel_unshuffle_backward_cpu
 
 - func: channel_shuffle(Tensor self, int groups) -> Tensor
   dispatch:
@@ -3201,16 +3216,16 @@
     CPU, CUDA: sinc_out
 
 - func: sinh(Tensor self) -> Tensor
-  structured_delegate: sinh.out
   variants: function, method
+  dispatch:
+    CPU, CUDA: sinh
 
 - func: sinh_(Tensor(a!) self) -> Tensor(a!)
-  structured_delegate: sinh.out
   variants: function, method
+  dispatch:
+    CompositeExplicitAutograd: sinh_
 
 - func: sinh.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  structured: True
-  structured_inherits: TensorIteratorBase
   dispatch:
     CPU, CUDA: sinh_out
 
@@ -6067,25 +6082,25 @@
 - func: sort.values(Tensor self, int dim=-1, bool descending=False, *, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
   dispatch:
     CPU: sort_out_cpu
-    CUDA: sort_out_cuda
+    CUDA: legacy::cuda::_th_sort_out
 
 - func: sort.values_stable(Tensor self, *, bool? stable, int dim=-1, bool descending=False, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
   dispatch:
     CPU: sort_out_cpu_stable
-    CUDA: sort_out_stable_cuda
+    CUDA: legacy::cuda::_th_sort_out_stable
 
 - func: sort(Tensor self, int dim=-1, bool descending=False) -> (Tensor values, Tensor indices)
   variants: method, function
   dispatch:
     CPU: sort_cpu
-    CUDA: sort_cuda
+    CUDA: legacy::cuda::_th_sort
     QuantizedCPU: sort_quantized_cpu
 
 - func: sort.stable(Tensor self, *, bool? stable, int dim=-1, bool descending=False) -> (Tensor values, Tensor indices)
   variants: method, function
   dispatch:
     CPU: sort_cpu_stable
-    CUDA: sort_stable_cuda
+    CUDA: legacy::cuda::_th_sort_stable
     QuantizedCPU: sort_quantized_cpu_stable
 
 - func: sort.dimname_values(Tensor self, Dimname dim, bool descending=False, *, Tensor(a!) values, Tensor(b!) indices) -> (Tensor(a!) values, Tensor(b!) indices)
@@ -7378,8 +7393,6 @@
 
 - func: adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
   python_module: nn
-
-- func: _adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
   dispatch:
     CPU: adaptive_avg_pool3d_cpu
     CUDA: adaptive_avg_pool3d_cuda
@@ -7391,7 +7404,7 @@
     CPU: adaptive_avg_pool3d_backward_out_cpu
     CUDA: adaptive_avg_pool3d_backward_out_cuda
 
-- func: _adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
+- func: adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
   python_module: nn
   dispatch:
     CPU: adaptive_avg_pool3d_backward_cpu
@@ -8384,21 +8397,6 @@
 
 - func: special_erfinv.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
   python_module: special
-
-- func: special_logit(Tensor self, float? eps=None) -> Tensor
-  python_module: special
-  variants: function
-
-- func: special_logit.out(Tensor self, float? eps=None, *, Tensor(a!) out) -> Tensor(a!)
-  python_module: special
-
-- func: special_expit(Tensor self) -> Tensor
-  python_module: special
-  variants: function
-
-- func: special_expit.out(Tensor self, *, Tensor(a!) out) -> Tensor(a!)
-  python_module: special
-  variants: function
 
 ## Functions related to the fast Fourier transform and the torch.fft namespace
 # Note [FFT namespace binding]
