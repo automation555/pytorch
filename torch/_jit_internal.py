@@ -14,14 +14,13 @@ import warnings
 from textwrap import dedent
 import torch
 import sys
-import builtins
 # This is needed. `torch._jit_internal` is imported before `torch.distributed.__init__`.
 # Explicitly ask to import `torch.distributed.__init__` first.
 # Otherwise, "AttributeError: module 'torch' has no attribute 'distributed'" is raised.
 import torch.distributed.rpc
+from torch._six import builtins
 from torch._utils_internal import get_source_lines_and_file
 from torch.futures import Future
-import torch.package._mangling as package_mangling
 from typing import Tuple, List, Dict, Optional, Union, Any, TypeVar, Generic, Callable  # noqa: F401
 
 if sys.version_info[:2] > (3, 7):
@@ -32,6 +31,19 @@ else:
 # Wrapper functions that can call either of 2 functions depending on a boolean
 # argument
 boolean_dispatched: 'weakref.WeakKeyDictionary[Callable, Dict[str, Callable]]' = weakref.WeakKeyDictionary()  # noqa: T484
+
+
+class FrontendError(Exception):
+    def __init__(self, source_range, msg):
+        self.source_range = source_range
+        self.msg = msg
+
+        # This has to be instantiated here so the ErrorReport is accurate to the
+        # call stack when the FrontendError was raised
+        self.error_report = torch._C.ErrorReport(self.source_range)
+
+    def __str__(self):
+        return self.msg + self.error_report.what().lstrip()
 
 
 def createResolutionCallbackFromEnv(lookup_base):
@@ -81,7 +93,7 @@ def createResolutionCallbackFromEnv(lookup_base):
             value, len_parsed = parseNestedExpr(expr, module)
             assert len_parsed == len(expr), "whole expression was not parsed, falling back to c++ parser"
             return value
-        except Exception:
+        except Exception as e:
             """
             The python resolver fails in several cases in known unit tests, and is intended
             to fall back gracefully to the c++ resolver in general.  For example, python 2 style
@@ -195,9 +207,6 @@ def get_closure(fn):
 # functions will be defined at a global scope like MyGlobalClass. In cases
 # where they are not, it is possible to work around issues by declaring the
 # values global in the function.
-# In Python 3.9 declaring class as global will make it invisible to
-# `inspect.getsource`, see https://bugs.python.org/issue42666 .
-# This could be worked around by manualy adding it to `global()` dictionary.
 
 
 
@@ -220,53 +229,56 @@ def createResolutionCallbackFromClosure(fn):
 
     return createResolutionCallbackFromEnv(closure_lookup())
 
+def check_can_compile_named_tuple(cls, loc):
+    """
+    Check that a NamedTuple can be compiled. This means that it must not have additional
+    user-defined methods.
+
+    Arguments:
+        cls: The NamedTuple subclass in question.
+        loc: A SourceRange instance corresponding to the definition of cls.
+    """
+    # These are methods common to all NamedTuples. Using an allowlist is not the cleanest approach,
+    # but these methods don't exist on NamedTuple or tuple, so it is not possible to write code like:
+    #   for name, value in cls.__dict__.items():
+    #       if getattr(NamedTuple, name) is None and getattr(tuple, name) is None:
+    #           # Must be a user-defined function.
+    allowed_methods = {
+        "__annotations__",
+        "__doc__",
+        "__getnewargs__",
+        "__module__",
+        "__new__",
+        "__repr__",
+        "__slots__",
+        "_asdict",
+        "_field_defaults",
+        "_field_types",
+        "_fields",
+        "_make",
+        "_replace",
+        "_source",
+    }
+
+    for name, value in cls.__dict__.items():
+        if name in allowed_methods:
+            continue
+
+        if inspect.isfunction(value) and not is_ignored_fn(value):
+            raise FrontendError(loc, "User-defined methods in NamedTuples are currently not supported")
+        elif inspect.isroutine(value) and is_static_fn(cls, name) and not is_ignored_fn(value):
+            raise FrontendError(loc, "Static functions in NamedTuples are currently not supported")
+
 
 def can_compile_class(cls):
     # If any of the functions on a type don't have a code object, this type can't
     # be compiled and is probably a builtin / bound from C
     if is_ignored_fn(cls):
         return False
-
-    # Ignore the following list of built-in classes.
-    ignored_builtin_classes = (torch.nn.Module, tuple, list, Exception)
-    if issubclass(cls, ignored_builtin_classes):
-        return False
-
     names = cls.__dict__
     fns = [getattr(cls, name) for name in names if inspect.isroutine(getattr(cls, name, None))]
     has_code = [hasattr(fn, '__code__') for fn in fns]
     return all(has_code)
-
-
-def get_callable_argument_names(fn):
-    """
-    Gets names of all POSITIONAL_OR_KEYWORD arguments for callable `fn`.
-    Returns an empty list when other types of arguments are present.
-
-    This is used by `torch.jit.trace` to assign meaningful argument names to
-    traced functions and modules.
-
-    Args:
-        fn: A callable.
-    Returns:
-        Argument names: List[str]
-    """
-    # inspect.signature may fail, give up in that case.
-    try:
-        callable_signature = inspect.signature(fn)
-    except Exception:
-        return []
-
-    argument_names = []
-    for name, param in callable_signature.parameters.items():
-        # All four other types of arguments do not map to individual values
-        # with a keyword as name.
-        if not param.kind == param.POSITIONAL_OR_KEYWORD:
-            return []
-
-        argument_names.append(name)
-
-    return argument_names
 
 
 def get_annotation_str(annotation):
@@ -279,9 +291,7 @@ def get_annotation_str(annotation):
     elif isinstance(annotation, ast.Attribute):
         return '.'.join([get_annotation_str(annotation.value), annotation.attr])
     elif isinstance(annotation, ast.Subscript):
-        # In Python3.9+ subscript indicies are not wrapped in ast.Index
-        subscript_slice = annotation.slice if sys.version_info >= (3, 9) else annotation.slice.value  # type: ignore
-        return f"{get_annotation_str(annotation.value)}[{get_annotation_str(subscript_slice)}]"
+        return f"{get_annotation_str(annotation.value)}[{get_annotation_str(annotation.slice.value)}]"  # type: ignore
     elif isinstance(annotation, ast.Tuple):
         return ','.join([get_annotation_str(elt) for elt in annotation.elts])
     elif isinstance(annotation, ast.Constant) or isinstance(annotation, ast.NameConstant):
@@ -297,7 +307,7 @@ def get_type_hint_captures(fn):
     for the literal annotations on 'fn'. These are not considered to be closed-over by fn
     and must be obtained separately (e.g. using this function).
 
-    Args:
+    Arguments:
         fn: A callable.
     Returns:
         A Dict[str, Any] containing a mapping from the literal annotations used on
@@ -638,11 +648,10 @@ def _copy_to_script_wrapper(fn):
 
 def module_has_exports(mod):
     for name in dir(mod):
-        if hasattr(mod, name):
-            item = getattr(mod, name)
-            if callable(item):
-                if get_torchscript_modifier(item) is FunctionModifiers.EXPORT:
-                    return True
+        item = getattr(mod, name)
+        if callable(item):
+            if get_torchscript_modifier(item) is FunctionModifiers.EXPORT:
+                return True
     return False
 
 def should_drop(fn):
@@ -665,10 +674,10 @@ def get_static_fn(cls, fn):
 
 
 def get_torchscript_modifier(fn):
-    if not callable(fn):
-        return None
     if hasattr(fn, '__func__'):
         fn = fn.__func__
+    if not callable(fn):
+        return None
     return getattr(fn, '_torchscript_modifier', FunctionModifiers.DEFAULT)
 
 def copy_torchscript_modifier(orig, new):
@@ -882,7 +891,7 @@ def is_scripting():
             return x
 
         def linear(x):
-           if torch.jit.is_scripting():
+           if not torch.jit.is_scripting():
               return torch.linear(x)
            else:
               return unsupported_linear_op(x)
@@ -932,11 +941,6 @@ def _qualified_name(obj):
     # if getattr(sys.modules[module_name], name) is not obj:
     #     raise RuntimeError(f"Could not get qualified name for class '{name}': "
     #                        f"the attr {name} on module {module_name} is not the the class")
-
-    # torch.package and TorchScript have separate mangling schemes to avoid
-    # name collisions from multiple packages. To avoid them interfering with
-    # each other, remove the package mangling here.
-    module_name = package_mangling.demangle(module_name)
 
     # __main__ is a builtin module, so rewrite it to "__torch__".
     if module_name == "__main__":
