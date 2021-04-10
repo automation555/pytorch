@@ -22,7 +22,6 @@
 #include <c10/core/Backend.h>
 #include <c10/core/Layout.h>
 #include <c10/util/Exception.h>
-#include <c10/util/irange.h>
 #include <c10/util/Optional.h>
 
 #include <stdexcept>
@@ -190,7 +189,7 @@ void recursive_store(char* data, IntArrayRef sizes, IntArrayRef strides, int64_t
   }
 
   PyObject** items = PySequence_Fast_ITEMS(seq.get());
-  for(const auto i : c10::irange(n)) {
+  for (int64_t i = 0; i < n; i++) {
     recursive_store(data, sizes, strides, dim + 1, scalarType, elementSize, items[i]);
     data += strides[dim] * elementSize;
   }
@@ -205,7 +204,6 @@ Tensor internal_new_from_data(
     bool copy_numpy,
     bool type_inference,
     bool pin_memory = false) {
-
   if (THPUtils_checkString(data)) {
     throw TypeError("new(): invalid data type '%s'", Py_TYPE(data)->tp_name);
   }
@@ -225,34 +223,78 @@ Tensor internal_new_from_data(
     return var.to(device, inferred_scalar_type, /*non_blocking=*/false, /*copy=*/copy_variables);
   }
 
+  Tensor tensor;
 #ifdef USE_NUMPY
-  if (PyObject_HasAttrString(data, "__cuda_array_interface__")) {
-    TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from __cuda_array_interface__");
-    auto tensor = tensor_from_cuda_array_interface(data);
-    const auto& inferred_scalar_type = type_inference ? tensor.scalar_type() : scalar_type;
-    auto device = device_opt.has_value() ? *device_opt : options.device();
-    pybind11::gil_scoped_release no_gil;
-    maybe_initialize_cuda(device);
-    return tensor.to(device, inferred_scalar_type, /*non_blocking=*/false, /*copy=*/copy_numpy);
-  }
+  if (is_numpy_available()) {
+    if (PyArray_Check(data)) {
+      TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from numpy");
+      tensor = tensor_from_numpy(data, /*warn_if_not_writeable=*/!copy_numpy);
+    } else {
+      // CUDA/CPU Array Interface support.
+      //
+      // We are not using PyObject_HasAttrString because it suppresses
+      // errors that may be raised inside the __array_interface__
+      // property. Although, numpy suppresses errors, it is considered
+      // a bug, see numpy issue #11629.
+      PyObject* attr = PyObject_GetAttrString(data, "__cuda_array_interface__");
+      auto device_type = kCUDA;
+      if (attr == NULL) {
+        // decide if `data` implements Array Interface, it is ok if
+        // not, otherwise raise an exception
+        if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+          throw python_error();
+        }
+        // Warning: here we may suppress AttributeError raised inside
+        // the Array Interface implementation.
+        PyErr_Clear();
 
-  if (is_numpy_available() && PyArray_Check(data)) {
-    TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from numpy");
-    auto tensor = tensor_from_numpy(data, /*warn_if_not_writeable=*/!copy_numpy);
-    const auto& inferred_scalar_type = type_inference ? tensor.scalar_type() : scalar_type;
-    auto device = device_opt.has_value() ? *device_opt : options.device();
-    pybind11::gil_scoped_release no_gil;
-    maybe_initialize_cuda(device);
-    return tensor.to(device, inferred_scalar_type, /*non_blocking=*/false, /*copy=*/copy_numpy);
+        // repeat the above for the CPU Array Interface.
+        attr = PyObject_GetAttrString(data, "__array_interface__");
+        if (attr == NULL) {
+          if (!PyErr_ExceptionMatches(PyExc_AttributeError)) {
+            throw python_error();
+          }
+          PyErr_Clear();
+        } else {
+          TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from __array_interface__");
+          device_type = kCPU;
+        }
+      } else {
+        TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from __cuda_array_interface__");
+      }
+
+      if (attr != NULL) {
+        auto ai_dict = THPObjectPtr(attr);
+        tensor = tensor_from_generic_array_interface(data, ai_dict, device_type);
+      } else {
+        if (PyObject_HasAttrString(data, "__array__")) {
+          auto arr = THPObjectPtr(PyObject_CallMethod(data, "__array__", ""));
+          if (PyErr_Occurred()) throw python_error();
+          if (PyArray_Check(arr)) {
+            TORCH_CHECK(!pin_memory, "Can't pin tensor constructed from __array__()");
+            tensor = tensor_from_numpy(arr, /*warn_if_not_writeable=*/!copy_numpy);
+          } else {
+            // numpy compatible exception:
+            throw ValueError("object __array__ method not producing an array");
+          }
+        }
+      }
+    }
+
+    if (tensor.defined()) {
+      const auto& inferred_scalar_type = type_inference ? tensor.scalar_type() : scalar_type;
+      auto device = device_opt.has_value() ? *device_opt : options.device();
+      pybind11::gil_scoped_release no_gil;
+      maybe_initialize_cuda(device);
+      return tensor.to(device, inferred_scalar_type, /*non_blocking=*/false, /*copy=*/copy_numpy);
+    }
   }
 #endif
-
   auto sizes = compute_sizes(data);
   ScalarType inferred_scalar_type = type_inference ? infer_scalar_type(data) : scalar_type;
   // This exists to prevent us from tracing the call to empty().  The actual
   // autograd code doesn't really matter, because requires_grad is always false
   // here.
-  Tensor tensor;
   {
     at::AutoNonVariableTypeMode guard;  // TODO: remove
     at::tracer::impl::NoTracerDispatchMode tracer_guard;
@@ -470,11 +512,6 @@ Tensor legacy_tensor_ctor(c10::DispatchKey dispatch_key, at::ScalarType scalar_t
   if (isSparse(dispatchKeyToBackend(dispatch_key))) {
     return legacy_sparse_tensor_ctor(dispatch_key, scalar_type, args, kwargs);
   }
-
-  TORCH_WARN_ONCE(
-      "Legacy tensor constructor is deprecated. "
-      "Use: torch.tensor(...) for creating tensors from tensor-like objects; "
-      "or torch.empty(...) for creating an uninitialized tensor with specific sizes.");
 
   ParsedArgs<2> parsed_args;
   auto r = parser.parse(args, kwargs, parsed_args);
@@ -772,7 +809,7 @@ Tensor as_tensor(c10::DispatchKey dispatch_key, at::ScalarType scalar_type, PyOb
         /*copy_numpy=*/false,
         /*type_inference=*/type_inference);
   }
-  throw std::runtime_error("tensor(): invalid arguments");
+  throw std::runtime_error("as_tensor(): invalid arguments");
 }
 
 Tensor new_tensor(c10::DispatchKey dispatch_key, at::ScalarType scalar_type, PyObject* args, PyObject* kwargs) {
