@@ -1,20 +1,12 @@
 #include <ATen/NativeFunctions.h>
 #include <ATen/Dispatch.h>
 #include <ATen/native/DispatchStub.h>
+#include <ATen/native/TensorCompare.h>
 #include <ATen/native/cuda/Loops.cuh>
 #include <ATen/cuda/CUDAApplyUtils.cuh>
 
 
-namespace at { namespace native {
-
-using where_fn = void (*)(TensorIterator &, ScalarType);
-DECLARE_DISPATCH(where_fn, where_kernel);
-
-using is_infinity_op_fn = void (*)(TensorIterator &);
-DECLARE_DISPATCH(is_infinity_op_fn, isposinf_stub);
-DECLARE_DISPATCH(is_infinity_op_fn, isneginf_stub);
-
-namespace {
+namespace at { namespace native { namespace {
 
 void where_kernel_impl(TensorIterator &iter, ScalarType condition_type) {
   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND3(kHalf, kBFloat16, kBool, iter.dtype(), "where_cuda", [&] {
@@ -52,12 +44,20 @@ void isneginf_kernel_impl(TensorIterator &iter) {
   });
 }
 
+void isin_default_kernel_gpu(Tensor& out, const Tensor& elements, const Tensor& test_elements, bool invert) {
+  std::vector<int64_t> bc_shape(elements.dim(), 1);
+  bc_shape.push_back(-1);
+  out.copy_(invert ? elements.unsqueeze(-1).ne(test_elements.view(bc_shape)).all(-1)
+    : elements.unsqueeze(-1).eq(test_elements.view(bc_shape)).any(-1));
+}
+
 } // anonymous namespace
 
 
 REGISTER_DISPATCH(where_kernel, &where_kernel_impl);
 REGISTER_DISPATCH(isposinf_stub, &isposinf_kernel_impl);
 REGISTER_DISPATCH(isneginf_stub, &isneginf_kernel_impl);
+REGISTER_DISPATCH(isin_default_stub, &isin_default_kernel_gpu);
 
 template <typename scalar_t>
 __global__ void _assert_async_cuda_kernel(scalar_t* input) {

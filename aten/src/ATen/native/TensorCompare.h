@@ -24,4 +24,6 @@ DECLARE_DISPATCH(is_infinity_op_fn, isneginf_stub);
 using mode_fn = void (*)(Tensor&, Tensor&, const Tensor&, int64_t, bool);
 DECLARE_DISPATCH(mode_fn, mode_stub);
 
+using isin_default_fn = void (*)(Tensor&, const Tensor&, const Tensor&, bool);
+DECLARE_DISPATCH(isin_default_fn, isin_default_stub);
 }} // namespace at::native
