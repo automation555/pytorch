@@ -2135,14 +2135,14 @@ class TestNN(NNTestCase):
         # Remove first parametrization.
         # Check that the model is still parametrized and so is the second parameter
         parametrize.remove_parametrizations(model, "weight", leave_parametrized=False)
-        self.assertTrue(parametrize.is_parametrized(model))             # Still parametrized
+        self.assertTrue(parametrize.is_parametrized(model))  # Still parametrized
         self.assertFalse(parametrize.is_parametrized(model, "weight"))  # Parametrization removed
-        self.assertTrue(parametrize.is_parametrized(model, "bias"))     # Still parametrized
-        self.assertEqual(model.bias[0].item(), 0.)                      # Still parametrized
-        self.assertEqual(model.bias[-1].item(), 0.)                     # Still parametrized
-        self.assertNotEqual(model.weight, initial_model.weight)         # Has been updated
-        self.assertEqual(id(model.weight), initial_weight_id)           # Keeps the same id
-        self.assertEqual(len(list(model.parameters())), 2)              # Nothing weird has happened
+        self.assertTrue(parametrize.is_parametrized(model, "bias"))  # Still parametrized
+        self.assertEqual(model.bias[0].item(), 0.)   # Still parametrized
+        self.assertEqual(model.bias[-1].item(), 0.)  # Still parametrized
+        self.assertNotEqual(model.weight, initial_model.weight)  # Has been updated
+        self.assertEqual(id(model.weight), initial_weight_id)  # Keeps the same id
+        self.assertEqual(len(list(model.parameters())), 2)  # Nothing weird has happened
         # Should not throw
         (model.weight.T @ model.bias).sum().backward()
         with torch.no_grad():
@@ -2152,30 +2152,19 @@ class TestNN(NNTestCase):
         # Remove the second parametrization.
         # Check that the module is not parametrized
         parametrize.remove_parametrizations(model, "bias", leave_parametrized=False)
-        self.assertFalse(parametrize.is_parametrized(model))  # Not parametrized
-        self.assertNotEqual(model.bias, initial_model.bias)   # Has been updated
-        self.assertNotEqual(model.bias[0].item(), 0.)         # Not parametrized
-        self.assertNotEqual(model.bias[-1].item(), 0.)        # Not parametrized
-        self.assertEqual(id(model.bias), initial_bias_id)     # Keeps the same id
-        self.assertFalse(hasattr(model, "parametrizations"))  # Not parametrized the module
-        self.assertEqual(model.__class__, nn.Linear)          # Resores the previous class
-        self.assertEqual(len(list(model.parameters())), 2)    # Nothing weird has happeed
+        self.assertFalse(parametrize.is_parametrized(model))  # Still parametrized
+        self.assertNotEqual(model.bias, initial_model.bias)  # Has been updated
+        self.assertNotEqual(model.bias[0].item(), 0.)   # Still parametrized
+        self.assertNotEqual(model.bias[-1].item(), 0.)  # Still parametrized
+        self.assertEqual(id(model.bias), initial_bias_id)
+        self.assertFalse(hasattr(model, "parametrizations"))
+        self.assertEqual(model.__class__, nn.Linear)
+        self.assertEqual(len(list(model.parameters())), 2)
         # Should not throw
         (model.weight.T @ model.bias).sum().backward()
         with torch.no_grad():
             for p in model.parameters():
                 p.add_(- p.grad, alpha=0.01)
-
-        # Test leave_parametrized=True
-        for _ in range(2):
-            parametrize.register_parametrization(model, "weight", Skew())
-            parametrize.register_parametrization(model, "weight", Orthogonal())
-            parametrize.remove_parametrizations(model, "weight", leave_parametrized=True)
-            # Should not throw
-            (model.weight.T @ model.bias).sum().backward()
-            with torch.no_grad():
-                for p in model.parameters():
-                    p.add_(- p.grad, alpha=0.01)
 
     def test_register_and_remove_buffer_parametrization(self):
         r"""Test that it is possible to add and remove parametrizations on buffers"""
@@ -5259,6 +5248,37 @@ class TestNN(NNTestCase):
                 else:
                     self.assertRaises(ValueError, lambda: mu(output_small, indices_small, (h, w)))
 
+    def test_max_unpool2d_nhwc_cpu(self):
+        input = torch.randn(2, 10, 9, 9).float().cpu()
+        input = input.contiguous(memory_format=torch.channels_last)
+        ref_input = input.clone().contiguous()
+
+        pool = nn.MaxPool2d(3, stride=2, return_indices=True).cpu()
+        ref_pool = nn.MaxPool2d(3, stride=2, return_indices=True).cpu()
+
+        out, ind = pool(input)
+        ref_out, ref_ind = ref_pool(ref_input)
+        out.requires_grad_()
+        ref_out.requires_grad_()
+
+        unpool = nn.MaxUnpool2d(3, stride=2).cpu()
+        ref_unpool = nn.MaxUnpool2d(3, stride=2).cpu()
+
+        upout = unpool(out, ind)
+        ref_upout = ref_unpool(ref_out, ref_ind)
+
+        grad = torch.randn(upout.size()).float().cpu()
+        grad = grad.contiguous(memory_format=torch.channels_last)
+        ref_grad = grad.clone().contiguous()
+
+        upout.backward(grad)
+        ref_upout.backward(ref_grad)
+
+        self.assertTrue(upout.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(ref_upout.is_contiguous())
+        self.assertTrue(torch.allclose(upout, ref_upout))
+        self.assertTrue(torch.allclose(out.grad, ref_out.grad))
+
     def test_container_copy(self):
         class Model(nn.Module):
             def __init__(self):
@@ -8009,6 +8029,39 @@ class TestNN(NNTestCase):
         mask = (x > -1) & (x < 1)
         x_grad_ref = torch.where(mask, grad, z)
         self.assertEqual(x.grad, x_grad_ref)
+
+    def test_batchnorm_nhwc_cpu(self):
+        def helper(self, size):
+            channels = size[1]
+            input = torch.randn(size, dtype=torch.float32, device='cpu', requires_grad=True)
+            input = input.contiguous(memory_format=torch.channels_last)
+            input.retain_grad()
+            grad = torch.randn(size, dtype=torch.float32, device='cpu')
+            grad = grad.contiguous(memory_format=torch.channels_last)
+            bn = nn.BatchNorm2d(channels).cpu().float()
+            bn.weight.data.uniform_()
+            bn.bias.data.uniform_()
+
+            ref_input = input.detach().clone().contiguous().requires_grad_(True)
+            ref_grad = grad.detach().clone().contiguous()
+            ref_bn = nn.BatchNorm2d(channels).cpu().float()
+            ref_bn.load_state_dict(bn.state_dict())
+
+            out = bn(input)
+            out.backward(grad)
+            ref_out = ref_bn(ref_input)
+            ref_out.backward(ref_grad)
+
+            self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+            self.assertTrue(ref_out.is_contiguous())
+            self.assertEqual(out, ref_out)
+            self.assertEqual(bn.weight.grad, ref_bn.weight.grad)
+            self.assertEqual(bn.bias.grad, ref_bn.bias.grad)
+            self.assertEqual(input.grad, ref_input.grad)
+
+        helper(self, (4, 8, 10, 10))
+        helper(self, (4, 1, 9, 9))
+        helper(self, (4, 9, 1, 1))
 
     @unittest.skipIf(not TEST_CUDA, "CUDA unavailable")
     @unittest.skipIf(not TEST_CUDNN, "needs cudnn")
@@ -11931,6 +11984,40 @@ class TestNNDeviceType(NNTestCase):
             with torch.backends.cudnn.flags(enabled=False):
                 self._test_module_empty_input(mod, inp)
 
+    @onlyCPU
+    @dtypes(torch.float, torch.double)
+    def test_groupnorm_nhwc(self, device, dtype):
+        def helper(self, size, groups):
+            channels = size[1]
+            input = torch.randn(size, dtype=dtype, device=device, requires_grad=True)
+            input = input.contiguous(memory_format=torch.channels_last)
+            input.retain_grad()
+            grad = torch.randn(size, dtype=dtype, device=device)
+            grad = grad.contiguous(memory_format=torch.channels_last)
+            gn = nn.GroupNorm(groups, channels).to(device).to(dtype)
+            gn.weight.data.uniform_()
+            gn.bias.data.uniform_()
+
+            ref_input = input.detach().clone().contiguous().requires_grad_(True)
+            ref_grad = grad.detach().clone().contiguous()
+            ref_gn = nn.GroupNorm(groups, channels).to(device).to(dtype)
+            ref_gn.load_state_dict(gn.state_dict())
+
+            out = gn(input)
+            out.backward(grad)
+            ref_out = ref_gn(ref_input)
+            ref_out.backward(ref_grad)
+
+            self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+            self.assertTrue(ref_out.is_contiguous())
+            self.assertEqual(out, ref_out)
+            self.assertEqual(gn.weight.grad, ref_gn.weight.grad)
+            self.assertEqual(gn.bias.grad, ref_gn.bias.grad)
+            self.assertEqual(input.grad, ref_input.grad)
+
+        helper(self, (4, 8, 10, 10), 4)
+        helper(self, (2, 30, 9, 9), 3)
+
     @onlyOnCPUAndCUDA
     @dtypes(torch.float64, torch.complex128)
     def test_pad(self, device, dtype):
@@ -12567,22 +12654,6 @@ class TestNNDeviceType(NNTestCase):
             helper((2, 3, 6, 6), mf)
 
     @onlyOnCPUAndCUDA
-    def test_adaptive_avg_pool3d_output_size_one(self, device):
-        x = torch.randn((2, 3, 6, 6, 6) , dtype=torch.float, device=device, requires_grad=True)
-
-        net = torch.nn.AdaptiveAvgPool3d(1)
-        out = net(x)
-        ref_out = x.contiguous().mean((-1, -2, -3)).view(out.shape)
-
-        out.sum().backward()    # make sure it doesn't crash
-
-        self.assertEqual(out, ref_out)
-        self.assertTrue(out.is_contiguous())
-        c = out.size(1)
-        self.assertEqual(out.stride(), [c, 1, 1, 1, 1])
-
-
-    @onlyOnCPUAndCUDA
     @dtypes(torch.uint8, torch.int8, torch.short, torch.int, torch.long)
     def test_adaptive_pooling_no_suppot_input(self, device, dtype):
         for numel in (2, 3):
@@ -12595,7 +12666,8 @@ class TestNNDeviceType(NNTestCase):
                 with self.assertRaisesRegex(RuntimeError, "not implemented"):
                     output = module(input)
 
-    @onlyCUDA
+    @onlyOnCPUAndCUDA
+    @dtypes(torch.float, torch.double)
     @dtypesIfCUDA(torch.half, torch.float, torch.double)
     def test_avg_pool2d_nhwc(self, device, dtype):
         def helper(n, c, h, w, kernel_size, stride=None,
@@ -12722,7 +12794,8 @@ class TestNNDeviceType(NNTestCase):
         helper(1, 100000, 32, 32, ks=4)
         helper(1, 100000, 1, 4, ks=(1, 4))  # test for max_pool1d
 
-    @onlyCUDA
+    @onlyOnCPUAndCUDA
+    @dtypes(torch.float, torch.double)
     @dtypesIfCUDA(torch.half, torch.float, torch.double)
     def test_max_pool2d_nhwc(self, device, dtype):
         def helper(n, c, h, w, kernel_size, stride=None):
@@ -12778,6 +12851,58 @@ class TestNNDeviceType(NNTestCase):
 
         helper(2, 8, 4, 4, ks=2)
         helper(None, 3, 50, 50, ks=5)
+
+    @onlyCPU
+    @dtypes(torch.float, torch.double)
+    def test_adaptive_pooling_max_nhwc(self, device, dtype):
+        input = torch.randint(1, 10, (4, 8, 8, 8), dtype=dtype).to(device)
+        input = input.contiguous(memory_format=torch.channels_last).requires_grad_()
+        grad = torch.randint(1, 10, (4, 8, 7, 7), dtype=dtype).to(device)
+        pool = torch.nn.AdaptiveMaxPool2d((7, 7), return_indices=True).to(device)
+
+        ref_input = input.detach().clone().contiguous().requires_grad_(True)
+        ref_grad = grad.detach().clone().contiguous()
+        ref_pool = torch.nn.AdaptiveMaxPool2d((7, 7), return_indices=True).to(device)
+
+        out, ind = pool(input)
+        out.backward(grad)
+        ref_out, ref_ind = ref_pool(ref_input)
+        ref_out.backward(ref_grad)
+
+        self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(ref_out.is_contiguous())
+        self.assertTrue(ind.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(ref_ind.is_contiguous())
+        self.assertEqual(out, ref_out)
+        self.assertEqual(ind, ref_ind)
+        self.assertEqual(input.grad, ref_input.grad)
+
+    @onlyCPU
+    @dtypes(torch.float, torch.double)
+    def test_adaptive_pooling_max_nhwc_non_contiguous(self, device, dtype):
+        input = torch.randint(1, 10, (4, 8, 8, 8), dtype=dtype).to(device)
+        input = input.contiguous(memory_format=torch.channels_last)
+        input = input[:, ::2, :, :].requires_grad_()
+        grad = torch.randint(1, 10, (4, 8, 7, 7), dtype=dtype).to(device)
+        grad = grad[:, ::2, :, :]
+        pool = torch.nn.AdaptiveMaxPool2d((7, 7), return_indices=True).to(device)
+
+        ref_input = input.detach().clone().contiguous().requires_grad_(True)
+        ref_grad = grad.detach().clone().contiguous()
+        ref_pool = torch.nn.AdaptiveMaxPool2d((7, 7), return_indices=True).to(device)
+
+        out, ind = pool(input)
+        out.backward(grad)
+        ref_out, ref_ind = ref_pool(ref_input)
+        ref_out.backward(ref_grad)
+
+        self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(ref_out.is_contiguous())
+        self.assertTrue(ind.is_contiguous(memory_format=torch.channels_last))
+        self.assertTrue(ref_ind.is_contiguous())
+        self.assertEqual(out, ref_out)
+        self.assertEqual(ind, ref_ind)
+        self.assertEqual(input.grad, ref_input.grad)
 
     def test_embedding_dense_grad(self, device):
         embd = nn.Embedding(20, 20).to(device)
@@ -14737,6 +14862,48 @@ class TestNNDeviceType(NNTestCase):
     @onlyCUDA
     def test_softmax_bfloat16(self, device):
         self._test_bfloat16_ops(torch.nn.Softmax(dim=1), device, inp_dims=(16, 32), prec=1e-2)
+
+    @onlyCPU
+    @dtypes(torch.float, torch.double)
+    def test_conv_thnn_nhwc(self, device, dtype):
+        def helper(n, c, h, w, out_channels, kernel_size, dilation, groups):
+            input = torch.randint(-3, 3, (n, c, h, w), dtype=dtype, device=device)\
+                .to(memory_format=torch.channels_last)
+            input.requires_grad_()
+            conv = nn.Conv2d(c, out_channels, kernel_size, dilation=dilation, groups=groups)\
+                .to(device='cpu', dtype=dtype, memory_format=torch.channels_last)
+            for p in conv.parameters():
+                p.data = torch.randint_like(p, -3, 3)
+
+            ref_input = input.detach().clone().contiguous().requires_grad_()
+            ref_conv = nn.Conv2d(c, out_channels, kernel_size, dilation=dilation, groups=groups)
+            # load_state_dict will restore the stride & memory_layout on ref_conv.weight.
+            ref_conv.load_state_dict(conv.state_dict())
+            ref_conv = ref_conv.to(device='cpu', dtype=dtype, memory_format=torch.contiguous_format)
+
+            out = conv(input)
+            ref_out = ref_conv(ref_input)
+
+            grad = torch.randint_like(out, -3, 3)
+            ref_grad = grad.detach().clone().contiguous()
+
+            out.backward(grad)
+            ref_out.backward(ref_grad)
+
+            self.assertTrue(out.is_contiguous(memory_format=torch.channels_last))
+            self.assertTrue(ref_out.is_contiguous())
+            self.assertEqual(out, ref_out, exact_dtype=False)
+            self.assertEqual(conv.weight.grad, ref_conv.weight.grad, exact_dtype=False)
+            self.assertEqual(conv.bias.grad, ref_conv.bias.grad, exact_dtype=False)
+            self.assertEqual(input.grad, ref_input.grad, exact_dtype=False)
+
+        # non-dilated conv goes to thnn_conv2d
+        # dilated conv goes to slow_conv_dilated2d
+        with torch.backends.mkldnn.flags(enabled=False):
+            helper(2, 8, 4, 4, out_channels=4, kernel_size=3, dilation=1, groups=1)
+            helper(2, 8, 4, 4, out_channels=8, kernel_size=3, dilation=1, groups=8)
+            helper(1, 16, 56, 56, out_channels=16, kernel_size=1, dilation=1, groups=1)
+            helper(1, 16, 56, 56, out_channels=16, kernel_size=1, dilation=1, groups=16)
 
     @onlyCUDA
     @skipCUDAIfRocm
