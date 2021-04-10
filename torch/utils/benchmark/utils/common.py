@@ -1,5 +1,6 @@
 """Base shared classes and utilities."""
 
+from __future__ import annotations
 import collections
 import contextlib
 import dataclasses
@@ -28,7 +29,6 @@ class TaskSpec:
     """Container for information used to define a Timer. (except globals)"""
     stmt: str
     setup: str
-    global_setup: str = ""
     label: Optional[str] = None
     sub_label: Optional[str] = None
     description: Optional[str] = None
@@ -222,7 +222,7 @@ class Measurement:
         return "\n".join(l for l in repr_str.splitlines(keepends=False) if skip_line not in l)
 
     @staticmethod
-    def merge(measurements):  # type: (Iterable[Measurement]) -> List[Measurement]
+    def merge(measurements: Iterable[Measurement]) -> List[Measurement]:
         """Convenience method for merging replicates.
 
         Merge will extrapolate times to `number_per_run=1` and will not
