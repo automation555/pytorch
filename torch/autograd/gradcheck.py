@@ -8,6 +8,7 @@ import warnings
 from typing import Callable, Union, Optional, Iterable, List
 from torch._vmap_internals import vmap
 import functools
+from . import forward_ad as fwAD
 
 def zero_gradients(x):
     if isinstance(x, torch.Tensor):
@@ -47,86 +48,7 @@ def iter_tensors(x: Union[torch.Tensor, Iterable[torch.Tensor]], only_requiring_
                 yield result
 
 
-def iter_tensor(x_tensor):
-    # Enumerates over a tensor and provides a corresponding flat index that translates
-    # to a given rol/col in the jacobian matrix. The order is the same as as if we flatten
-    # a contiguous tensor. iter_tensor also returns a strided version of the original
-    # tensor that is able to be modified inplace. If the input tensor is strided or sparse,
-    # the returned tensor will share storage with the original. Otherwise, for opaque tensor
-    # types like mkldnn, a copy is returned.
-    #
-    # Example:
-    #   for a tensor t with size (2, 2), it will yield:
-    #     `x, (0, 0), 0`, `x, (0, 1), 1`, `x, (1, 0), 2`, `x, (1, 1), 3`
-    #
-    #   where x is the t.data of the original tensor. Since input t has numel 4, the
-    #   Jacobian should have 4 columns. So having a d_idx of 3 and idx of (1, 1)
-    #   indicates that perturbing t[(1, 1)] allows us to updating the third (last)
-    #   column of any jacobian corresponding to this particular input.
-    #
-    if x_tensor.is_sparse:
-        def get_stride(size):
-            dim = len(size)
-            tmp = 1
-            stride = [0] * dim
-            for i in reversed(range(dim)):
-                stride[i] = tmp
-                tmp *= size[i]
-            return stride
-
-        x_nnz = x_tensor._nnz()
-        x_size = list(x_tensor.size())
-        x_indices = x_tensor._indices().t()
-        x_values = x_tensor._values()
-        x_stride = get_stride(x_size)
-
-        # Use .data here to get around the version check
-        x_values = x_values.data
-
-        for i in range(x_nnz):
-            x_value = x_values[i]
-            for x_idx in product(*[range(m) for m in x_values.size()[1:]]):
-                indices = x_indices[i].tolist() + list(x_idx)
-                d_idx = sum(indices[k] * x_stride[k] for k in range(len(x_size)))
-                yield x_value, x_idx, d_idx
-    elif x_tensor.layout == torch._mkldnn:  # type: ignore
-        for d_idx, x_idx in enumerate(product(*[range(m) for m in x_tensor.size()])):
-            # this is really inefficient, but without indexing implemented, there's
-            # not really a better way than converting back and forth
-            x_tensor_dense = x_tensor.to_dense()
-            yield x_tensor_dense, x_idx, d_idx
-    else:
-        # Use .data here to get around the version check
-        x_tensor = x_tensor.data
-        for d_idx, x_idx in enumerate(product(*[range(m) for m in x_tensor.size()])):
-            yield x_tensor, x_idx, d_idx
-
-
-def compute_gradient(fn, inputs, x, idx, delta, eps, is_mkldnn):
-    # Perturbs inputs in-place by delta as to obtain the gradient
-    # of each of the outputs wrt to x at idx.
-    # we currently assume that the norm of delta equals eps
-    assert(delta == eps or delta == (eps * 1j))
-
-    def fn_out():
-        if not is_mkldnn:
-            # x is a view into input and so this works
-            return fn(inputs).clone()
-        else:
-            # convert the dense tensor back to have mkldnn layout
-            return fn([x.to_mkldnn()])
-
-    orig = x[idx].item()
-    x[idx] = orig - delta
-    outa = fn_out()
-    x[idx] = orig + delta
-    outb = fn_out()
-    x[idx] = orig
-    r = (outb - outa) / (2 * eps)
-    return r.detach().reshape(-1)
-
-
-def get_numerical_jacobian(fn, inputs, target=None, eps=1e-3, grad_out=1.0):
+def get_numerical_jacobian(fn, input, target=None, eps=1e-3, grad_out=1.0):
     """
     input: input to `fn`
     target: the Tensors wrt whom Jacobians are calculated (default=`input`)
@@ -136,8 +58,8 @@ def get_numerical_jacobian(fn, inputs, target=None, eps=1e-3, grad_out=1.0):
     **very careful** in this to not clone `target`.
     """
     if target is None:
-        target = inputs
-    output_size = fn(inputs).numel()
+        target = input
+    output_size = fn(input).numel()
     jacobian = make_jacobian(target, output_size)
 
     # It's much easier to iterate over flattened lists of tensors.
@@ -146,31 +68,97 @@ def get_numerical_jacobian(fn, inputs, target=None, eps=1e-3, grad_out=1.0):
     x_tensors = iter_tensors(target, True)
     j_tensors = iter_tensors(jacobian)
 
-    for x_tensor, d in zip(x_tensors, j_tensors):
-        is_mkldnn = x_tensor.layout == torch._mkldnn  # type: ignore # no attr _mkldnn
-        for x, idx, d_idx in iter_tensor(x_tensor):
-            # Computing the jacobian only works for pure real or pure imaginary delta
-            # for details on the algorithm used here, refer:
-            # Section 3.5.3 https://arxiv.org/pdf/1701.00392.pdf
-            # s = fn(z) where z = x for real valued input
-            # and z = x + yj for complex valued input
-            ds_dx = compute_gradient(fn, inputs, x, idx, eps, eps, is_mkldnn)
-            if x.is_complex():  # C -> C, C -> R
-                ds_dy = compute_gradient(fn, inputs, x, idx, eps * 1j, eps, is_mkldnn)
-                # conjugate wirtinger derivative
-                conj_w_d = 0.5 * (ds_dx + ds_dy * 1j)
-                # wirtinger derivative
-                w_d = 0.5 * (ds_dx - ds_dy * 1j)
-                d[d_idx] = grad_out.conjugate() * conj_w_d + grad_out * w_d.conj()
-            elif ds_dx.is_complex():  # R -> C
-                # w_d = conj_w_d = 0.5 * ds_dx
-                # dL_dz_conj = 0.5 * [grad_out.conj() * ds_dx + grad_out * ds_dx.conj()]
-                #            = 0.5 * [grad_out.conj() * ds_dx + (grad_out.conj() * ds_dx).conj()]
-                #            = 0.5 * 2 * real(grad_out.conj() * ds_dx)
-                #            = real(grad_out.conj() * ds_dx)
-                d[d_idx] = torch.real(grad_out.conjugate() * ds_dx)
-            else:   # R -> R
-                d[d_idx] = ds_dx * grad_out
+    def update_jacobians(x, idx, d, d_idx, is_mkldnn=False):
+
+        # compute_jacobian only works for pure real
+        # or pure imaginary delta
+        def compute_gradient(delta):
+            # we currently assume that the norm of delta equals eps
+            assert(delta == eps or delta == (eps * 1j))
+
+            def fn_out():
+                if not is_mkldnn:
+                    # x is a view into input and so this works
+                    return fn(input).clone()
+                else:
+                    # convert the dense tensor back to have mkldnn layout
+                    return fn([x.to_mkldnn()])
+
+            orig = x[idx].item()
+            x[idx] = orig - delta
+            outa = fn_out()
+            x[idx] = orig + delta
+            outb = fn_out()
+            x[idx] = orig
+            r = (outb - outa) / (2 * eps)
+            return r.detach().reshape(-1)
+
+        # for details on the algorithm used here, refer:
+        # Section 3.5.3 https://arxiv.org/pdf/1701.00392.pdf
+        # s = fn(z) where z = x for real valued input
+        # and z = x + yj for complex valued input
+        ds_dx = compute_gradient(eps)
+        if x.is_complex():  # C -> C, C -> R
+            ds_dy = compute_gradient(eps * 1j)
+            # conjugate wirtinger derivative
+            conj_w_d = 0.5 * (ds_dx + ds_dy * 1j)
+            # wirtinger derivative
+            w_d = 0.5 * (ds_dx - ds_dy * 1j)
+            d[d_idx] = grad_out.conjugate() * conj_w_d + grad_out * w_d.conj()
+        elif ds_dx.is_complex():  # R -> C
+            # w_d = conj_w_d = 0.5 * ds_dx
+            # dL_dz_conj = 0.5 * [grad_out.conj() * ds_dx + grad_out * ds_dx.conj()]
+            #            = 0.5 * [grad_out.conj() * ds_dx + (grad_out.conj() * ds_dx).conj()]
+            #            = 0.5 * 2 * real(grad_out.conj() * ds_dx)
+            #            = real(grad_out.conj() * ds_dx)
+            d[d_idx] = torch.real(grad_out.conjugate() * ds_dx)
+        else:   # R -> R
+            d[d_idx] = ds_dx * grad_out
+
+    # TODO: compare structure
+    for x_tensor, d_tensor in zip(x_tensors, j_tensors):
+        if x_tensor.is_sparse:
+            def get_stride(size):
+                dim = len(size)
+                tmp = 1
+                stride = [0] * dim
+                for i in reversed(range(dim)):
+                    stride[i] = tmp
+                    tmp *= size[i]
+                return stride
+
+            x_nnz = x_tensor._nnz()
+            x_size = list(x_tensor.size())
+            x_indices = x_tensor._indices().t()
+            x_values = x_tensor._values()
+            x_stride = get_stride(x_size)
+
+            # Use .data here to get around the version check
+            x_values = x_values.data
+
+            for i in range(x_nnz):
+                x_value = x_values[i]
+                for x_idx in product(*[range(m) for m in x_values.size()[1:]]):
+                    indices = x_indices[i].tolist() + list(x_idx)
+                    d_idx = sum(indices[k] * x_stride[k] for k in range(len(x_size)))
+                    update_jacobians(x_value, x_idx, d_tensor, d_idx)
+        elif x_tensor.layout == torch._mkldnn:  # type: ignore
+            # Use .data here to get around the version check
+            x_tensor = x_tensor.data
+            if len(input) != 1:
+                raise ValueError('gradcheck currently only supports functions with 1 input, but got: ',
+                                 len(input))
+            for d_idx, x_idx in enumerate(product(*[range(m) for m in x_tensor.size()])):
+                # this is really inefficient, but without indexing implemented, there's
+                # not really a better way than converting back and forth
+                x_tensor_dense = x_tensor.to_dense()
+                update_jacobians(x_tensor_dense, x_idx, d_tensor, d_idx, is_mkldnn=True)
+        else:
+            # Use .data here to get around the version check
+            x_tensor = x_tensor.data
+            for d_idx, x_idx in enumerate(product(*[range(m) for m in x_tensor.size()])):
+                update_jacobians(x_tensor, x_idx, d_tensor, d_idx)
+
     return jacobian
 
 
@@ -484,6 +472,39 @@ def test_undefined_grad(fail_test, func, outputs, inputs) -> bool:
 
     return all(check_undefined_grad_support(output) for output in outputs_to_check)
 
+def get_analytical_jacobian_fw(fn, input, output):
+    # it is easier to call to_dense() on the sparse output than
+    # to modify analytical jacobian
+    if output.is_sparse:
+        raise ValueError('Sparse output is not supported at gradcheck yet. '
+                         'Please call to_dense() on the output of fn for gradcheck.')
+    if output.layout == torch._mkldnn:  # type: ignore
+        raise ValueError('MKLDNN output is not supported at gradcheck yet. '
+                         'Please call to_dense() on the output of fn for gradcheck.')
+    jacobian = make_jacobian(input, output.numel())
+
+    with fwAD.dual_level():
+        fw_grads = []
+        new_input = []
+        for inp in input:
+            if torch.is_tensor(inp) and inp.requires_grad:
+                if inp.layout == torch._mkldnn:  # type: ignore
+                    raise ValueError('MKLDNN inputs are not supported for forward gradcheck.')
+
+                inp = fwAD.make_dual(inp, torch.zeros_like(inp))
+                fw_grads.append(fwAD.unpack_dual(inp)[1])
+            new_input.append(inp)
+
+        for i, fw_grad in enumerate(fw_grads):
+            for lin_idx, grad_idx in enumerate(product(*[range(m) for m in fw_grad.size()])):
+                fw_grad[grad_idx] = 1
+                _, res = fwAD.unpack_dual(fn(new_input))
+                if res is None:
+                    jacobian[i][lin_idx].zero_()
+                else:
+                    jacobian[i][lin_idx].copy_(res.reshape(-1))
+                fw_grad[grad_idx] = 0
+    return jacobian
 
 def _as_tuple(x):
     if isinstance(x, tuple):
@@ -523,6 +544,8 @@ def gradcheck(
     check_undefined_grad: bool = True,
     check_grad_dtypes: bool = False,
     check_batched_grad: bool = False,
+    check_forward: bool = False,
+    stacklevel: int = 2
 ) -> bool:
     r"""Check gradients computed via small finite differences against analytical
     gradients w.r.t. tensors in :attr:`inputs` that are of floating point or complex type
@@ -568,6 +591,8 @@ def gradcheck(
             are supported and treated as zeros, for ``Tensor`` outputs.
         check_batched_grad (bool, optional): if True, check if we can compute
             batched gradients using prototype vmap support. Defaults to False.
+        check_forward (bool, optional): if True, check the forward mode AD gradient
+        stacklevel (int, optional): the stack level to use for raising errors and warnings
 
     Returns:
         True if all differences satisfy allclose condition
@@ -635,6 +660,28 @@ def gradcheck(
         if not test_undefined_grad(fail_test, func, outputs, tupled_inputs):
             return False
 
+    if check_forward:
+        for i, o in enumerate(outputs):
+            try:
+                fw_analytical = get_analytical_jacobian_fw(fn, tupled_inputs, o)
+            except RuntimeError as e:
+                msg = str(e)
+                # If the jvp formula isn't implemented, then we will warn the user. Otherwise, if the formula is
+                # implemented, then we check the result for correctness
+                if "Trying to use forward prop with" in msg:
+                    warnings.warn("Failed to compute gradcheck using fw mode: {}".format(msg), stacklevel=stacklevel)
+                    continue
+                else:
+                    raise e
+
+            if fw_analytical is not None:
+                # Test was not aborted while computing the jacobian
+                for j, (a, n) in enumerate(zip(fw_analytical, numerical)):
+                    if a.numel() != 0 or n.numel() != 0:
+                        if not torch.allclose(a, n, rtol, atol):
+                            return fail_test('Jacobian mismatch for output %d with respect to input %d,\n'
+                                             'numerical:%s\nforward analytical:%s\n' % (i, j, n, a))
+
     return True
 
 
@@ -651,6 +698,7 @@ def gradgradcheck(
     check_undefined_grad: bool = True,
     check_grad_dtypes: bool = False,
     check_batched_grad: bool = False,
+    check_forward: bool = False,
 ) -> bool:
     r"""Check gradients of gradients computed via small finite differences
     against analytical gradients w.r.t. tensors in :attr:`inputs` and
@@ -699,6 +747,7 @@ def gradgradcheck(
             are supported and treated as zeros
         check_batched_grad (bool, optional): if True, check if we can compute
             batched gradients using prototype vmap support. Defaults to False.
+        check_forward(bool, options): if True, check the forward mode AD gradient
 
     Returns:
         True if all differences satisfy allclose condition
@@ -729,7 +778,6 @@ def gradgradcheck(
         grad_inputs = torch.autograd.grad(outputs, input_args, grad_outputs, create_graph=True)
         return grad_inputs
 
-    return gradcheck(
-        new_func, tupled_inputs + tupled_grad_outputs, eps, atol, rtol, raise_exception,
-        nondet_tol=nondet_tol, check_undefined_grad=check_undefined_grad,
-        check_grad_dtypes=check_grad_dtypes, check_batched_grad=check_batched_grad)
+    return gradcheck(new_func, tupled_inputs + tupled_grad_outputs, eps, atol, rtol, raise_exception,
+                     nondet_tol=nondet_tol, check_undefined_grad=check_undefined_grad, check_grad_dtypes=check_grad_dtypes,
+                     check_batched_grad=check_batched_grad, stacklevel=3, check_forward=check_forward)
