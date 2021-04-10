@@ -305,6 +305,7 @@ class TestOptim(TestCase):
                 [lambda opt: StepLR(opt, gamma=0.99999, step_size=300)]
             )
 
+    @skipIfRocm
     def test_multi_tensor_optimizers(self):
         if not torch.cuda.is_available():
             return
@@ -318,6 +319,38 @@ class TestOptim(TestCase):
             ((optim.AdamW, optim._multi_tensor.AdamW), dict(weight_decay=1., amsgrad=False)),
             ((optim.AdamW, optim._multi_tensor.AdamW), dict(weight_decay=0., amsgrad=True)),
             ((optim.AdamW, optim._multi_tensor.AdamW), dict(weight_decay=0., amsgrad=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=True, 
+             rectify=True, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=False, 
+             rectify=True, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=True, 
+             rectify=True, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=False, 
+             rectify=True, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=True, 
+             rectify=False, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=False, 
+             rectify=False, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=True, 
+             rectify=False, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=False, 
+             rectify=False, weight_decouple=True)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=True, 
+             rectify=True, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=False, 
+             rectify=True, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=True, 
+             rectify=True, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=False, 
+             rectify=True, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=True, 
+             rectify=False, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=1., amsgrad=False, 
+             rectify=False, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=True, 
+             rectify=False, weight_decouple=False)),
+            ((optim.AdaBelief, optim._multi_tensor.AdaBelief), dict(weight_decay=0., amsgrad=False, 
+             rectify=False, weight_decouple=False)),
             ((optim.SGD, optim._multi_tensor.SGD), dict(lr=0.2, momentum=1, dampening=0, weight_decay=1, nesterov=True)),
             ((optim.SGD, optim._multi_tensor.SGD), dict(lr=0.2, momentum=1, dampening=0.5, weight_decay=1, nesterov=False)),
             ((optim.RMSprop, optim._multi_tensor.RMSprop), dict(weight_decay=1, momentum=1, centered=True)),
@@ -339,15 +372,15 @@ class TestOptim(TestCase):
         for optimizers, params in optimizer_pairs_with_flags:
             res = []
             for opt in optimizers:
-                weight = torch.tensor([[-0.2109, -0.4976], [-0.1413, -0.3420], [-0.2524, 0.6976]],
+                weight = torch.tensor([[-0.2109, -0.4976], [-0.1413, -0.3420], [-0.2524, 0.6976]], 
                                       dtype=torch.float64, device=device, requires_grad=True)
                 bias = torch.tensor([-0.1085, -0.2979, 0.6892], dtype=torch.float64, device=device, requires_grad=True)
-                weight2 = torch.tensor([[-0.0508, -0.3941, -0.2843]],
+                weight2 = torch.tensor([[-0.0508, -0.3941, -0.2843]], 
                                        dtype=torch.float64, device=device, requires_grad=True)
                 bias2 = torch.tensor([-0.0711], dtype=torch.float64, device=device, requires_grad=True)
                 input = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=torch.float64, device=device).reshape(3, 2)
 
-                model = torch.nn.Sequential(torch.nn.Linear(2, 3),
+                model = torch.nn.Sequential(torch.nn.Linear(2, 3), 
                                             torch.nn.Sigmoid(),
                                             torch.nn.Linear(3, 1),
                                             torch.nn.Sigmoid())
@@ -362,7 +395,7 @@ class TestOptim(TestCase):
 
                 optimizer = opt(model.parameters(), **params)
 
-                for _ in range(kIterations):
+                for _ in range(kIterations): 
                     optimizer.zero_grad()
                     output = model(input)
                     loss = output.sum()
@@ -377,6 +410,7 @@ class TestOptim(TestCase):
 
             for p1, p2 in zip(res[0], res[1]):
                 self.assertEqual(p1, p2)
+
 
     def test_adam(self):
         for optimizer in [optim.Adam, optim_mt.Adam]:
@@ -439,6 +473,51 @@ class TestOptim(TestCase):
             self._test_basic_cases(
                 lambda weight, bias: optimizer([weight, bias], lr=1e-3, weight_decay=1, amsgrad=True)
             )
+            with self.assertRaisesRegex(ValueError, "Invalid weight_decay value: -1"):
+                optimizer(None, lr=1e-2, weight_decay=-1)
+
+    def test_adabelief(self):
+        for optimizer in [optim.AdaBelief, optim_mt.AdaBelief]:
+            self._test_basic_cases(
+                lambda weight, bias: optimizer([weight, bias], lr=1e-3)
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer(
+                    self._build_params_dict(weight, bias, lr=1e-2),
+                    lr=1e-3)
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer([weight, bias], lr=1e-3, amsgrad=True)
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer([weight, bias], lr=1e-3, weight_decay=0.1)
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer(
+                    self._build_params_dict(weight, bias, lr=1e-2),
+                    lr=1e-3, amsgrad=True)
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer(
+                    self._build_params_dict(weight, bias, lr=1e-2),
+                    lr=1e-3),
+                [lambda opt: ExponentialLR(opt, gamma=0.9)]
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer([weight, bias], lr=1e-3, amsgrad=True),
+                [lambda opt: ExponentialLR(opt, gamma=0.9),
+                 lambda opt: ReduceLROnPlateau(opt)]
+            )
+            self._test_basic_cases(
+                lambda weight, bias: optimizer(
+                    self._build_params_dict(weight, bias, lr=1e-2),
+                    lr=1e-3, amsgrad=True),
+                [lambda opt: StepLR(opt, gamma=0.9, step_size=10),
+                 lambda opt: ReduceLROnPlateau(opt)]
+            )
+            with self.assertRaisesRegex(ValueError, "Invalid beta parameter at index 0: 1.0"):
+                optimizer(None, lr=1e-2, betas=(1.0, 0.0))
+
             with self.assertRaisesRegex(ValueError, "Invalid weight_decay value: -1"):
                 optimizer(None, lr=1e-2, weight_decay=-1)
 
@@ -631,26 +710,6 @@ class TestOptim(TestCase):
             optim.SGD([param, param], lr=0.1)
             self.assertEqual(len(w), 1)
             self.assertIn('a parameter group with duplicate parameters', str(w[0].message))
-
-    def test_no_grad_for_all_params(self):
-        param = torch.randn(5, 5, requires_grad=False)
-
-        optimizer_list = [
-            optim.Adadelta,
-            optim.AdamW,
-            optim.Adam,
-            optim.Adagrad,
-            optim.Adamax,
-            optim.RMSprop,
-            optim.SGD,
-            optim.SparseAdam,
-            optim.ASGD,
-        ]
-        for optim_ctr in optimizer_list:
-            opt = optim_ctr([param, param], lr=0.1)
-            # make sure step can still run even if
-            # all params have no grad
-            opt.step()
 
 
 class SchedulerTestNet(torch.nn.Module):
