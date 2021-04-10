@@ -5,6 +5,7 @@
 #include <vector>
 
 #include <torch/csrc/WindowsTorchApiMacro.h>
+#include <torch/csrc/jit/tensorexpr/bounds_overlap.h>
 #include <torch/csrc/jit/tensorexpr/mem_dependency_checker.h>
 
 namespace torch {
@@ -17,7 +18,6 @@ class Stmt;
 
 enum C10_API_ENUM TensorAccessKind { kLoad, kStore, kMutate };
 
-// NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
 struct TORCH_API TensorAccessBoundsInfo {
   TensorAccessKind kind;
   std::vector<const Expr*> start;
@@ -41,6 +41,17 @@ TORCH_API void printBoundsInfo(const BoundsInfo& v);
 TORCH_API std::vector<const Expr*> getBoundExtents(
     const std::vector<TensorAccessBoundsInfo>& infos);
 
+using BoundSet = std::unordered_set<analysis::Bound, analysis::BoundHash>;
+
+TORCH_API BoundSet convertBounds(
+    const std::vector<TensorAccessBoundsInfo>& bounds,
+    TensorAccessKind filter = kMutate);
+
+TORCH_API BoundSet convertBounds(
+    BoundsInfo& bounds,
+    const Buf* buf,
+    TensorAccessKind filter = kMutate);
+
 // The kind of dependency found, in increasing order of exclusivity.
 enum class HazardKind {
   ReadAfterWrite,
@@ -50,12 +61,6 @@ enum class HazardKind {
 };
 TORCH_API HazardKind
 getPotentialHazards(analysis::MemDependencyChecker& analyzer, Stmt* A, Stmt* B);
-
-// Returns true if there is a partial overlap between accesses in A and B.
-TORCH_API bool hasPartialOverlap(
-    analysis::MemDependencyChecker& analyzer,
-    Stmt* A,
-    Stmt* B);
 
 } // namespace tensorexpr
 } // namespace jit

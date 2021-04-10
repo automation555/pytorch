@@ -1,6 +1,4 @@
 #include <torch/csrc/jit/tensorexpr/bounds_inference.h>
-
-#include <torch/csrc/jit/tensorexpr/bounds_overlap.h>
 #include <torch/csrc/jit/tensorexpr/expr.h>
 #include <torch/csrc/jit/tensorexpr/ir.h>
 #include <torch/csrc/jit/tensorexpr/ir_printer.h>
@@ -72,6 +70,11 @@ std::unordered_map<const Var*, const Buf*> getAllBufs(Stmt* s) {
   std::unordered_map<const Var*, const Buf*> varToBuf;
 
   auto bufs = NodeFinder<const Buf>::find(s);
+  auto calls = NodeFinder<FunctionCall>::find(s);
+  for (auto* c : calls) {
+    bufs.push_back(c->tensor()->buf());
+  }
+
   for (auto* b : bufs) {
     varToBuf[b->base_handle()] = b;
   }
@@ -172,11 +175,9 @@ std::vector<const Expr*> getBoundExtents(
   return extents;
 }
 
-using BoundSet = std::unordered_set<Bound, BoundHash>;
-
 BoundSet convertBounds(
     const std::vector<TensorAccessBoundsInfo>& bounds,
-    TensorAccessKind filter = kMutate) {
+    TensorAccessKind filter) {
   BoundSet ret;
   for (auto& TABI : bounds) {
     if (filter == kMutate || TABI.kind == filter) {
@@ -191,7 +192,7 @@ BoundSet convertBounds(
 BoundSet convertBounds(
     BoundsInfo& bounds,
     const Buf* buf,
-    TensorAccessKind filter = kMutate) {
+    TensorAccessKind filter) {
   auto it = bounds.find(buf);
   if (it == bounds.end()) {
     return BoundSet();
@@ -251,56 +252,6 @@ HazardKind getPotentialHazards(
   }
 
   return HazardKind::NoDependency;
-}
-
-IndexBounds getIndexBounds(const TensorAccessBoundsInfo& tabi) {
-  TORCH_INTERNAL_ASSERT(tabi.start.size() == tabi.stop.size());
-  IndexBounds ret(tabi.start.size());
-  if (tabi.start.empty()) {
-    return ret;
-  }
-  for (size_t i = 0; i < tabi.start.size(); ++i) {
-    ret[i] = Bound(tabi.start[i], tabi.stop[i]);
-  }
-  return ret;
-}
-
-std::vector<IndexBounds> getIndexBounds(
-    const std::vector<TensorAccessBoundsInfo>& vTABI) {
-  std::vector<IndexBounds> bounds(vTABI.size());
-  for (size_t i = 0; i < vTABI.size(); ++i) {
-    bounds[i] = getIndexBounds(vTABI[i]);
-  }
-  return bounds;
-}
-
-bool hasPartialOverlap(
-    analysis::MemDependencyChecker& analyzer,
-    Stmt* A,
-    Stmt* B) {
-  BoundsInfo aBounds = getInferredBounds(analyzer, A, true);
-  BoundsInfo bBounds = getInferredBounds(analyzer, B, true);
-
-  for (const auto& aBound : aBounds) {
-    auto bIt = bBounds.find(aBound.first);
-    if (bIt == bBounds.end()) {
-      continue;
-    }
-
-    auto aIndexBounds = getIndexBounds(aBound.second);
-    auto bIndexBounds = getIndexBounds(bIt->second);
-    for (const auto& aIndexBound : aIndexBounds) {
-      for (const auto& bIndexBound : bIndexBounds) {
-        auto overlap = overlaps(aIndexBound, bIndexBound);
-        // If the returned OverlapKind is "Contains", that means `bound1` is
-        // a super set of `bound2`, so that is also a PartialOverlap.
-        if (overlap == Contains || overlap == PartialOverlap) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
 }
 
 } // namespace tensorexpr
