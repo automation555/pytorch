@@ -9,7 +9,6 @@
 #include <torch/csrc/jit/tensorexpr/ir_printer.h>
 #include <torch/csrc/jit/tensorexpr/ir_simplifier.h>
 #include <torch/csrc/jit/tensorexpr/loopnest.h>
-#include <torch/csrc/jit/tensorexpr/operators/conv2d.h>
 
 using namespace torch::jit;
 using namespace torch::jit::tensorexpr;
@@ -18,17 +17,11 @@ namespace torch {
 namespace jit {
 namespace tensorexpr {
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_loop_levels = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_block_count = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_block_size = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool fallback_allowed = false;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool te_generate_block_code = false;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool te_must_use_llvm_on_cpu = true;
 static bool cat_wo_conditionals = false; // NOLINT
 
@@ -112,79 +105,6 @@ c10::optional<at::Device> pickDeviceType(
     }
   }
   return device;
-}
-
-// If v is a Tensor with concretely-known sizes, return them, else nullopt.
-c10::optional<std::vector<int64_t>> tensorSizes(torch::jit::Value* v) {
-  auto const& it = v->type()->cast<TensorType>();
-  if (!it) {
-    return c10::nullopt;
-  }
-  if (!it->isComplete()) {
-    return c10::nullopt;
-  }
-  return it->sizes().concrete_sizes();
-}
-
-// The fuser only supports conv2d with very specific properties:
-// - Static shapes: 4-d input and filter, 1-d bias.
-// - Constant strides/padding/dilation/groups
-// - Equal padding and strides, dilation == 1.
-// - Depthwise (groups == in_channels == out_channels)
-// - 3x3 kernel
-bool conv2dIsSupported(const torch::jit::Node* node) {
-  auto const& input = tensorSizes(node->input(0));
-  auto const& weight = tensorSizes(node->input(1));
-  auto const& bias = tensorSizes(node->input(2));
-  auto const& stride = constant_as<c10::List<int64_t>>(node->input(3));
-  auto const& pad = constant_as<c10::List<int64_t>>(node->input(4));
-  auto const& dilation = constant_as<c10::List<int64_t>>(node->input(5));
-  auto const& groups = constant_as<int64_t>(node->input(6));
-
-  // Everything should be statically known.
-  if (!input || !weight || !bias || !stride || !pad || !dilation || !groups) {
-    GRAPH_DEBUG("some params aren't static");
-    return false;
-  }
-
-  // Proper ndim for tensor inputs.
-  if (input->size() != 4 || weight->size() != 4 || bias->size() != 1) {
-    GRAPH_DEBUG("inputs are the wrong size");
-    return false;
-  }
-
-  // Depthwise.
-  auto Cin = (*input)[1];
-  auto Cout = (*weight)[0];
-  auto CperG = (*weight)[1];
-  if (Cin != Cout || Cin != *groups || CperG != 1) {
-    GRAPH_DEBUG("not depthwise");
-    return false;
-  }
-
-  // 3x3 kernel.
-  auto KH = (*weight)[2];
-  auto KW = (*weight)[3];
-  if (KH != 3 || KW != 3) {
-    GRAPH_DEBUG("not 3x3");
-    return false;
-  }
-
-  // Stride, pad, and dilation checks.
-  if (stride->size() != 2 || (*stride)[0] != (*stride)[1]) {
-    GRAPH_DEBUG("unsupported stride");
-    return false;
-  }
-  if (pad->size() != 2 || (*pad)[0] != (*pad)[1]) {
-    GRAPH_DEBUG("unsupported pad");
-    return false;
-  }
-  if (dilation->size() != 2 || (*dilation)[0] != 1 || (*dilation)[1] != 1) {
-    GRAPH_DEBUG("unsupported dilation");
-    return false;
-  }
-
-  return true;
 }
 
 } // namespace tensorexpr
@@ -281,7 +201,7 @@ ExprHandle promoteToDtype(ExprHandle e, ScalarType dt) {
 ExprHandle TensorExprKernel::tensorOrConstant(
     const torch::jit::Value* v,
     const std::vector<ExprHandle>& axes) {
-  auto ti = tensors_.find(v);
+  auto ti = tensors_.find(v->unique());
   if (ti != tensors_.end()) {
     return broadcast(ti->second, axes);
   }
@@ -437,7 +357,7 @@ std::vector<ExprHandle> TensorExprKernel::inferSizesForValue(
       auto const& n = v->node();
       auto shape = sizesForValue(n->input(0));
 
-      int64_t dim = toIValue(n->input(1))->toInt();
+      int64_t dim = constant(n->input(1)).AsNode<IntImm>()->value();
       // From the documentation
       // (https://pytorch.org/docs/master/generated/torch.unsqueeze.html):
       //
@@ -447,7 +367,6 @@ std::vector<ExprHandle> TensorExprKernel::inferSizesForValue(
       if (dim < 0) {
         dim = dim + shape.size() + 1;
       }
-      // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
       if (dim < 0 || dim > shape.size()) {
         throw std::runtime_error("Invalid 'dim' input in aten::unsqueeze");
       }
@@ -507,9 +426,9 @@ ExprHandle TensorExprKernel::constant(const torch::jit::Value* v) {
   if (v->node()->kind() == prim::Constant) {
     const auto val = toIValue(v).value();
     if (val.isDouble()) {
-      return DoubleImm::make(val.toDouble());
+      return FloatImm::make(static_cast<float>(val.toDouble()));
     } else if (val.isInt()) {
-      return LongImm::make(val.toInt());
+      return IntImm::make(val.toInt());
     } else if (val.isBool()) {
       return BoolImm::make(val.toBool());
     } else if (val.isNone()) {
@@ -522,11 +441,11 @@ ExprHandle TensorExprKernel::constant(const torch::jit::Value* v) {
     }
   }
 
-  if (!scalars_.count(v)) {
+  if (!scalars_.count(v->unique())) {
     throw malformed_input("no scalar in Constant");
   }
 
-  return scalars_.at(v);
+  return scalars_.at(v->unique());
 }
 
 ExprHandle promoteIntegerToDefaultType(const ExprHandle& e) {
@@ -692,7 +611,7 @@ std::vector<ExprHandle> TensorExprKernel::broadcastShapes(
 
 std::vector<ExprHandle> TensorExprKernel::valueShape(
     const torch::jit::Value* v) {
-  auto it = tensors_.find(v);
+  auto it = tensors_.find(v->unique());
   if (it == tensors_.end()) {
     return {};
   }
@@ -705,7 +624,7 @@ Tensor* TensorExprKernel::computeOneOperand(
     const std::function<ExprHandle(const ExprHandle&)>& innerExpr,
     const int checkParamTypes) {
   auto const& n = v->node();
-  auto const& shape = valueShape(n->input(0));
+  auto const& shape = valueShape(n->inputs()[0]);
   return Compute(
       name,
       c10::fmap<DimArg>(shape),
@@ -714,7 +633,7 @@ Tensor* TensorExprKernel::computeOneOperand(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(0), indices)};
+            tensorOrConstant(n->inputs()[0], indices)};
         promoteInputs(inputs, checkParamTypes);
         ExprHandle compute = innerExpr(inputs[0]);
         return demoteOutput(compute, n->output());
@@ -728,7 +647,7 @@ Tensor* TensorExprKernel::computeTwoOperand(
         innerExpr) {
   auto const& n = v->node();
   auto const& shape =
-      broadcastShapes(valueShape(n->input(0)), valueShape(n->input(1)));
+      broadcastShapes(valueShape(n->inputs()[0]), valueShape(n->inputs()[1]));
   return Compute(
       name,
       c10::fmap<DimArg>(shape),
@@ -736,8 +655,8 @@ Tensor* TensorExprKernel::computeTwoOperand(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(0), indices),
-            tensorOrConstant(n->input(1), indices),
+            tensorOrConstant(n->inputs()[0], indices),
+            tensorOrConstant(n->inputs()[1], indices),
         };
 
         promoteInputs(inputs);
@@ -753,7 +672,7 @@ Tensor* TensorExprKernel::computeTwoOperandWithAlpha(
         innerExpr) {
   auto const& n = v->node();
   auto const& shape =
-      broadcastShapes(valueShape(n->input(0)), valueShape(n->input(1)));
+      broadcastShapes(valueShape(n->inputs()[0]), valueShape(n->inputs()[1]));
   return Compute(
       name,
       c10::fmap<DimArg>(shape),
@@ -761,9 +680,9 @@ Tensor* TensorExprKernel::computeTwoOperandWithAlpha(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(0), indices),
-            tensorOrConstant(n->input(1), indices),
-            tensorOrConstant(n->input(2), indices),
+            tensorOrConstant(n->inputs()[0], indices),
+            tensorOrConstant(n->inputs()[1], indices),
+            tensorOrConstant(n->inputs()[2], indices),
         };
 
         promoteInputs(inputs);
@@ -792,13 +711,14 @@ Tensor* TensorExprKernel::computeConditionWithTwoOperand(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(1), indices),
-            tensorOrConstant(n->input(2), indices),
+            tensorOrConstant(n->inputs()[1], indices),
+            tensorOrConstant(n->inputs()[2], indices),
         };
 
         promoteInputs(inputs);
         // First expr is the condition, which we don't promote
-        inputs.emplace(inputs.begin(), tensorOrConstant(n->input(0), indices));
+        inputs.emplace(
+            inputs.begin(), tensorOrConstant(n->inputs()[0], indices));
         ExprHandle compute = innerExpr(inputs[0], inputs[1], inputs[2]);
         return demoteOutput(compute, n->output());
       });
@@ -825,9 +745,9 @@ Tensor* TensorExprKernel::computeThreeOperand(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(0), indices),
-            tensorOrConstant(n->input(1), indices),
-            tensorOrConstant(n->input(2), indices),
+            tensorOrConstant(n->inputs()[0], indices),
+            tensorOrConstant(n->inputs()[1], indices),
+            tensorOrConstant(n->inputs()[2], indices),
         };
 
         if (promote_inputs) {
@@ -860,10 +780,10 @@ Tensor* TensorExprKernel::computeFourOperand(
         auto const& n = v->node();
         std::vector<ExprHandle> indices(axes.begin(), axes.end());
         std::vector<ExprHandle> inputs = {
-            tensorOrConstant(n->input(0), indices),
-            tensorOrConstant(n->input(1), indices),
-            tensorOrConstant(n->input(2), indices),
-            tensorOrConstant(n->input(3), indices),
+            tensorOrConstant(n->inputs()[0], indices),
+            tensorOrConstant(n->inputs()[1], indices),
+            tensorOrConstant(n->inputs()[2], indices),
+            tensorOrConstant(n->inputs()[3], indices),
         };
 
         promoteInputs(inputs);
@@ -1161,7 +1081,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
         }
       }
 
-      auto const& shape = valueShape(v->node()->input(0));
+      auto const& shape = valueShape(v->node()->inputs()[0]);
       return Compute(
           "aten_batch_norm",
           c10::fmap<DimArg>(shape),
@@ -1179,7 +1099,6 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
                 tensorOrConstant(n->input(0), indices), // input
                 tensorOrConstant(n->input(3), {c}), // mean
                 tensorOrConstant(n->input(4), {c}), // var
-                // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
                 constant(n->input(7)) // eps
             };
             if (hasWeight) {
@@ -1201,7 +1120,6 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
               weight = inputs[4];
             }
             if (hasBias) {
-              // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
               bias = inputs[5];
             }
 
@@ -1281,7 +1199,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
 
     case aten::type_as: {
       auto const& n = v->node();
-      Tensor* rhs = tensors_.at(n->input(1));
+      Tensor* rhs = tensors_.at(n->inputs()[1]->unique());
       auto dtype = rhs->buf()->dtype();
       return computeOneOperand(
           "aten_type_as", v, [dtype](const ExprHandle& lhs) {
@@ -1355,8 +1273,8 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
       };
       {
         auto const& n = v->node();
-        auto const& shape =
-            broadcastShapes(valueShape(n->input(0)), valueShape(n->input(1)));
+        auto const& shape = broadcastShapes(
+            valueShape(n->inputs()[0]), valueShape(n->inputs()[1]));
         return Compute(
             "aten_remainder",
             c10::fmap<DimArg>(shape),
@@ -1364,8 +1282,8 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
               auto const& n = v->node();
               std::vector<ExprHandle> indices(axes.begin(), axes.end());
               std::vector<ExprHandle> inputs = {
-                  tensorOrConstant(n->input(0), indices),
-                  tensorOrConstant(n->input(1), indices),
+                  tensorOrConstant(n->inputs()[0], indices),
+                  tensorOrConstant(n->inputs()[1], indices),
               };
 
               promoteInputs(inputs);
@@ -1534,7 +1452,11 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
             int64_t chunks = n->i(attr::chunks);
             std::vector<ExprHandle> indices(axes.begin(), axes.end());
             return chunk(
-                tensors_.at(n->input(0)), v->offset(), dim, chunks, indices);
+                tensors_.at(n->inputs()[0]->unique()),
+                v->offset(),
+                dim,
+                chunks,
+                indices);
           });
     }
 
@@ -1547,7 +1469,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
           dimsFromSizes(sizesForValue(v)),
           [this, v](const std::vector<VarHandle>& axes) {
             auto const& n = v->node();
-            auto inputs = n->input(0)->node()->inputs();
+            auto inputs = n->inputs()[0]->node()->inputs();
             if (inputs.size() == 0) {
               throw std::runtime_error(
                   "Empty input list is passed to aten::cat");
@@ -1574,7 +1496,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
               return ExprHandle(0);
             }
 
-            int64_t dim_ = n->input(1)->node()->i(attr::value);
+            int64_t dim_ = n->inputs()[1]->node()->i(attr::value);
             size_t dim = normalizeAndCheckIndex(dim_, axes.size());
             // Promote input types.
             // Note that we need to consider all inputs, including empty - they
@@ -1605,7 +1527,8 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
             std::vector<ExprHandle> newAxes(axes.begin(), axes.end());
             ExprHandle load = promoteToDtype(
                 tensorOrConstant(nonempty_inputs[0], newAxes), highType);
-            size_t offset = bufferSizes(tensors_.at(nonempty_inputs[0]))[dim];
+            size_t offset =
+                bufferSizes(tensors_.at(nonempty_inputs[0]->unique()))[dim];
             newAxes[dim] = newAxes[dim] - IntImm::make(offset);
 
             for (size_t ii = 1; ii < nonempty_inputs.size(); ++ii) {
@@ -1615,7 +1538,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
                   load,
                   promoteToDtype(tensorOrConstant(input, newAxes), highType));
 
-              offset += bufferSizes(tensors_.at(input))[dim];
+              offset += bufferSizes(tensors_.at(input->unique()))[dim];
               newAxes[dim] = axes[dim] - IntImm::make(offset);
             }
 
@@ -1628,13 +1551,13 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
           dimsFromSizes(sizesForValue(v)),
           [this, v](const std::vector<VarHandle>& axes) {
             auto const& n = v->node();
-            int64_t dim = toIValue(n->input(1))->toInt();
-            ExprHandle start = constant(n->input(2));
-            ExprHandle stride = constant(n->input(4));
+            int dim = constant(n->inputs()[1]).AsNode<IntImm>()->value();
+            ExprHandle start = constant(n->inputs()[2]);
+            ExprHandle stride = constant(n->inputs()[4]);
 
             std::vector<ExprHandle> newAxes(axes.begin(), axes.end());
             newAxes[dim] = stride * newAxes[dim] + start;
-            return tensorOrConstant(n->input(0), newAxes);
+            return tensorOrConstant(n->inputs()[0], newAxes);
           });
     }
 
@@ -1644,7 +1567,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
           dimsFromSizes(sizesForValue(v)),
           [this, v](const std::vector<VarHandle>& axes) {
             auto const& n = v->node();
-            int64_t dim = toIValue(n->input(1))->toInt();
+            int64_t dim = constant(n->inputs()[1]).AsNode<IntImm>()->value();
             if (dim < 0) {
               if (axes.size() == 0) {
                 throw malformed_input("axes are zero handling unsqueeze");
@@ -1663,7 +1586,7 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
               }
             }
 
-            return tensorOrConstant(n->input(0), indices);
+            return tensorOrConstant(n->inputs()[0], indices);
           });
     }
 
@@ -1681,6 +1604,10 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
 
     case aten::conv2d: {
       return computeConv2d(v);
+    }
+
+    case aten::matmul: {
+      return computeMatmul(v);
     }
 
     default: {
@@ -1727,9 +1654,7 @@ Stmt* TensorExprKernel::transformLoops(BackendType backendType, Stmt* st) {
       int blockSize = getTECudaPointwiseBlockSize();
 
       if (loopLevels == 2) {
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* outer;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner;
         const int kDefaultBlockSize = 512;
         if (blockSize < 0) {
@@ -1739,13 +1664,9 @@ Stmt* TensorExprKernel::transformLoops(BackendType backendType, Stmt* st) {
         l.setGPUBlockIndex(outer, 0);
         l.setGPUThreadIndex(inner, 0);
       } else if (loopLevels == 3) {
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* outer;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner1;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner2;
         // TODO: change the number of microprocessors
         const int kDefaultBlockCount = 1280;
@@ -1871,7 +1792,6 @@ void TensorExprKernel::genInputDebugNames() {
     std::string sanitized_name = sanitizeName(input->debugName());
     // we could get fancier here, but name conflict is extremely unlikely
     while (name_set.count(sanitized_name)) {
-      // NOLINTNEXTLINE(performance-inefficient-string-concatenation)
       sanitized_name = sanitized_name + "_";
     }
     value_to_name[input] = sanitized_name;
@@ -1897,7 +1817,7 @@ void TensorExprKernel::bindInput(const torch::jit::Value* input) {
       }
       auto const strides = tt->strides();
       tensors_.emplace(
-          input,
+          input->unique(),
           Compute(
               "input" + c10::to_string(tensors_.size() + 1),
               inputTensorDims,
@@ -1914,19 +1834,19 @@ void TensorExprKernel::bindInput(const torch::jit::Value* input) {
     case TypeKind::FloatType: {
       VarHandle v("v" + input_name_map_[input], kDouble);
       bufferArgs_.emplace_back(v);
-      scalars_.emplace(input, v);
+      scalars_.emplace(input->unique(), v);
       break;
     }
     case TypeKind::BoolType: {
       VarHandle v("v" + input_name_map_[input], kBool);
       bufferArgs_.emplace_back(v);
-      scalars_.emplace(input, v);
+      scalars_.emplace(input->unique(), v);
       break;
     }
     case TypeKind::IntType: {
       VarHandle v("v" + input_name_map_[input], kLong);
       bufferArgs_.emplace_back(v);
-      scalars_.emplace(input, v);
+      scalars_.emplace(input->unique(), v);
       break;
     }
     default: {
@@ -1998,11 +1918,10 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
     dtype = Dtype(*maybe_stype);
   }
   BufHandle ResultBuf("conv", shape, dtype);
-  BufHandle inp = BufHandle(tensors_.at(n->input(0))->buf());
-  BufHandle w = BufHandle(tensors_.at(n->input(1))->buf());
-  BufHandle b = BufHandle(tensors_.at(n->input(2))->buf());
+  BufHandle inp = BufHandle(tensors_.at(n->input(0)->unique())->buf());
+  BufHandle w = BufHandle(tensors_.at(n->input(1)->unique())->buf());
+  BufHandle b = BufHandle(tensors_.at(n->input(2)->unique())->buf());
 
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int sH, sW;
   auto strides_iv = *toIValue(n->input(3));
   if (strides_iv.isIntList()) {
@@ -2011,7 +1930,6 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     sH = sW = strides_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int pH, pW;
   auto padding_iv = *toIValue(n->input(4));
   if (padding_iv.isIntList()) {
@@ -2020,9 +1938,7 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     pH = pW = padding_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int dH, dW;
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
   auto dil_iv = *toIValue(n->input(5));
   if (dil_iv.isIntList()) {
     dH = dil_iv.toIntList()[0];
@@ -2030,13 +1946,7 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     dH = dW = dil_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
   int groups = toIValue(n->input(6))->toInt();
-
-  // Generate TE for depthwise convolutions.
-  if (conv2dIsSupported(n)) {
-    return conv2d_depthwise(inp, w, b, sH, pH, groups);
-  }
 
   // Once we have a performant TE representation for conv2d, we could use it
   // here instead of the external call!
@@ -2046,6 +1956,42 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
       {inp, w, b},
       {sH, sW, pH, pW, dH, dW, groups});
   return new Tensor(ResultBuf.node(), s);
+}
+
+Tensor* TensorExprKernel::computeMatmul(const torch::jit::Value* v) {
+  const Node* n = v->node();
+  auto const& shape = sizesForValue(v);
+  Dtype dtype = kFloat;
+  auto maybe_stype = findDtypeForValue(v);
+  if (maybe_stype) {
+    dtype = Dtype(*maybe_stype);
+  }
+  BufHandle ResultBuf("matmul", shape, dtype);
+  const Buf* a = tensors_.at(n->input(0)->unique())->buf();
+  const Buf* b = tensors_.at(n->input(1)->unique())->buf();
+
+  auto size_a = ExprVectorToExprHandleVector(a->dims());
+  auto size_b = ExprVectorToExprHandleVector(b->dims());
+  const IntImm* total_size = dynamic_cast<const IntImm*>(
+      IRSimplifier::simplify((size_a[0] * size_a[1] * size_b[1])).node());
+
+  if (total_size && total_size->value() < 1000) {
+    return Reduce(
+        "nnc_matmul",
+        {{size_a[0], "M"}, {size_b[1], "N"}},
+        Sum(),
+        [&](const ExprHandle& m, const ExprHandle& n, const ExprHandle& k) {
+          BufHandle ah(a);
+          BufHandle bh(b);
+          return Load::make(ah, {m, k}, 1) * Load::make(bh, {k, n}, 1);
+        },
+        {{size_a[1], "K"}});
+  } else {
+    return new Tensor(
+        ResultBuf.node(),
+        ExternalCall::make(
+            ResultBuf, "nnc_aten_matmul", {BufHandle(a), BufHandle(b)}, {}));
+  }
 }
 
 Tensor* TensorExprKernel::computeSoftmax(
@@ -2147,13 +2093,13 @@ Tensor* TensorExprKernel::computeSoftmax(
       Maximum(dtype.value()),
       [&](ParameterList& indices) {
         return tensorOrConstant(
-            v->node()->input(0), move_softmax_dim_index_to_pos(indices));
+            v->node()->inputs()[0], move_softmax_dim_index_to_pos(indices));
       },
       {output_dims[softmax_dim]});
   auto e =
       Compute("aten_softmax_exp", output_dims, [&](ParameterList& indices) {
         auto inp = tensorOrConstant(
-            v->node()->input(0), convert_indices_to_expr_handle(indices));
+            v->node()->inputs()[0], convert_indices_to_expr_handle(indices));
         return exp(inp - max->call(remove_softmax_dim_index(indices)));
       });
   auto sum = Reduce(
@@ -2182,7 +2128,7 @@ Tensor* TensorExprKernel::computeSoftmax(
   auto result =
       Compute("aten_log_softmax", output_dims, [&](ParameterList& indices) {
         auto inp = tensorOrConstant(
-            v->node()->input(0), convert_indices_to_expr_handle(indices));
+            v->node()->inputs()[0], convert_indices_to_expr_handle(indices));
         auto non_softmax_indices = remove_softmax_dim_index(indices);
         return inp - max->call(non_softmax_indices) -
             log_sum->call(non_softmax_indices);
@@ -2199,7 +2145,7 @@ Tensor* TensorExprKernel::computeSoftmax(
 
 Tensor* TensorExprKernel::computeCatWoConditionals(const torch::jit::Value* v) {
   auto const& n = v->node();
-  auto inputs = n->input(0)->node()->inputs();
+  auto inputs = n->inputs()[0]->node()->inputs();
   if (inputs.size() == 0) {
     throw std::runtime_error("Empty input list is passed to aten::cat");
   }
@@ -2272,7 +2218,7 @@ Tensor* TensorExprKernel::computeCatWoConditionals(const torch::jit::Value* v) {
         store_indices[i] = for_vars[i];
       }
     }
-    auto inp_buf = tensors_.at(inp)->buf();
+    auto inp_buf = tensors_.at(inp->unique())->buf();
     auto load_expr = new Load(inp_buf, load_indices, new IntImm(1));
     auto load_promoted = promoteToDtype(ExprHandle(load_expr), highType);
     Stmt* st = new Store(
@@ -2355,7 +2301,7 @@ std::vector<int64_t> TensorExprKernel::getReductionAxes(
   // We need to handle both of them.
   if (axesNode->kind() == prim::ListConstruct) {
     for (auto axisNode : axesNode->inputs()) {
-      axes.push_back(toIValue(axisNode)->toInt());
+      axes.push_back(constant(axisNode).AsNode<IntImm>()->value());
     }
     return axes;
   }
@@ -2388,8 +2334,8 @@ bool denseAndNonOverlapping(
 
 Tensor* TensorExprKernel::convertOutputToCorrectStrides(torch::jit::Value* v) {
   const TensorTypePtr& tt = v->type()->expect<TensorType>();
-  TORCH_INTERNAL_ASSERT(tensors_.count(v));
-  Tensor* tensor = tensors_[v];
+  TORCH_INTERNAL_ASSERT(tensors_.count(v->unique()));
+  Tensor* tensor = tensors_[v->unique()];
 
   TORCH_INTERNAL_ASSERT(tt->sizes().concrete_sizes());
   const auto sizes = *tt->sizes().concrete_sizes();
@@ -2464,7 +2410,7 @@ void TensorExprKernel::compile() {
     bindInput(input);
     inputTypes_.push_back(input->type());
     if (input->type()->kind() == TypeKind::TensorType) {
-      block->append_stmt(tensors_.at(input)->stmt());
+      block->append_stmt(tensors_.at(input->unique())->stmt());
     }
   }
 
@@ -2475,8 +2421,8 @@ void TensorExprKernel::compile() {
     } else {
       for (auto const& output : n->outputs()) {
         if (output->hasUses()) {
-          tensors_.emplace(output, computeValue(output));
-          block->append_stmt(tensors_.at(output)->stmt());
+          tensors_.emplace(output->unique(), computeValue(output));
+          block->append_stmt(tensors_.at(output->unique())->stmt());
         }
       }
     }
@@ -2490,17 +2436,17 @@ void TensorExprKernel::compile() {
 
   // Move output operands from `tensors_` to `bufOutputs_`
   for (const auto& output : graph_->outputs()) {
-    if (!tensors_.count(output)) {
+    if (!tensors_.count(output->unique())) {
       throw malformed_input("cannot find output Tensor");
     }
     // The "strided" tensor will be incorrect if used in NNC,
     // since NNC views it as contiguous. Only convert it to the right
     // strides at the end of the kernel (if already contiguous it's a no-op)
     Tensor* properly_strided_output = convertOutputToCorrectStrides(output);
-    if (tensors_.at(output) != properly_strided_output) {
+    if (tensors_.at(output->unique()) != properly_strided_output) {
       block->append_stmt(properly_strided_output->stmt());
     }
-    tensors_[output] = properly_strided_output;
+    tensors_[output->unique()] = properly_strided_output;
     const auto& tt = output->type()->expect<TensorType>();
     auto sizes = *tt->sizes().concrete_sizes();
     tensorOutputSizes_.push_back(sizes);
@@ -2514,11 +2460,12 @@ void TensorExprKernel::compile() {
       tensorOutputStrides_.push_back(TensorType::contiguousStridesOf(sizes));
     }
 
-    bufOutputs_.insert(tensors_.at(output)->buf());
-    bufferArgs_.emplace_back(tensors_.at(output));
+    bufOutputs_.insert(tensors_.at(output->unique())->buf());
+    bufferArgs_.emplace_back(tensors_.at(output->unique()));
     tensorOutputTensorOptions_.emplace_back(
-        c10::TensorOptions(tensorType(tensors_[output])).device(device_));
-    tensors_.erase(output);
+        c10::TensorOptions(tensorType(tensors_[output->unique()]))
+            .device(device_));
+    tensors_.erase(output->unique());
   }
 
   BackendType backendType = inferBackendTypeFromDevice(device_);
