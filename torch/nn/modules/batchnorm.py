@@ -29,8 +29,11 @@ class _NormBase(Module):
         eps: float = 1e-5,
         momentum: float = 0.1,
         affine: bool = True,
-        track_running_stats: bool = True
+        track_running_stats: bool = True,
+        device='cpu',
+        dtype=torch.get_default_dtype()
     ) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
         super(_NormBase, self).__init__()
         self.num_features = num_features
         self.eps = eps
@@ -38,15 +41,17 @@ class _NormBase(Module):
         self.affine = affine
         self.track_running_stats = track_running_stats
         if self.affine:
-            self.weight = Parameter(torch.empty(num_features))
-            self.bias = Parameter(torch.empty(num_features))
+            self.weight = Parameter(torch.empty(num_features, **factory_kwargs))
+            self.bias = Parameter(torch.empty(num_features, **factory_kwargs))
         else:
             self.register_parameter('weight', None)
             self.register_parameter('bias', None)
         if self.track_running_stats:
-            self.register_buffer('running_mean', torch.zeros(num_features))
-            self.register_buffer('running_var', torch.ones(num_features))
-            self.register_buffer('num_batches_tracked', torch.tensor(0, dtype=torch.long))
+            self.register_buffer('running_mean', torch.zeros(num_features, **factory_kwargs))
+            self.register_buffer('running_var', torch.ones(num_features, **factory_kwargs))
+            self.register_buffer('num_batches_tracked',
+                                 torch.tensor(0, dtype=torch.long,
+                                              **{k: v for k, v in factory_kwargs.items() if k != 'dtype'}))
         else:
             self.register_buffer('running_mean', None)
             self.register_buffer('running_var', None)
@@ -93,9 +98,9 @@ class _NormBase(Module):
 class _BatchNorm(_NormBase):
 
     def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
-                 track_running_stats=True):
+                 track_running_stats=True, **kwargs) -> None:
         super(_BatchNorm, self).__init__(
-            num_features, eps, momentum, affine, track_running_stats)
+            num_features, eps, momentum, affine, track_running_stats, **kwargs)
 
     def forward(self, input: Tensor) -> Tensor:
         self._check_input_dim(input)
@@ -146,20 +151,23 @@ class _LazyBatchNorm(LazyModuleMixin, _BatchNorm):
     weight: UninitializedParameter  # type: ignore[assignment]
     bias: UninitializedParameter  # type: ignore[assignment]
 
-    def __init__(self, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
+    def __init__(self, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True,
+                 device='cpu', dtype=torch.get_default_dtype()) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
         super(_LazyBatchNorm, self).__init__(
             # affine and track_running_stats are hardcoded to False to
             # avoid creating tensors that will soon be overwritten.
-            0, eps, momentum, False, False)
+            0, eps, momentum, False, False, **factory_kwargs)
         self.affine = affine
         self.track_running_stats = track_running_stats
         if self.affine:
-            self.weight = UninitializedParameter()
-            self.bias = UninitializedParameter()
+            self.weight = UninitializedParameter(**factory_kwargs)
+            self.bias = UninitializedParameter(**factory_kwargs)
         if self.track_running_stats:
-            self.running_mean = UninitializedBuffer()
-            self.running_var = UninitializedBuffer()
-            self.num_batches_tracked = torch.tensor(0, dtype=torch.long)
+            self.running_mean = UninitializedBuffer(**factory_kwargs)
+            self.running_var = UninitializedBuffer(**factory_kwargs)
+            self.num_batches_tracked = torch.tensor(
+                0, dtype=torch.long, **{k: v for k, v in factory_kwargs.items() if k != 'dtype'})
 
     def reset_parameters(self) -> None:
         if not self.has_uninitialized_params() and self.num_features != 0:
@@ -604,9 +612,10 @@ class SyncBatchNorm(_BatchNorm):
         momentum: float = 0.1,
         affine: bool = True,
         track_running_stats: bool = True,
-        process_group: Optional[Any] = None
+        process_group: Optional[Any] = None,
+        **kwargs
     ) -> None:
-        super(SyncBatchNorm, self).__init__(num_features, eps, momentum, affine, track_running_stats)
+        super(SyncBatchNorm, self).__init__(num_features, eps, momentum, affine, track_running_stats, **kwargs)
         self.process_group = process_group
         # gpu_size is set through DistributedDataParallel initialization. This is to ensure that SyncBatchNorm is used
         # under supported condition (single GPU per process)
