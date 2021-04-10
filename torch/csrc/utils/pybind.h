@@ -5,6 +5,7 @@
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <pybind11/operators.h>
 
 #include <torch/csrc/DynamicTypes.h>
 #include <torch/csrc/autograd/python_variable.h>
@@ -28,7 +29,6 @@ namespace pybind11 { namespace detail {
 template <>
 struct type_caster<at::Tensor> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Tensor, _("at::Tensor"));
 
   bool load(handle src, bool) {
@@ -49,7 +49,6 @@ struct type_caster<at::Tensor> {
 template <>
 struct type_caster<at::Generator> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Generator, _("at::Generator"));
 
   bool load(handle src, bool) {
@@ -69,14 +68,12 @@ struct type_caster<at::Generator> {
 
 template<> struct type_caster<at::IntArrayRef> {
 public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::IntArrayRef, _("at::IntArrayRef"));
 
   bool load(handle src, bool) {
     PyObject *source = src.ptr();
     auto tuple = PyTuple_Check(source);
     if (tuple || PyList_Check(source)) {
-      // NOLINTNEXTLINE(bugprone-branch-clone)
       auto size = tuple ? PyTuple_GET_SIZE(source) : PyList_GET_SIZE(source);
       v_value.resize(size);
       for (int idx = 0; idx < size; idx++) {
