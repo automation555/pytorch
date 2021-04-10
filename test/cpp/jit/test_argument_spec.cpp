@@ -9,8 +9,8 @@ namespace jit {
 
 namespace {
 
-int device(const autograd::Variable& v) {
-  return v.device().is_cuda() ? v.get_device() : -1;
+at::Device device(const autograd::Variable& v) {
+  return v.device();
 }
 
 bool isEqual(at::IntArrayRef lhs, at::IntArrayRef rhs) {
