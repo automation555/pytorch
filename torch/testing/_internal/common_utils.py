@@ -42,10 +42,10 @@ from typing import cast, Any, Dict, Iterable, Iterator, Optional
 
 import numpy as np
 
-from torch.testing import floating_types_and, integral_types, complex_types
 from torch.testing._internal import expecttest
-from .._core import \
-    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type)
+from torch.testing import \
+    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type,
+     floating_types_and, integral_types, complex_types)
 
 import torch
 import torch.cuda
@@ -690,30 +690,6 @@ def is_iterable(obj):
     except TypeError:
         return False
 
-
-def is_iterable_of_tensors(iterable, include_empty=False):
-    """ Returns True if iterable is an iterable of tensors and False o.w.
-
-        If the iterable is empty, the return value is :attr:`include_empty`
-    """
-    # Tensor itself is iterable so we check this first
-    if isinstance(iterable, torch.Tensor):
-        return False
-
-    try:
-        if len(iterable) == 0:
-            return include_empty
-
-        for t in iter(iterable):
-            if not isinstance(t, torch.Tensor):
-                return False
-
-    except TypeError as te:
-        return False
-
-    return True
-
-
 class CudaNonDefaultStream():
     def __enter__(self):
         # Before starting CUDA test save currently active streams on all
@@ -816,27 +792,6 @@ try:
 except ImportError:
     print('Fail to import hypothesis in common_utils, tests are not derandomized')
 
-
-slow_tests_dict: Optional[Dict[str, float]] = None
-def check_slow_test_from_stats(test):
-    global slow_tests_dict
-    if slow_tests_dict is None:
-        url = 'https://raw.githubusercontent.com/pytorch/test-infra/master/stats/.pytorch-slow-tests'
-        try:
-            contents = urlopen(url, timeout=1).read().decode('utf-8')
-            slow_tests_dict = json.loads(contents)
-        except Exception as e:
-            print(f'Could not download slow test stats because of error {e}. Proceeding with no added slow tests.')
-            slow_tests_dict = {}
-    test_suite = str(test.__class__).split('\'')[1]
-    test_name = f'{test._testMethodName} ({test_suite})'
-
-    if test_name in slow_tests_dict:
-        getattr(test, test._testMethodName).__dict__['slow_test'] = True
-        if not TEST_WITH_SLOW:
-            raise unittest.SkipTest("test is slow; run with PYTORCH_TEST_WITH_SLOW to enable test")
-
-
 disabled_test_from_issues: Optional[Dict[str, Any]] = None
 def check_disabled(test_name):
     global disabled_test_from_issues
@@ -904,7 +859,7 @@ def get_comparison_dtype(a, b):
 class AssertRaisesContextIgnoreNotImplementedError(unittest.case._AssertRaisesContext):
     def __exit__(self, exc_type, exc_value, tb):
         if exc_type is not None and issubclass(exc_type, NotImplementedError):
-            self.test_case.skipTest(f"not_implemented: {exc_value}")  # type: ignore[attr-defined]
+            self.test_case.skipTest("not_implemented: {exc_value}")  # type: ignore[attr-defined]
         return super().__exit__(exc_type, exc_value, tb)
 
 class TestCase(expecttest.TestCase):
@@ -1011,7 +966,7 @@ class TestCase(expecttest.TestCase):
 
     def setUp(self):
 
-        check_slow_test_from_stats(self)
+
         if TEST_SKIP_FAST:
             if not getattr(self, self._testMethodName).__dict__.get('slow_test', False):
                 raise unittest.SkipTest("test is fast; we disabled it with PYTORCH_TEST_SKIP_FAST")
@@ -1671,6 +1626,7 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
             result = (torch.rand(size, device=device, dtype=torch.float32) * span + low).to(torch.bfloat16)
         else:
             result = torch.rand(size, device=device, dtype=dtype) * span + low
+        result.requires_grad = requires_grad
     else:
         assert dtype in complex_types()
         low = -9 if low is None else max(low, -9)
@@ -1680,14 +1636,11 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
         real = torch.rand(size, device=device, dtype=float_dtype) * span + low
         imag = torch.rand(size, device=device, dtype=float_dtype) * span + low
         result = torch.complex(real, imag)
+        result.requires_grad = requires_grad
 
     if discontiguous and result.numel() > 1:
         result = torch.repeat_interleave(result, 2, dim=-1)
         result = result[..., ::2]
-
-    if dtype in floating_types_and(torch.half, torch.bfloat16) or\
-       dtype in complex_types():
-        result.requires_grad = requires_grad
 
     return result
 
@@ -1861,9 +1814,15 @@ def random_sparse_matrix(rows, columns, density=0.01, **kwargs):
     is specified but higher than min(rows, columns)/(rows * columns)
     for non-singular matrices.
     """
+    # TODO: we should also add tests to test_testing to ensure that random_sparse_matrix()
+    # (and make_tensor()) work as expected
     dtype = kwargs.get('dtype', torch.double)
     device = kwargs.get('device', 'cpu')
     singular = kwargs.get("singular", False)
+    values_domain = kwargs.get("domain", None)
+    uncoalesced = kwargs.get("uncoalesced", False)
+    requires_grad = kwargs.get("requires_grad", False)
+    diag_dominates = kwargs.get("diag_dominates", True)
 
     k = min(rows, columns)
     nonzero_elements = max(min(rows, columns), int(rows * columns * density))
@@ -1872,12 +1831,29 @@ def random_sparse_matrix(rows, columns, density=0.01, **kwargs):
     column_indices = [i % columns for i in range(nonzero_elements)]
     random.shuffle(column_indices)
     indices = [row_indices, column_indices]
-    values = torch.randn(nonzero_elements, dtype=dtype, device=device)
-    # ensure that the diagonal dominates
-    values *= torch.tensor([-float(i - j)**2 for i, j in zip(*indices)], dtype=dtype, device=device).exp()
+
+    if dtype in integral_types() + (torch.bool, ):
+        requires_grad = False
+
+    if values_domain is None:
+        low, high = None, None
+    else:
+        low, high = values_domain
+    values = make_tensor([nonzero_elements, ], device=device, dtype=dtype, low=low, high=high)
+
+    if diag_dominates:
+        # this wont work for all dtypes
+        # e.g. "exp" "_vml_cpu" not implemented for 'Half'
+        values *= torch.tensor([-float(i - j)**2 for i, j in zip(*indices)], dtype=dtype, device=device).exp()
+
+
     indices_tensor = torch.tensor(indices)
-    A = torch.sparse_coo_tensor(indices_tensor, values, (rows, columns), device=device)
-    return A.coalesce()
+    A = torch.sparse_coo_tensor(
+        indices_tensor, values, (rows, columns), device=device, requires_grad=requires_grad
+    )
+    if not uncoalesced:
+        A = A.coalesce()
+    return A
 
 
 def random_sparse_pd_matrix(matrix_size, density=0.01, **kwargs):
