@@ -9,20 +9,14 @@ namespace {
 
 using namespace api::utils;
 
-struct Clamp_Block final {
+struct Mul_Block {
   uvec3 extents;
-  uint32_t _;
-  vec2 clamp;
+  float other;
 };
 
-Tensor clamp(
+Tensor mul_scalar(
     const Tensor& self_arg,
-    const c10::optional<Scalar> min,
-    const c10::optional<Scalar> max) {
-  TORCH_CHECK(
-      min || max,
-      "At least one of 'min' or 'max' must not be None");
-
+    const Scalar other) {
   api::Context* const context = api::context();
 
   const Tensor self = self_arg.is_vulkan() ? self_arg : self_arg.vulkan();
@@ -38,13 +32,9 @@ Tensor clamp(
   command_buffer.begin();
   {
     if (v_output.has_image() && v_self.has_image()) {
-      const Clamp_Block block {
+      const Mul_Block block {
         v_output.extents(),
-        0u,
-        {
-          min ? min->to<float>() : -std::numeric_limits<float>::infinity(),
-          max ? max->to<float>() : std::numeric_limits<float>::infinity(),
-        },
+        other.to<float>(),
       };
 
       context->dispatch(
@@ -54,7 +44,7 @@ Tensor clamp(
             VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
           },
-          VK_KERNEL(clamp),
+          VK_KERNEL(mul_scalar),
           v_output.extents(),
           // Write-only access bypasses synchronization but inserts appropriate
           // barriers if necessary.
@@ -81,19 +71,14 @@ Tensor clamp(
   return convert(v_output);
 }
 
-Tensor& clamp_(
+Tensor& mul_scalar_(
     Tensor& self,
-    const c10::optional<Scalar> min,
-    const c10::optional<Scalar> max) {
+    const Scalar other) {
   api::Context* const context = api::context();
 
   TORCH_CHECK(
-      min || max,
-      "At least one of 'min' or 'max' must not be None");
-
-  TORCH_CHECK(
       self.is_vulkan(),
-      "Vulkan: In-place clamp is only supported on Vulkan tensors.");
+      "Vulkan: In-place mul_scalar is only supported on Vulkan tensors.");
 
   vTensor& v_self = convert(self);
 
@@ -101,13 +86,9 @@ Tensor& clamp_(
   command_buffer.begin();
   {
     if (v_self.has_image()) {
-      const Clamp_Block block {
+      const Mul_Block block {
         v_self.extents(),
-        0u,
-        {
-          min ? min->to<float>() : -std::numeric_limits<float>::infinity(),
-          max ? max->to<float>() : std::numeric_limits<float>::infinity(),
-        },
+        other.to<float>(),
       };
 
       context->dispatch(
@@ -116,7 +97,7 @@ Tensor& clamp_(
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
             VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
           },
-          VK_KERNEL(clamp_),
+          VK_KERNEL(mul_scalar_),
           v_self.extents(),
           // Read-Write access triggers an async synchronization if necessory
           // and inserts appropriate barriers if hazards are detected.
@@ -138,37 +119,11 @@ Tensor& clamp_(
   return self;
 }
 
-Tensor hardtanh(
-    const Tensor& self,
-    const Scalar min,
-    const Scalar max) {
-  return ops::clamp(self, min, max);
-}
-
-Tensor& hardtanh_(
-    Tensor& self,
-    const Scalar min,
-    const Scalar max) {
-  return ops::clamp_(self, min, max);
-}
-
-Tensor relu(const Tensor& self) {
-  return ops::clamp(self, 0, c10::nullopt);
-}
-
-Tensor& relu_(Tensor& self) {
-  return ops::clamp_(self, 0, c10::nullopt);
-}
-
 #ifdef USE_VULKAN_API
 
 TORCH_LIBRARY_IMPL(aten, Vulkan, m) {
-  m.impl("clamp", TORCH_FN(clamp));
-  m.impl("clamp_", TORCH_FN(clamp_));
-  m.impl("hardtanh", hardtanh);
-  m.impl("hardtanh_", hardtanh_);
-  m.impl("relu", relu);
-  m.impl("relu_", relu_);
+  m.impl("mul.Scalar", TORCH_FN(mul_scalar));
+  m.impl("mul_.Scalar", TORCH_FN(mul_scalar_));
 }
 
 #endif /* USE_VULKAN_API */

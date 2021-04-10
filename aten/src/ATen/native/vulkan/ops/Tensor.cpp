@@ -1,5 +1,4 @@
 #include <ATen/native/vulkan/ops/Tensor.h>
-#include <c10/util/accumulate.h>
 
 namespace at {
 namespace native {
@@ -9,9 +8,11 @@ namespace {
 
 using namespace api::utils;
 
-uvec3 image_extents(IntArrayRef);
-bool requires_image(IntArrayRef);
-bool requires_staging(const api::Adapter*);
+struct Tensor_Block {
+  uvec3 extents;
+  uint32_t block;
+  uvec4 offset;
+};
 
 VkFormat vk_format(const caffe2::TypeMeta dtype) {
   switch (c10::typeMetaToScalarType(dtype)) {
@@ -24,8 +25,8 @@ VkFormat vk_format(const caffe2::TypeMeta dtype) {
 
     default:
       TORCH_CHECK(
-          false,
-          "Vulkan tensor format not supported!");
+        false,
+        "Vulkan tensor format not supported!");
   }
 
   return VK_FORMAT_UNDEFINED;
@@ -159,12 +160,18 @@ VkDeviceSize buffer_bytes(
     const caffe2::TypeMeta dtype) {
   VkDeviceSize size = c10::elementSize(c10::typeMetaToScalarType(dtype));
 
+  // Forward declaration
+  bool requires_image(IntArrayRef);
+
   if (requires_image(sizes)) {
+    // Forward declaration
+    uvec3 image_extents(IntArrayRef);
+
     const uvec3 extents = image_extents(sizes);
     size *= extents.data[0u] * extents.data[1u] * (4u * extents.data[2u]);
   }
   else {
-    size *= c10::multiply_integers(sizes);
+    size *= prod_intlist(sizes);
   }
 
   return size;
@@ -185,6 +192,9 @@ vTensor::Buffer allocate_buffer(
 
   TORCH_CHECK(!sizes.empty(), "Invalid Vulkan tensor size!");
   verify(options);
+
+  // Forward declaration
+  bool requires_staging(const api::Adapter*);
 
   const VkFlags usage =
       VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
@@ -415,17 +425,29 @@ vTensor::vTensor(
     }) {
 }
 
-const vTensor* vTensor::host(
-    api::Command::Buffer& command_buffer) const {
-  view_->staging(command_buffer, Stage::Host, Access::Read);
+const vTensor* vTensor::host() const {
+  view_->staging(Stage::Host, Access::Read);
   return this;
 }
 
-vTensor* vTensor::host(
-    api::Command::Buffer& command_buffer,
-    const Access::Flags access) {
-  view_->staging(command_buffer, Stage::Host, access);
+vTensor* vTensor::host(const Access::Flags access) {
+  view_->staging(Stage::Host, access);
   return this;
+}
+
+vTensor::Buffer::Object vTensor::buffer(
+  const Stage::Flags stage) const & {
+  return view_->buffer(
+      stage,
+      Access::Read).object;
+}
+
+vTensor::Buffer::Object vTensor::buffer(
+    const Stage::Flags stage,
+    const Access::Flags access) & {
+  return view_->buffer(
+      stage,
+      access).object;
 }
 
 vTensor::Buffer::Object vTensor::buffer(
@@ -443,6 +465,21 @@ vTensor::Buffer::Object vTensor::buffer(
     const Access::Flags access) & {
   return view_->buffer(
       command_buffer,
+      stage,
+      access).object;
+}
+
+vTensor::Image::Object vTensor::image(
+    const Stage::Flags stage) const & {
+  return view_->image(
+      stage,
+      Access::Read).object;
+}
+
+vTensor::Image::Object vTensor::image(
+    const Stage::Flags stage,
+    const Access::Flags access) & {
+  return view_->image(
       stage,
       access).object;
 }
@@ -504,8 +541,16 @@ vTensor::View::View(
   ops::verify(options);
 }
 
+// We typically do not know whether we need a command buffer to service a request
+// until we have perfomed a bunch of checks in nested logic, and even then we
+// may end up with the always issued state transition optimized away under
+// certain conditions, which makes a policy of always allocating a command buffer
+// up front, only to end up using it at times, a wasteful approach.  This class
+// answers that need.
+
 class vTensor::View::CMD final {
  public:
+  explicit CMD(const View&);
   CMD(const View&, api::Command::Buffer&);
   CMD(const CMD&) = delete;
   CMD& operator=(const CMD&) = delete;
@@ -539,18 +584,60 @@ class vTensor::View::CMD final {
       const Image::Object& image,
       Buffer::Object& buffer);
 
-  void submit(Fence fence);
+  void submit(Fence fence = {});
+
+ private:
+  api::Command::Buffer& command_buffer();
 
  private:
   const View& view_;
-  api::Command::Buffer& command_buffer_;
+
+  enum class Type {
+    Internal,
+    External,
+  } type;
+
+  union _ final {
+    api::Command::Buffer internal;
+    api::Command::Buffer* external;
+    ~_() {}
+  } command_buffer_;
 };
 
 vTensor::View::CMD::CMD(
-    const View& view,
-    api::Command::Buffer& command_buffer)
+    const View& view)
   : view_(view),
-    command_buffer_(command_buffer) {
+    type(Type::Internal),
+    command_buffer_{} {
+}
+
+vTensor::View::CMD::CMD(
+    const View& view,
+    api::Command::Buffer& external)
+  : view_(view),
+    type(Type::External),
+    command_buffer_{
+      .external = &external,
+    } {
+}
+
+api::Command::Buffer& vTensor::View::CMD::command_buffer() {
+  switch (type) {
+    case Type::Internal:
+      if (!command_buffer_.internal) {
+        command_buffer_.internal = view_.context_->command().pool.allocate();
+        command_buffer_.internal.begin();
+      }
+
+      return command_buffer_.internal;
+
+    case Type::External:
+      return *(command_buffer_.external);
+
+    default:
+      TORCH_INTERNAL_ASSERT(false, "Unknown command buffer type!");
+      break;
+  }
 }
 
 void vTensor::View::CMD::barrier(State::Transition transition) {
@@ -680,7 +767,7 @@ void vTensor::View::CMD::barrier(State::Transition transition) {
       barrier.stage.src = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
     }
 
-    command_buffer_.barrier(barrier);
+    command_buffer().barrier(barrier);
   }
 }
 
@@ -708,7 +795,7 @@ void vTensor::View::CMD::copy_buffer_to_staging(
           {},
         }));
 
-  command_buffer_.copy(buffer, staging);
+  command_buffer().copy(buffer, staging);
 }
 
 void vTensor::View::CMD::copy_staging_to_buffer(
@@ -735,7 +822,7 @@ void vTensor::View::CMD::copy_staging_to_buffer(
           {},
         }));
 
-  command_buffer_.copy(staging, buffer);
+  command_buffer().copy(staging, buffer);
 }
 
 void vTensor::View::CMD::copy_buffer_to_image(
@@ -766,11 +853,7 @@ void vTensor::View::CMD::copy_buffer_to_image(
   const uvec3 extents = view_.extents();
   const uint32_t plane = extents.data[0u] * extents.data[1u];
 
-  const struct Block final {
-    uvec3 extents;
-    uint32_t block;
-    uvec4 offset;
-  } block {
+  const Tensor_Block block {
     extents,
     4u * plane,
     {
@@ -782,7 +865,7 @@ void vTensor::View::CMD::copy_buffer_to_image(
   };
 
   view_.context_->dispatch(
-      command_buffer_,
+      command_buffer(),
       {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -790,7 +873,6 @@ void vTensor::View::CMD::copy_buffer_to_image(
       },
       VK_KERNEL(nchw_to_image),
       extents,
-      view_.context_->gpu().adapter->local_work_group_size(),
       image,
       buffer,
       view_.context_->resource().pool.uniform(block).object);
@@ -824,11 +906,7 @@ void vTensor::View::CMD::copy_image_to_buffer(
   const uvec3 extents = view_.extents();
   const uint32_t plane = extents.data[0u] * extents.data[1u];
 
-  const struct Block final {
-    uvec3 extents;
-    uint32_t block;
-    uvec4 offset;
-  } block {
+  const Tensor_Block block {
     extents,
     4u * plane,
     {
@@ -840,7 +918,7 @@ void vTensor::View::CMD::copy_image_to_buffer(
   };
 
   view_.context_->dispatch(
-      command_buffer_,
+      command_buffer(),
       {
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
@@ -848,17 +926,16 @@ void vTensor::View::CMD::copy_image_to_buffer(
       },
       VK_KERNEL(image_to_nchw),
       view_.extents(),
-      view_.context_->gpu().adapter->local_work_group_size(),
       image,
       buffer,
       view_.context_->resource().pool.uniform(block).object);
 }
 
 void vTensor::View::CMD::submit(const api::Resource::Fence fence) {
-  view_.context_->command().pool.submit(
-      view_.context_->gpu().queue,
-      command_buffer_,
-      fence);
+  if ((Type::Internal == type) && command_buffer_.internal) {
+    command_buffer_.internal.end();
+    command_buffer_.internal.submit(view_.context_->gpu().queue, fence);
+  }
 }
 
 vTensor::Buffer& vTensor::View::buffer() const {
@@ -874,28 +951,38 @@ vTensor::Buffer& vTensor::View::buffer() const {
 }
 
 vTensor::Buffer& vTensor::View::buffer(
-    api::Command::Buffer& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
-  CMD cmd(*this, command_buffer);
-  return buffer(cmd, stage, access);
+  CMD command_buffer(*this);
+  Buffer& buffer = this->buffer(command_buffer, stage, access);
+  command_buffer.submit();
+
+  return buffer;
 }
 
 vTensor::Buffer& vTensor::View::buffer(
-    CMD& cmd,
+    api::Command::Buffer& command_buffer_,
+    const Stage::Flags stage,
+    const Access::Flags access) const {
+  CMD command_buffer(*this, command_buffer_);
+  return buffer(command_buffer, stage, access);
+}
+
+vTensor::Buffer& vTensor::View::buffer(
+    CMD& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
   if ((access & Access::Read) && state_.is_dirty(Component::Buffer)) {
     if (state_.is_clean(Component::Staging)) {
-      cmd.copy_staging_to_buffer(
+      command_buffer.copy_staging_to_buffer(
           state_,
-          staging(cmd, Stage::Transfer, Access::Read).object,
+          staging(command_buffer, Stage::Transfer, Access::Read).object,
           buffer().object);
     }
     else if (state_.is_clean(Component::Image)) {
-      cmd.copy_image_to_buffer(
+      command_buffer.copy_image_to_buffer(
           state_,
-          image(cmd, Stage::Compute, Access::Read).object,
+          image(command_buffer, Stage::Compute, Access::Read).object,
           buffer().object);
     }
     else {
@@ -905,7 +992,7 @@ vTensor::Buffer& vTensor::View::buffer(
     }
   }
 
-  cmd.barrier(
+  command_buffer.barrier(
       state_.transition({
           // Staging
           {},
@@ -939,25 +1026,35 @@ vTensor::Image& vTensor::View::image() const {
 }
 
 vTensor::Image& vTensor::View::image(
-    api::Command::Buffer& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
-  CMD cmd(*this, command_buffer);
-  return image(cmd, stage, access);
+  CMD command_buffer(*this);
+  Image& image = this->image(command_buffer, stage, access);
+  command_buffer.submit();
+
+  return image;
 }
 
 vTensor::Image& vTensor::View::image(
-    CMD& cmd,
+    api::Command::Buffer& command_buffer_,
+    const Stage::Flags stage,
+    const Access::Flags access) const {
+  CMD command_buffer(*this, command_buffer_);
+  return image(command_buffer, stage, access);
+}
+
+vTensor::Image& vTensor::View::image(
+    CMD& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
   if ((access & Access::Read) && state_.is_dirty(Component::Image)) {
-    cmd.copy_buffer_to_image(
+    command_buffer.copy_buffer_to_image(
         state_,
-        buffer(cmd, stage, Access::Read).object,
+        buffer(command_buffer, stage, Access::Read).object,
         image().object);
   }
 
-  cmd.barrier(
+  command_buffer.barrier(
       state_.transition({
           // Staging
           {},
@@ -997,28 +1094,27 @@ vTensor::Buffer& vTensor::View::staging() const {
 }
 
 vTensor::Buffer& vTensor::View::staging(
-    api::Command::Buffer& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
-  CMD cmd(*this, command_buffer);
-  Buffer& staging = this->staging(cmd, stage, access);
-  cmd.submit(fence(access));
+  CMD command_buffer(*this);
+  Buffer& staging = this->staging(command_buffer, stage, access);
+  command_buffer.submit(fence());
 
   return staging;
 }
 
 vTensor::Buffer& vTensor::View::staging(
-    CMD& cmd,
+    CMD& command_buffer,
     const Stage::Flags stage,
     const Access::Flags access) const {
   if ((access & Access::Read) && state_.is_dirty(Component::Staging)) {
-    cmd.copy_buffer_to_staging(
+    command_buffer.copy_buffer_to_staging(
         state_,
-        buffer(cmd, Stage::Transfer, Access::Read).object,
+        buffer(command_buffer, Stage::Transfer, Access::Read).object,
         staging().object);
   }
 
-  cmd.barrier(
+  command_buffer.barrier(
       state_.transition({
           // Staging
           {
@@ -1040,20 +1136,16 @@ vTensor::Buffer& vTensor::View::staging(
   return staging();
 }
 
-vTensor::Fence& vTensor::View::fence(const Access::Flags access) const {
-  if (access & Access::Read) {
-    fence_ = allocate_fence(&context_->resource().pool);
-  }
-
-  return fence_;
-}
-
 vTensor::Memory& vTensor::View::wait() const {
   if (fence_) {
     fence_.wait();
   }
 
   return staging().memory;
+}
+
+vTensor::Fence& vTensor::View::fence() const {
+  return (fence_ = allocate_fence(pool_));
 }
 
 void vTensor::View::verify() const {
@@ -1088,12 +1180,6 @@ vTensor::View::State::State(
   }
 }
 
-#ifdef VULKAN_TENSOR_DEBUG
-std::ostream& operator<<(
-    std::ostream&,
-    const vTensor::View::State::Bundle&);
-#endif /* VULKAN_TENSOR_DEBUG */
-
 vTensor::View::State::Transition
 vTensor::View::State::transition(const Bundle bundle) {
   const Bundle from = bundle_;
@@ -1111,10 +1197,15 @@ vTensor::View::State::transition(const Bundle bundle) {
     to.image = bundle.image;
   }
 
-#ifdef VULKAN_TENSOR_DEBUG
+#ifdef DEBUG
+  // Forward declaration
+  std::ostream& operator<<(
+      std::ostream&,
+      const View::State::Bundle&);
+
   std::cout << "From:" << std::endl << from << std::endl;
   std::cout << "To:" << std::endl << to << std::endl;
-#endif /* VULKAN_TENSOR_DEBUG */
+#endif /* DEBUG */
 
   return Transition{
     from,
@@ -1144,8 +1235,6 @@ void verify(const TensorOptions& options) {
 //
 // Debug
 //
-
-#ifdef VULKAN_TENSOR_DEBUG
 
 namespace {
 
@@ -1307,8 +1396,6 @@ std::ostream& operator<<(
 
   return stream;
 }
-
-#endif /* VULKAN_TENSOR_DEBUG */
 
 } // namespace ops
 } // namespace vulkan
