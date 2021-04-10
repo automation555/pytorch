@@ -3,7 +3,6 @@
 #include <c10/core/DispatchKey.h>
 #include <c10/util/llvmMathExtras.h>
 #include <c10/util/Exception.h>
-#include <c10/util/Metaprogramming.h>
 #include <ostream>
 
 namespace c10 {
@@ -62,8 +61,8 @@ public:
     }
   }
   // Test if a DispatchKey is in the set
-  bool inline has(DispatchKey t) const {
-    TORCH_INTERNAL_ASSERT_DEBUG_ONLY(t != DispatchKey::Undefined);
+  bool has(DispatchKey t) const {
+    TORCH_INTERNAL_ASSERT(t != DispatchKey::Undefined);
     return static_cast<bool>(repr_ & DispatchKeySet(t).repr_);
   }
   // Test if DispatchKeySet is a superset of ks.
@@ -81,10 +80,6 @@ public:
   // Compute the set difference self - other
   DispatchKeySet operator-(DispatchKeySet other) const {
     return DispatchKeySet(repr_ & ~other.repr_);
-  }
-  // Compute self ^ other
-  DispatchKeySet operator^(DispatchKeySet other) const {
-    return DispatchKeySet(repr_ ^ other.repr_);
   }
   // Perform set equality
   bool operator==(DispatchKeySet other) const {
@@ -129,7 +124,7 @@ private:
 public:
   // STL iterator for DispatchKeySet. Iterates through all DispatchKeys in the
   // set. The iterator is only invalidated by the destruction of the underlying
-  // DispatchKeySet as the iterator stores a pointer to the raw representation of
+  // DispatchKeySet as the iterator stores a pointer to the raw represenation of
   // the DispatchKeySet.
   class iterator {
    public:
@@ -191,68 +186,26 @@ public:
 C10_API std::string toString(DispatchKeySet);
 C10_API std::ostream& operator<<(std::ostream&, DispatchKeySet);
 
+#define DISPATCH_KEY(dk) \
+  DispatchKey::dk,
 // autograd_dispatch_keyset should include all runtime autograd keys.
 // Alias key DispatchKey::Autograd maps to autograd_dispatch_keyset.
-// NB: keys in this set also get associated with CompositeImplicitAutograd
 constexpr DispatchKeySet autograd_dispatch_keyset = DispatchKeySet({
-    DispatchKey::AutogradCPU,
-    DispatchKey::AutogradCUDA,
-    DispatchKey::AutogradXLA,
-    DispatchKey::AutogradNestedTensor,
-    DispatchKey::AutogradMLC,
-    DispatchKey::AutogradXPU,
-    DispatchKey::AutogradPrivateUse1,
-    DispatchKey::AutogradPrivateUse2,
-    DispatchKey::AutogradPrivateUse3,
-    DispatchKey::AutogradOther,
+  FOR_EACH_RUNTIME_AUTOGRAD_DISPATCH_KEY(DISPATCH_KEY)
 });
 
-// See Note [TLS Initialization]
-constexpr DispatchKeySet default_included_set = DispatchKeySet({
-    DispatchKey::BackendSelect,
-    DispatchKey::InplaceOrView,
-});
-
-constexpr DispatchKeySet autograd_dispatch_keyset_with_InplaceOrView =
-  autograd_dispatch_keyset | DispatchKeySet(DispatchKey::InplaceOrView);
-
-// backend dispatch keys that map to DispatchKey::AutogradOther
-// NB: keys in this set also get associated with CompositeImplicitAutograd
+// autogradother_backends contains all backend keys that maps to
+// AutogradOther.
 constexpr DispatchKeySet autogradother_backends = DispatchKeySet({
-  DispatchKey::HIP,
-  DispatchKey::FPGA,
-  DispatchKey::MSNPU,
-  DispatchKey::Vulkan,
-  DispatchKey::Metal,
-  DispatchKey::MKLDNN,
-  DispatchKey::OpenGL,
-  DispatchKey::OpenCL,
-  DispatchKey::IDEEP,
-  DispatchKey::QuantizedCPU,
-  DispatchKey::QuantizedCUDA,
-  DispatchKey::CustomRNGKeyId,
-  DispatchKey::MkldnnCPU,
-  DispatchKey::SparseCPU,
-  DispatchKey::SparseCUDA,
-  DispatchKey::SparseHIP,
-  DispatchKey::Meta,
+  FOR_EACH_BACKEND_DISPATCH_KEY_MAPPED_TO_AUTOGRAD_OTHER(DISPATCH_KEY)
 });
 
-// The set of dispatch keys that come after autograd
-// n.b. this relies on the fact that AutogradOther is currently the lowest Autograd key
-constexpr DispatchKeySet after_autograd_keyset = DispatchKeySet(
-        DispatchKeySet::FULL_AFTER,
-        c10::DispatchKey::AutogradOther
-);
+// backend_dispatch_keyset contains all backend keys
+constexpr DispatchKeySet backend_dispatch_keyset = DispatchKeySet({
+  FOR_EACH_BACKEND_DISPATCH_KEY(DISPATCH_KEY)
+});
+#undef DISPATCH_KEY
 
-// The set of dispatch keys that come after InplaceOrView
-constexpr DispatchKeySet after_InplaceOrView_keyset = DispatchKeySet(
-        DispatchKeySet::FULL_AFTER,
-        c10::DispatchKey::InplaceOrView
-);
-
-// true if t is a backend dispatch key
-C10_API bool isBackendDispatchKey(DispatchKey t);
 
 // Resolve alias dispatch key to DispatchKeySet if applicable
 C10_API DispatchKeySet getRuntimeDispatchKeySet(DispatchKey t);
@@ -261,11 +214,8 @@ C10_API DispatchKeySet getRuntimeDispatchKeySet(DispatchKey t);
 // DispatchKeySet is empty if t is not alias of DispatchKey::Autograd.
 C10_API DispatchKeySet getBackendKeySetFromAutograd(DispatchKey t);
 
-// Returns a DispatchKeySet of autograd related keys mapped to backend.
-C10_API DispatchKeySet getAutogradRelatedKeySetFromBackend(DispatchKey t);
-
 // This API exists because we have a use case for checking
-// getRuntimeDispatchKeySet(alias).has(DispatchKey::Undefined)
+// getRuntimeDispatchKeySet(alias).has(DispatchKey::Undefind)
 // in OperatorEntry.cpp but we disallow it in has() API.
 C10_API bool isIncludedInAlias(DispatchKey k, DispatchKey alias);
 
@@ -277,30 +227,11 @@ C10_API bool isIncludedInAlias(DispatchKey k, DispatchKey alias);
 // those cases.
 static inline DispatchKey legacyExtractDispatchKey(DispatchKeySet s) {
   // NB: If you add any extra keys that can be stored in TensorImpl on
-  // top of existing "backend" keys like CPU/CUDA, you need to add it
-  // here.  At the moment, autograd keys and InplaceOrView key need this
-  // treatment;
-  return (s - autograd_dispatch_keyset_with_InplaceOrView).highestPriorityTypeId();
+  // top of existing "normal" keys like CPU/CUDA, you need to add it
+  // here.  At the moment, RequiresGrad (replacement for Variable)
+  // is the most likely key that will need this treatment;
+  // After Autograd keys are moved from globally enabled set to TensorImpl,
+  // we should remove all Autograd keys before taking highestPriority.
+  return (s - autograd_dispatch_keyset).highestPriorityTypeId();
 }
-
-template<class T>
-using is_not_DispatchKeySet = guts::negation<std::is_same<DispatchKeySet, T>>;
-
-// Given a function type, constructs a function_traits type that drops the first parameter
-// type if the first parameter is of type DispatchKeySet.
-// NB: DispatchKeySet is currently explicitly hidden from JIT (mainly to avoid pushing unnecessary
-// arguments on the stack - see Note [ Plumbing Keys Through the Dispatcher] for details).
-// If at any point in the future we need to expose this type to JIT, revisit the usage of this type alias.
-template <class FuncType>
-using remove_DispatchKeySet_arg_from_func = guts::make_function_traits_t<
-  typename guts::infer_function_traits_t<FuncType>::return_type,
-  typename std::conditional_t<
-    std::is_same<
-      DispatchKeySet,
-      typename guts::typelist::head_with_default_t<void, typename guts::infer_function_traits_t<FuncType>::parameter_types>
-    >::value,
-    guts::typelist::drop_if_nonempty_t<typename guts::infer_function_traits_t<FuncType>::parameter_types, 1>,
-    typename guts::infer_function_traits_t<FuncType>::parameter_types
-  >
->;
 }
