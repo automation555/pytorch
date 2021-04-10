@@ -15,6 +15,8 @@ class Adagrad(Optimizer):
         lr (float, optional): learning rate (default: 1e-2)
         lr_decay (float, optional): learning rate decay (default: 0)
         weight_decay (float, optional): weight decay (L2 penalty) (default: 0)
+        initial_accumulator_value (optional): the number to fill the sum tensor
+            with (default: 0)
         eps (float, optional): term added to the denominator to improve
             numerical stability (default: 1e-10)
 
@@ -37,12 +39,6 @@ class Adagrad(Optimizer):
         defaults = dict(lr=lr, lr_decay=lr_decay, eps=eps, weight_decay=weight_decay,
                         initial_accumulator_value=initial_accumulator_value)
         super(Adagrad, self).__init__(params, defaults)
-
-        for group in self.param_groups:
-            for p in group['params']:
-                state = self.state[p]
-                state['step'] = 0
-                state['sum'] = torch.full_like(p, initial_accumulator_value, memory_format=torch.preserve_format)
 
     def share_memory(self):
         for group in self.param_groups:
@@ -74,6 +70,11 @@ class Adagrad(Optimizer):
                     params_with_grad.append(p)
                     grads.append(p.grad)
                     state = self.state[p]
+                    # Lazy state initialization
+                    if len(state) == 0:
+                        state['step'] = 0
+                        state['sum'] = torch.full_like(p, group['initial_accumulator_value'],
+                                                       memory_format=torch.preserve_format)
                     state_sums.append(state['sum'])
                     # update the steps for each param group update
                     state['step'] += 1
