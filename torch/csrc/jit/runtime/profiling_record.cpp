@@ -1,11 +1,9 @@
 #include <torch/csrc/jit/runtime/profiling_record.h>
-
 #include <ATen/core/interned_strings.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/clear_profiling.h>
 #include <torch/csrc/jit/passes/constant_propagation.h>
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
-#include <torch/csrc/jit/runtime/autodiff.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/csrc/jit/runtime/interpreter.h>
 
@@ -13,6 +11,12 @@ namespace torch {
 namespace jit {
 
 namespace {
+
+struct TypePtrComparer {
+  bool operator()(const TypePtr& lhs, const TypePtr& rhs) const {
+    return *lhs == *rhs;
+  }
+};
 
 class ProfileRegistry {
  public:
@@ -28,11 +32,6 @@ class ProfileRegistry {
 
   bool shouldProfileNode(const Node* node) {
     std::lock_guard<std::mutex> guard(mutex_);
-    // to guard differentiable graphs, we want profiling information
-    // (in particular requires_grad) for nodes handled by autodiff
-    if (isDifferentiable(node)) {
-      return true;
-    }
     for (const auto& func : registry_funcs_) {
       if (func(node)) {
         return true;
@@ -93,11 +92,16 @@ ProfileOp* ProfilingRecord::createProfileNode(
   return pn;
 }
 
-ProfileIValueOp* ProfilingRecord::createProfileIValueNode(Value* in_val) {
-  auto pn = new ProfileIValueOp(this->profiled_graph_.get(), nullptr);
-  pn->addInput(in_val);
-  auto pno = pn->addOutput();
-  pno->setType(in_val->type());
+ProfileOptionalOp* ProfilingRecord::createProfileOptionalNode(
+    const std::function<void(Stack&)>& fp,
+    at::ArrayRef<Value*> inputs) {
+  auto pn = new ProfileOptionalOp(profiled_graph_.get(), fp);
+  pn->i_(attr::num_present, 0);
+  pn->i_(attr::num_none, 0);
+
+  for (auto in : inputs) {
+    pn->addInput(in);
+  }
   return pn;
 }
 
@@ -167,7 +171,7 @@ void ProfilingRecord::insertShapeProfile(Node* n, size_t offset) {
     if (v.isTensor()) {
       std::lock_guard<std::mutex> lock(this->mutex_);
       auto& profiled_types = profiled_types_per_frame_[frame_id];
-      auto& t = v.toTensor();
+      auto t = v.toTensor();
       if (t.defined()) {
         auto pttp = tensorTypeInCurrentExecutionContext(t);
         GRAPH_DEBUG(
@@ -257,6 +261,12 @@ void ProfilingRecord::removeProfileCounter(Block* b) {
   }
 }
 
+bool hasGradSumToSizeUses(Value* v) {
+  return std::any_of(v->uses().begin(), v->uses().end(), [](const Use& use) {
+    return use.user->kind() == aten::_grad_sum_to_size;
+  });
+}
+
 void ProfilingRecord::instrumentBlock(Block* block) {
   for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
     auto n = *it;
@@ -265,6 +275,33 @@ void ProfilingRecord::instrumentBlock(Block* block) {
       if (i->type()->kind() == c10::TypeKind::TensorType &&
           (needsProfiledInputs(n) || needsProfiledOutput(i->node()))) {
         insertShapeProfile(n, offset);
+      }
+
+      if (i->type()->cast<OptionalType>() && hasGradSumToSizeUses(i)) {
+        // here we are profile the definition instead of the use,
+        // because we are only optimizing in the case of a None value which is
+        // immutable
+        auto opt_pn = createProfileOptionalNode(nullptr, {i});
+        std::function<void(Stack&)> optional_profiler = [this,
+                                                         opt_pn](Stack& stack) {
+          std::lock_guard<std::mutex> lock(this->mutex_);
+          // frame_id is unused
+          int64_t frame_id = 0;
+          pop(stack, frame_id);
+          IValue value;
+          pop(stack, value);
+          if (value.isNone()) {
+            opt_pn->i_(attr::num_none, opt_pn->i(attr::num_none) + 1);
+          } else {
+            opt_pn->i_(attr::num_present, opt_pn->i(attr::num_present) + 1);
+          }
+          push(stack, value);
+        };
+        opt_pn->setCallback(optional_profiler);
+        auto pno = opt_pn->addOutput();
+        pno->setType(i->type());
+        opt_pn->insertAfter(i->node());
+        i->replaceAllUsesAfterNodeWith(opt_pn, pno);
       }
     }
 
@@ -289,7 +326,7 @@ void ProfilingRecord::instrumentBlock(Block* block) {
 
 void ProfilingRecord::removeProfilingNodes(Block* b) {
   for (auto it = b->nodes().begin(); it != b->nodes().end(); it++) {
-    if (it->kind() == prim::profile || it->kind() == prim::profile_ivalue) {
+    if (it->kind() == prim::profile || it->kind() == prim::profile_optional) {
       it->output()->replaceAllUsesWith(it->input());
       it.destroyCurrent();
     } else {
@@ -337,6 +374,49 @@ std::unique_ptr<ProfilingRecord> ProfilingRecord::instrumentGraph(
       // to a profiled TensorType
       // we make a copy of profiling information from the very first run
       // and use it for building the symbol sets
+
+      if (getProfilingDataAggregationStrategy() ==
+          PROFILING_DATA_AGGREGATION_STRATEGY::TOP_ONE) {
+        std::unordered_map<
+            Value*,
+            std::unordered_map<
+                TensorTypePtr,
+                size_t,
+                std::hash<c10::TypePtr>,
+                TypePtrComparer>>
+            counts;
+        for (auto profiled_types_iter =
+                 raw_pr->profiled_types_per_frame_.begin();
+             profiled_types_iter != raw_pr->profiled_types_per_frame_.end();
+             ++profiled_types_iter) {
+          for (const auto& val_type_pair : profiled_types_iter->second) {
+            // if (!val_type_pair->second->isSummarized()) {
+            counts[val_type_pair.first][val_type_pair.second] += 1;
+            //}
+          }
+        }
+
+        for (const auto& e : counts) {
+          auto& val_type_counts = e.second;
+          // find max
+          // TODO: we could be more intelligent here and skip top 1
+          // if it's summarized and the next one isn't
+          TypePtr max_type = nullptr;
+          GRAPH_DEBUG("Type counts for %", e.first->debugName());
+          size_t max_count = 0;
+          for (auto& t : val_type_counts) {
+            GRAPH_DEBUG("\t", *t.first, ", count: ", t.second);
+            if (t.second > max_count) {
+              max_count = t.second;
+              max_type = t.first;
+            }
+          }
+          // assign top 1 type
+          e.first->node()->ty_(attr::profiled_type, max_type);
+        }
+        return;
+      }
+
       auto profiled_types_iter = raw_pr->profiled_types_per_frame_.begin();
       auto merged_profiled_types = profiled_types_iter->second;
       ++profiled_types_iter;

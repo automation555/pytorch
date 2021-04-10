@@ -1,5 +1,6 @@
 import os
 import sys
+from torch.testing._internal.common_utils import num_profiled_runs
 
 import torch
 
@@ -27,8 +28,6 @@ class TestProfiler(JitTestCase):
         torch.set_default_dtype(torch.double)
         self.old_fusion_inlining = torch._C._debug_get_fusion_group_inlining()
         torch._C._debug_set_fusion_group_inlining(False)
-        self.old_te_must_use_llvm_cpu = torch._C._jit_get_te_must_use_llvm_cpu()
-        torch._C._jit_set_te_must_use_llvm_cpu(False)
 
     def tearDown(self):
         torch._C._jit_set_profiling_executor(self.prev_exec)
@@ -39,7 +38,6 @@ class TestProfiler(JitTestCase):
         torch.set_default_dtype(self.default_dtype)
         torch._C._jit_set_texpr_reductions_enabled(self.old_reduction_enabled)
         torch._C._debug_set_fusion_group_inlining(self.old_fusion_inlining)
-        torch._C._jit_set_te_must_use_llvm_cpu(self.old_te_must_use_llvm_cpu)
 
     def test_tensor_type_not_determined_by_inputs(self):
         @torch.jit.script
@@ -120,7 +118,7 @@ class TestProfiler(JitTestCase):
 
         g = torch.jit.last_executed_optimized_graph()
         # Types should remain specialized for typecheck outputs & fusion outputs
-        FileCheck().check("Double(").check_same("prim::TypeCheck").check_same("\n").check("Double").check_same("TensorExpr").run(g)
+        FileCheck().check("Double(").check_same("prim::TypeCheck").check("Double").check_same("TensorExpr").run(g)
 
         # other outputs should not be specialized
         FileCheck().check("Tensor = prim::If").run(g)
@@ -141,6 +139,30 @@ class TestProfiler(JitTestCase):
         g = torch.jit.last_executed_optimized_graph()
         self.assertEqual(len(list(g.findAllNodes("prim::TypeCheck"))), 2)
         FileCheck().check("TensorExpr").check("aten::add_").check("TensorExpr").run(g)
+
+    def test_top_one(self):
+        torch._C._jit_set_profiling_data_aggregation_strategy(1)
+        with num_profiled_runs(3):
+            @torch.jit.script
+            def foo(t1, t2):
+                return t1 + t2
+
+                return h
+
+            inputs_once = [torch.rand(3), torch.rand(3)]
+            inputs_twice = [torch.rand(8), torch.rand(8)]
+            
+            # 8 is top 1
+            foo(*inputs_twice)
+            foo(*inputs_twice)
+            foo(*inputs_once)
+            # trigger a fallback
+            foo(*inputs_once)
+            foo(*inputs_once)
+            foo(*inputs_twice)
+            # 3 is top 1 now 
+            foo(*inputs_once)
+        torch._C._jit_set_profiling_data_aggregation_strategy(0)
 
     def test_use_not_profiled(self):
         def foo(t1, t2, t3, t4, t: float):
