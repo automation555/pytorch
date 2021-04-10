@@ -95,7 +95,7 @@ class PackageExporter:
             f: The location to export to. Can be a  string/Path object containing a filename,
                 or a Binary I/O object.
             importer: If a single Importer is passed, use that to search for modules.
-                If a sequence of importers are passsed, an OrderedImporter will be constructed out of them.
+                If a sequence of importers are passsed, an Orderedporter will be constructed out of them.
             verbose: Print information about dependency resolution to stdout.
                 Useful for tracking down why certain files get included.
         """
@@ -108,9 +108,10 @@ class PackageExporter:
         self.zip_file = torch._C.PyTorchFileWriter(f)
         self.zip_file.set_min_version(6)
         self.serialized_storages: Dict[str, Any] = {}
-        self.extern_modules: List[str] = []
+        self.external: List[str] = []
         self.provided: Dict[str, bool] = {}
         self.verbose = verbose
+        self.broken_modules: Dict[str, str] = {}
 
         if isinstance(importer, Importer):
             self.importer = importer
@@ -305,21 +306,12 @@ node [shape=box];
         arg = quote(template, safe="")
         return f"https://dreampuf.github.io/GraphvizOnline/#{arg}"
 
-    def _get_source_of_module(self, module: types.ModuleType) -> str:
+    def _get_source_of_module(self, module: types.ModuleType) -> Optional[str]:
         filename = getattr(module, "__file__", None)
-        result = (
-            None
-            if filename is None or not filename.endswith(".py")
-            else linecache.getlines(filename, module.__dict__)
-        )
-        if result is None:
-            extra = ""
-            if self.verbose:
-                extra = f" See the dependency graph for more info: \n{self._write_dep_graph(module.__name__)}"
-            raise ValueError(
-                f'cannot save source for module "{module.__name__}" because '
-                f'its source file "{filename}" could not be found.{extra}'
-            )
+        if filename is None or not filename.endswith(".py"):
+            self.broken_modules[module.__name__] = filename
+            return None
+        result = linecache.getlines(filename, module.__dict__)
         return "".join(result)
 
     def require_module_if_not_provided(self, module_name: str, dependencies=True):
@@ -362,13 +354,14 @@ node [shape=box];
         """
         module = self._import_module(module_name)
         source = self._get_source_of_module(module)
-        self.save_source_string(
-            module_name,
-            source,
-            hasattr(module, "__path__"),
-            dependencies,
-            module.__file__,
-        )
+        if source is not None:
+            self.save_source_string(
+                module_name,
+                source,
+                hasattr(module, "__path__"),
+                dependencies,
+                module.__file__,
+            )
 
     def save_pickle(
         self, package: str, resource: str, obj: Any, dependencies: bool = True
@@ -523,8 +516,8 @@ node [shape=box];
 
         Prefer using `extern` to only mark modules extern if they are actually required by the packaged code.
         """
-        if module_name not in self.extern_modules:
-            self.extern_modules.append(module_name)
+        if module_name not in self.external:
+            self.external.append(module_name)
 
     def save_mock_module(self, module_name: str):
         """Add `module_name` to the package, implemented it with a mocked out version that
@@ -548,7 +541,7 @@ node [shape=box];
         )
 
     def _module_is_already_provided(self, qualified_name: str) -> bool:
-        for mod in self.extern_modules:
+        for mod in self.external:
             if qualified_name == mod or qualified_name.startswith(mod + "."):
                 return True
         return qualified_name in self.provided
@@ -589,6 +582,13 @@ node [shape=box];
             with PackageExporter("file.zip") as e:
                 ...
         """
+        if len(self.broken_modules) != 0:
+            broken_packages = set()
+            for module in self.broken_modules:
+                package = module.partition('.')[0]
+                broken_packages.add(package)
+            foo = "\n".join(broken_packages)
+            raise ValueError(f"Broken modules: {foo}")
         if self.verbose:
             print(f"Dependency graph for exported package: \n{self._write_dep_graph()}")
 
@@ -609,7 +609,7 @@ node [shape=box];
                 storage = storage.cpu()
             num_bytes = storage.size() * storage.element_size()
             self.zip_file.write_record(name, storage.data_ptr(), num_bytes)
-        contents = "\n".join(self.extern_modules) + "\n"
+        contents = "\n".join(self.external) + "\n"
         self._write(".data/extern_modules", contents)
         del self.zip_file
         if self.buffer:
