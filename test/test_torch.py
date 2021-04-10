@@ -4342,6 +4342,85 @@ class TestTorchDeviceType(TestCase):
             scalar = torch.tensor(2, device=device, dtype=dtype)
             torch.diff(scalar)
 
+    @onlyOnCPUAndCUDA
+    @dtypesIfCUDA(*set(torch.testing.get_all_math_dtypes('cuda')))
+    @dtypes(*set(torch.testing.get_all_math_dtypes('cpu')))
+    def test_gradient(self, device, dtype):
+        inputs = (
+            ((5,), [2.73], 0, 1),
+            ((5, 5), 2.0, 0, 1),
+            ((2, 2, 2), [1.17, 3.34, 1.73], [0, 1, 2], 1),
+            ((4, 4, 4), [(1., 3.0, 6., 10.), (1., 3.0, 4., 90.), (1., 2.5, 3.4, 7.)], [0, 1, 2], 1),
+            ((4, 4, 4), 1.7 , [0, 1, 2], 1),
+            ((4, 3, 4), 1.7 , [-2, -1], 1),
+            ((4, 3, 4, 5), [1.7, 3.93], [0, -1], 1),
+            ((4, 3, 4, 5), 1.7 , [1, 2], 1),
+            ((4, 3, 4, 5), 1.7 , [0, 1], 1),
+            ((4, 3, 4, 5), 1.7 , [2, -1], 1),
+            ((4, 2, 3, 5), [(1., 3.0, 6., 10.), (1., 3.0), 2.1], [0, 1, 2], 1),
+        )
+
+        if dtype == torch.uint8:
+            return
+
+        low_precision = dtype == torch.half or dtype == torch.bfloat16
+        rtol, atol = (0, 1e-2) if low_precision else (1e-5, 1e-5)
+
+        for size, spacing, axis, edge_order in inputs:
+            for contig in [True, False]:
+                t = make_tensor(size, device, dtype, discontiguous=not contig)
+                t_n = t.cpu().numpy()
+                if isinstance(spacing, list):
+                    spacing_list = []
+                    for space in spacing:
+                        a = torch.tensor(space, dtype=float, device=device)
+                        spacing_list.append(a)
+                    result = torch.gradient(t, spacing_list, axis=axis, edge_order=edge_order)
+                    result_n = np.gradient(t_n, *spacing, axis=axis, edge_order=edge_order)
+                    if not isinstance(result_n, list):
+                        result_n = [result_n]
+                    self.assertEqual(result, result_n, rtol=rtol, atol=atol)
+                else:
+                    result = torch.gradient(t, spacing, axis=axis, edge_order=edge_order)
+                    result_n = np.gradient(t_n, spacing, axis=axis, edge_order=edge_order)
+                    if not isinstance(result_n, list):
+                        result_n = [result_n]
+                    self.assertEqual(result, result_n, rtol=rtol, atol=atol)
+
+        result = torch.gradient(torch.tensor([2, -2, inf, inf, -inf, -inf, inf, 3, -inf, 2, nan, nan, 3, inf, nan]))
+        result_n = np.gradient(np.array([2, -2, inf, inf, -inf, -inf, inf, 3, -inf, 2, nan, nan, 3, inf, nan]))
+        if not isinstance(result_n, list):
+            result_n = [result_n]
+        self.assertEqual(result, result_n, rtol=rtol, atol=atol)
+
+    @onlyOnCPUAndCUDA
+    @dtypesIfCUDA(*set(torch.testing.get_all_math_dtypes('cuda')))
+    @dtypes(*set(torch.testing.get_all_math_dtypes('cpu')))
+    def test_error_gradient(self, device, dtype):
+        t = torch.tensor([[1, 2, 3], [4, 5, 6], [7, 8, 9]], device=device, dtype=dtype)
+        if dtype == torch.uint8:
+            with self.assertRaisesRegex(RuntimeError, 'torch.gradient does not support uint8 as input.'):
+                axis = (1, 0)
+                spacing = [0.1, 0.2]
+                t.gradient([torch.tensor(spacing)], axis=axis, edge_order=1)
+            return
+
+        with self.assertRaisesRegex(RuntimeError, 'torch.gradient should receive axis and spacing size to be equal.'):
+            axis = (1, 0)
+            spacing = [0.1]
+            t.gradient([torch.tensor(spacing)], axis=axis, edge_order=1)
+
+        with self.assertRaisesRegex(RuntimeError, 'torch.gradient supports edge_order value only to be equal to 1.'):
+            torch.gradient(t, edge_order=3)
+
+        with self.assertRaisesRegex(RuntimeError, 'torch.gradient requires axis to be unique'):
+            axis = (1, 1)
+            spacing = [0.1]
+            t.gradient([torch.tensor(spacing)], axis=axis, edge_order=1)
+
+        with self.assertRaisesRegex(RuntimeError, 'axis 3 is out of bounds for array of dimension 2'):
+            torch.gradient(t, axis=3)
+
     def _test_large_cum_fn_helper(self, x, fn):
         x_cpu = x.cpu().float()
         expected = fn(x_cpu)

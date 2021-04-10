@@ -310,6 +310,7 @@ Pointwise Ops
     fmod
     frac
     frexp
+    gradient
     imag
     ldexp
     lerp
