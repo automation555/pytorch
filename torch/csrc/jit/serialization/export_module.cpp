@@ -24,7 +24,6 @@
 #include <ATen/core/jit_type.h>
 #include <ATen/core/qualified_name.h>
 #include <string>
-#include <unordered_set>
 #include <vector>
 
 namespace torch {
@@ -56,6 +55,18 @@ static IValue Table(
     ivalue_entries.push_back(Tup({e.first, e.second}));
   }
   return Tup(std::move(ivalue_entries));
+}
+
+std::string getSourceRangeTrace(
+    Node* node,
+    const std::string& root_scope_string) {
+  std::string source_range_trace;
+  if (node->callstack()) {
+    auto callstack_ptr = *(node->callstack());
+    source_range_trace = callstack_ptr->source_range_trace();
+    std::cout << source_range_trace << std::endl;
+  }
+  return source_range_trace;
 }
 
 std::string getModulePath(Node* node, const std::string& root_scope_string) {
@@ -98,6 +109,11 @@ std::string getModulePath(Node* node, const std::string& root_scope_string) {
   }
 }
 
+std::string getDebugInfo(Node* node, const std::string& root_scope_string) {
+  return getModulePath(node, root_scope_string) + "{" +
+      getSourceRangeTrace(node, root_scope_string) + "}";
+}
+
 std::string getModuleTypeName(const Module& module, const std::string& prefix) {
   std::string moduleType = module.type()->str();
   size_t lastDotIndex = moduleType.rfind('.');
@@ -107,7 +123,7 @@ std::string getModuleTypeName(const Module& module, const std::string& prefix) {
   return prefix + "(" + moduleType + ")";
 }
 
-std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
+std::tuple<IValue, c10::optional<IValue>, c10::optional<IValue>> getFunctionTuple(
     const Module& module,
     const Function& func,
     bool save_mobile_debug_info) {
@@ -122,6 +138,7 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
   std::vector<c10::OperatorName> opnames;
   std::vector<std::string> method_names;
   std::vector<std::string> op_module_paths;
+  std::vector<std::string> op_source_ranges;
   for (size_t i = 0; i < instructions_copy.size(); ++i) {
     Instruction ins = instructions_copy[i];
     if (ins.op == OP || ins.op == OPN) {
@@ -129,7 +146,10 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
       opnames.emplace_back(node->schema().operator_name());
       if (save_mobile_debug_info) {
         std::string root_scope_string = getModuleTypeName(module, "top");
-        op_module_paths.emplace_back(getModulePath(node, root_scope_string));
+        op_module_paths.emplace_back(getModulePath(node,
+                root_scope_string));
+//        op_module_paths.emplace_back(getDebugInfo(node, root_scope_string));
+        op_source_ranges.emplace_back(getSourceRangeTrace(node, root_scope_string));
       }
     }
     // CALL nodes at this point represent built-in (i.e. non-Graph)
@@ -144,10 +164,9 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
         auto method_name_idx =
             code.constant_table().size() + method_names.size();
         method_names.emplace_back(node->s(attr::name));
-        Instruction new_instr{
-            INTERFACE_CALL,
-            static_cast<int32_t>(method_name_idx),
-            static_cast<uint16_t>(node->inputs().size())};
+        Instruction new_instr{INTERFACE_CALL,
+                              static_cast<int32_t>(method_name_idx),
+                              static_cast<uint16_t>(node->inputs().size())};
         instructions_copy[i] = new_instr;
       } else {
         TORCH_INTERNAL_ASSERT(
@@ -183,6 +202,11 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
       }
     } else {
       TORCH_CHECK(
+          ins.op != CREATE_OBJECT,
+          "CREATE_OBJECT is not supported in mobile module. ",
+          "Workaround: instead of using arbitrary class type (class Foo()), ",
+          "define a pytorch class (class Foo(torch.nn.Module)).");
+      TORCH_CHECK(
           isOpSupportedInMobile(ins.op),
           toString(ins.op),
           " is not supported in mobile module.");
@@ -215,69 +239,23 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
   // types
   std::vector<IValue> types;
   types.reserve(code.type_table().size());
-  static const std::string torch_prefix("__torch__");
-  static const std::string class_prefix("__torch__.torch.classes");
   for (const TypePtr& t : code.type_table()) {
-    auto type_str = t->annotation_str();
-    if (type_str.find(torch_prefix) == 0) {
-      TORCH_CHECK(
-          type_str.find(class_prefix) == 0,
-          "__torch__ types other than torchbind (__torch__.torch.classes)"
-          "are not supported in lite interpreter. ",
-          "Workaround: instead of using arbitrary class type (class Foo()), ",
-          "define a pytorch class (class Foo(torch.nn.Module)).");
-    }
-    types.emplace_back(type_str);
+    types.emplace_back(t->annotation_str());
   }
 
   // since the register location is embedded into the bytecode, pass the
   // register size
   auto register_size = static_cast<int>(code.register_size());
 
-  auto codeTable = Table(
-      {{"instructions", Tup(instructions)},
-       {"operators", Tup(operators)},
-       {"constants", Tup(constants)},
-       {"types", Tup(types)},
-       {"register_size", register_size}});
-
-  // schema
-  const auto& schema = func.getSchema();
-  TORCH_CHECK(
-      schema.overload_name().empty(), // @TODO: is this check correct?
-      "Overloads are not supported in mobile modules.");
-  TORCH_CHECK(
-      !schema.is_vararg(), "Python *args are not supported in mobile modules.");
-  TORCH_CHECK(
-      !schema.is_varret(),
-      "A variable number of return values is not supported in mobile modules.");
-  auto makeArgTuple = [](const std::vector<Argument>& args) {
-    std::vector<IValue> argTables;
-    for (auto&& arg : args) {
-      TORCH_CHECK(
-          !arg.N(),
-          "Arguments with known list lengths are not supported in mobile modules.");
-      TORCH_CHECK(
-          !arg.kwarg_only(),
-          "Keyword-only arguments are not supported in mobile modules.");
-      argTables.emplace_back(Table({
-          {"name", arg.name()},
-          {"type", arg.type()->annotation_str()},
-          {"default_value", arg.default_value()},
-      }));
-    }
-    return Tup(argTables);
-  };
-  auto schemaTable = Table({
-      {"arguments", makeArgTuple(schema.arguments())},
-      {"returns", makeArgTuple(schema.returns())},
-  });
-
-  // function tuple
-  auto bytecode_vals =
-      Tup({func.qualname().qualifiedName(), codeTable, schemaTable});
+  auto table = Table({{"instructions", Tup(instructions)},
+                      {"operators", Tup(operators)},
+                      {"constants", Tup(constants)},
+                      {"types", Tup(types)},
+                      {"register_size", register_size}});
+  auto bytecode_vals = Tup({func.qualname().qualifiedName(), table});
 
   c10::optional<IValue> debug_info_vals;
+  c10::optional<IValue> debug_source_ranges;
   if (save_mobile_debug_info) {
     // module debug info
     std::vector<IValue> module_paths;
@@ -285,18 +263,27 @@ std::pair<IValue, c10::optional<IValue>> getFunctionTuple(
     for (auto& path : op_module_paths) {
       module_paths.emplace_back(std::move(path));
     }
+
+    std::vector<IValue> module_source_ranges;
+    for (const auto& source_range: op_source_ranges) {
+      module_source_ranges.emplace_back(std::move(source_range));
+    }
+
     auto module_debug_info = Table({{"module_debug_info", Tup(module_paths)}});
     debug_info_vals = Tup({func.qualname().qualifiedName(), module_debug_info});
+
+    auto module_source_range = Table({{"module_source_range", Tup(module_source_ranges)}});
+    debug_source_ranges = Tup({func.qualname().qualifiedName(), module_source_range});
   }
-  return std::make_pair(bytecode_vals, debug_info_vals);
+  return std::make_tuple(bytecode_vals, debug_info_vals, debug_source_ranges);
 }
 
 void setstateTuple(
     const Module& module,
     const IValue& ivalue,
     std::vector<c10::IValue>& elements,
-    std::unordered_set<std::string>& qn_cache,
     c10::optional<std::vector<c10::IValue>>& debug_info_elements,
+    c10::optional<std::vector<c10::IValue>>& source_range_elements,
     bool save_mobile_debug_info) {
   if (!ivalue.isObject())
     return;
@@ -304,17 +291,13 @@ void setstateTuple(
   auto type = obj->type();
   if (checkHasValidSetGetState(type)) {
     Function& setstate = type->getMethod("__setstate__");
-    const auto qn = setstate.qualname().qualifiedName();
-    if (qn_cache.find(qn) != qn_cache.end()) {
-      return;
-    }
     if (setstate.isGraphFunction()) {
       auto func_tuple =
           getFunctionTuple(module, setstate, save_mobile_debug_info);
-      elements.push_back(func_tuple.first);
-      qn_cache.emplace(qn);
+      elements.push_back(std::get<0>(func_tuple));
       if (save_mobile_debug_info) {
-        debug_info_elements->push_back(func_tuple.second.value());
+        debug_info_elements->push_back(std::get<1>(func_tuple).value());
+        source_range_elements->push_back(std::get<2>(func_tuple).value());
       }
     }
   } else {
@@ -323,8 +306,8 @@ void setstateTuple(
           module,
           obj->getSlot(i),
           elements,
-          qn_cache,
           debug_info_elements,
+          source_range_elements,
           save_mobile_debug_info);
     }
   }
@@ -333,23 +316,19 @@ void setstateTuple(
 
 void moduleMethodsTuple(
     const Module& module,
-    std::vector<c10::IValue>& elements, // note: appended to in-place
+    std::vector<c10::IValue>& elements,
     c10::optional<std::vector<c10::IValue>>& debug_info_elements,
+    c10::optional<std::vector<c10::IValue>>& source_range_elements,
     bool save_mobile_debug_info) {
   auto methods = module.get_methods();
-  std::unordered_set<std::string> qn_cache;
   // top level methods
   for (const auto& method : methods) {
-    const auto qn = method.function().qualname().qualifiedName();
-    if (qn_cache.find(qn) != qn_cache.end()) {
-      continue;
-    }
     auto func_tuple =
         getFunctionTuple(module, method.function(), save_mobile_debug_info);
-    elements.push_back(func_tuple.first);
-    qn_cache.emplace(qn);
+    elements.push_back(std::get<0>(func_tuple));
     if (save_mobile_debug_info) {
-      debug_info_elements->push_back(func_tuple.second.value());
+      debug_info_elements->push_back(std::get<1>(func_tuple).value());
+      source_range_elements->push_back(std::get<2>(func_tuple).value());
     }
   }
 
@@ -358,8 +337,8 @@ void moduleMethodsTuple(
       module,
       module._ivalue(),
       elements,
-      qn_cache,
       debug_info_elements,
+      source_range_elements,
       save_mobile_debug_info);
 }
 
@@ -412,7 +391,7 @@ class ScriptModuleSerializer {
   void writeArchive(const std::string& archive_name, const IValue& value) {
     std::vector<char> data;
     // Vector to capture the run-time class types during pickling the IValues
-    std::vector<c10::ClassTypePtr> memoizedClassTypes;
+    std::vector<c10::ClassTypePtr> memorizedClassTypes;
     Pickler data_pickle(
         [&](const char* buf, size_t size) {
           data.insert(data.end(), buf, buf + size);
@@ -421,7 +400,7 @@ class ScriptModuleSerializer {
         [&](const c10::ClassTypePtr& t) {
           return type_name_uniquer_.getUniqueName(t);
         },
-        &memoizedClassTypes);
+        &memorizedClassTypes);
     data_pickle.protocol();
     data_pickle.pushIValue(value);
     data_pickle.stop();
@@ -436,7 +415,7 @@ class ScriptModuleSerializer {
     writer_.writeRecord(fname, data.data(), data.size());
 
     // serialize all the captured run-time class types
-    for (const c10::ClassTypePtr& wroteType : memoizedClassTypes) {
+    for (const c10::ClassTypePtr& wroteType : memorizedClassTypes) {
       convertNamedType(wroteType);
     }
   }
@@ -531,19 +510,26 @@ class ScriptModuleSerializer {
     elements.emplace_back(
         static_cast<int64_t>(caffe2::serialize::kProducedBytecodeVersion));
     c10::optional<std::vector<c10::IValue>> debug_info_elements;
+    c10::optional<std::vector<c10::IValue>> source_range_elements;
     if (save_mobile_debug_info) {
       debug_info_elements = std::vector<c10::IValue>();
       debug_info_elements->emplace_back(
           static_cast<int64_t>(caffe2::serialize::kProducedBytecodeVersion));
+      source_range_elements = std::vector<c10::IValue>();
+      source_range_elements->emplace_back(
+          static_cast<int64_t>(caffe2::serialize::kProducedBytecodeVersion));
     }
 
     moduleMethodsTuple(
-        module, elements, debug_info_elements, save_mobile_debug_info);
+        module, elements, debug_info_elements, source_range_elements, save_mobile_debug_info);
     auto telements = Tup(std::move(elements));
     writeArchive("bytecode", telements);
     if (save_mobile_debug_info) {
       auto debug_info_telements = Tup(std::move(debug_info_elements.value()));
       writeArchive("mobile_debug", debug_info_telements);
+
+      auto source_range_telements = Tup(std::move(source_range_elements.value()));
+      writeArchive("mobile_source_range", source_range_telements);
     }
   }
 
@@ -628,8 +614,9 @@ namespace {
 void export_opnames(const script::Module& m, std::set<std::string>& opnames) {
   std::vector<c10::IValue> elements;
   c10::optional<std::vector<c10::IValue>> debug_info_elements;
+  c10::optional<std::vector<c10::IValue>> source_range_elements;
   moduleMethodsTuple(
-      m, elements, debug_info_elements, false /* save_mobile_debug_info */);
+      m, elements, debug_info_elements, source_range_elements, false /* save_mobile_debug_info */);
   for (const auto& element : elements) {
     auto table = element.toTuple()->elements()[1];
     auto row =
