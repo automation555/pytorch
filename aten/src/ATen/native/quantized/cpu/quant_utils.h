@@ -35,6 +35,7 @@ bool CheckAndSaturate(T max_val, T* element) {
 }
 }
 using namespace std;
+/*
 // A structure to hold quantization parameters 'scale' and 'zero_point'.
 // The meaning of these values is as the constants in the quantization equation
 //
@@ -127,8 +128,7 @@ inline TensorQuantizationParams ChooseQuantizationParams(
   // to be a middle value between qmin and qmax.
   // If either min or max is 0, then we just use 0 as zero_point.
   if (min < 0 && max > 0 && preserve_sparsity) {
-    const auto midpoint = qmin + (qmax - qmin) / 2;  // Overflow-safe midpoint
-    initial_zero_point = midpoint + 1;
+    initial_zero_point = (qmin + qmax) / 2 + 1;
   }
 
   // Now we need to nudge the zero point to be an integer
@@ -150,7 +150,7 @@ inline TensorQuantizationParams ChooseQuantizationParams(
   result.zero_point = nudged_zero_point;
   return result;
 }
-
+*/
 // This function helps to convert the Conv1D dimensions usable by the Conv2d op.
 constexpr int64_t kConv1dSqueezeDim = 0;
 static torch::List<int64_t> MakeArgForConv1d(const torch::List<int64_t>& arg,
