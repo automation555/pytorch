@@ -2,6 +2,7 @@
 consumed by TensorBoard for visualization."""
 
 import os
+import six
 import time
 import torch
 
@@ -242,7 +243,7 @@ class SummaryWriter(object):
         workspace.FetchBlob(blob_name)
         workspace.FetchBlobs([blob_name1, blob_name2, ...])
         """
-        return isinstance(item, str)
+        return isinstance(item, six.string_types)
 
     def _get_file_writer(self):
         """Returns the default FileWriter instance. Recreates it if closed."""
@@ -312,9 +313,7 @@ class SummaryWriter(object):
             for k, v in metric_dict.items():
                 w_hp.add_scalar(k, v)
 
-    def add_scalar(
-        self, tag, scalar_value, global_step=None, walltime=None, new_style=False
-    ):
+    def add_scalar(self, tag, scalar_value, global_step=None, walltime=None):
         """Add scalar data to summary.
 
         Args:
@@ -323,8 +322,7 @@ class SummaryWriter(object):
             global_step (int): Global step value to record
             walltime (float): Optional override default walltime (time.time())
               with seconds after epoch of event
-            new_style (boolean): Whether to use new style (tensor field) or old
-              style (simple_value field). New style could lead to faster data loading.
+
         Examples::
 
             from torch.utils.tensorboard import SummaryWriter
@@ -344,9 +342,8 @@ class SummaryWriter(object):
         if self._check_caffe2_blob(scalar_value):
             from caffe2.python import workspace
             scalar_value = workspace.FetchBlob(scalar_value)
-
-        summary = scalar(tag, scalar_value, new_style=new_style)
-        self._get_file_writer().add_summary(summary, global_step, walltime)
+        self._get_file_writer().add_summary(
+            scalar(tag, scalar_value), global_step, walltime)
 
     def add_scalars(self, main_tag, tag_scalar_dict, global_step=None, walltime=None):
         """Adds many scalar data to summary.
@@ -427,7 +424,7 @@ class SummaryWriter(object):
         if self._check_caffe2_blob(values):
             from caffe2.python import workspace
             values = workspace.FetchBlob(values)
-        if isinstance(bins, str) and bins == 'tensorflow':
+        if isinstance(bins, six.string_types) and bins == 'tensorflow':
             bins = self.default_bins
         self._get_file_writer().add_summary(
             histogram(tag, values, bins, max_bins=max_bins), global_step, walltime)
@@ -798,15 +795,14 @@ class SummaryWriter(object):
         subdir = "%s/%s" % (str(global_step).zfill(5), self._encode(tag))
         save_path = os.path.join(self._get_file_writer().get_logdir(), subdir)
 
-        fs = tf.io.gfile.get_filesystem(save_path)
-        if fs.exists(save_path):
-            if fs.isdir(save_path):
+        if tf.io.gfile.exists(save_path):
+            if tf.io.gfile.isdir(save_path):
                 print(
                     'warning: Embedding dir exists, did you set global_step for add_embedding()?')
             else:
                 raise Exception("Path: `%s` exists, but is a file. Cannot proceed." % save_path)
         else:
-            fs.makedirs(save_path)
+            tf.io.gfile.makedirs(save_path)
 
         if metadata is not None:
             assert mat.shape[0] == len(
@@ -826,7 +822,7 @@ class SummaryWriter(object):
         if not hasattr(self, "_projector_config"):
             self._projector_config = ProjectorConfig()
         embedding_info = get_embedding_info(
-            metadata, label_img, fs, subdir, global_step, tag)
+            metadata, label_img, subdir, global_step, tag)
         self._projector_config.embeddings.extend([embedding_info])
 
         from google.protobuf import text_format  # type: ignore
@@ -849,7 +845,7 @@ class SummaryWriter(object):
               Ground truth data. Binary label for each element.
             predictions (torch.Tensor, numpy.array, or string/blobname):
               The probability that an element be classified as true.
-              Value should be in [0, 1]
+              Value should in [0, 1]
             global_step (int): Global step value to record
             num_thresholds (int): Number of thresholds used to draw the curve.
             walltime (float): Optional override default walltime (time.time())
