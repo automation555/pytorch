@@ -1,10 +1,6 @@
 # @package layer_model_helper
 # Module caffe2.python.layer_model_helper
 
-
-
-
-
 from caffe2.python import core, model_helper, schema, scope, utils, muji
 from caffe2.python.modeling.parameter_info import (
     ParameterInfo,
@@ -17,6 +13,7 @@ from caffe2.python.modeling.net_modifier import NetModifier
 from caffe2.python.optimizer import get_param_device, Optimizer
 from caffe2.python.regularizer import Regularizer, RegularizationBy
 from caffe2.python.layers import layers
+from caffe2.proto import caffe2_pb2
 from future.utils import viewitems, viewvalues
 
 import logging

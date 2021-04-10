@@ -1,10 +1,6 @@
 ## @package experiment_util
 # Module caffe2.python.experiment_util
 
-
-
-
-
 import datetime
 import time
 import logging
@@ -110,5 +106,5 @@ class ModelTrainerLog():
             try:
                 logger.log(logdict)
             except Exception as e:
-                logging.warning(
+                logging.warn(
                     "Failed to call ExternalLogger: {}".format(e), e)

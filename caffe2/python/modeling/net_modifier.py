@@ -1,12 +1,8 @@
-
-
-
-
-
 import abc
 
 
-class NetModifier(metaclass=abc.ABCMeta):
+class NetModifier(object):
+    __metaclass__ = abc.ABCMeta
     """
     An abstraction class for supporting modifying a generated net.
     Inherited classes should implement the modify_net method where
