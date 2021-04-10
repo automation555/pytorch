@@ -37,8 +37,6 @@ builtin_cast_method_to_scalar_type() {
       {"char", at::kChar},
       {"double", at::kDouble},
       {"float", at::kFloat},
-      {"cfloat", at::kComplexFloat},
-      {"cdouble", at::kComplexDouble},
       {"int", at::kInt},
       {"long", at::kLong},
       {"short", at::kShort},
@@ -109,10 +107,8 @@ std::shared_ptr<SugaredValue> SimpleValue::attr(
            {"data", "prim"},
            {"shape", "prim"},
            {"is_cuda", "prim"},
-           {"is_xpu", "prim"},
            {"is_sparse", "prim"},
            {"is_mkldnn", "prim"},
-           {"is_mlc", "prim"},
            {"is_quantized", "prim"},
            {"is_vulkan", "prim"},
            {"is_meta", "prim"},
@@ -190,14 +186,6 @@ std::shared_ptr<SugaredValue> SimpleValue::attr(
   }
 
   // none of the more-specific cases worked, so see if this is a builtin method
-  // If field is a type, then call the aten::to op
-  if (field == "type") {
-    if (auto builtin = BuiltinFunction::tryCreate(
-            Symbol::aten("to"), NamedValue(loc, "self", value_))) {
-      return builtin;
-    }
-  }
-
   if (auto builtin = BuiltinFunction::tryCreate(
           Symbol::aten(field), NamedValue(loc, "self", value_))) {
     return builtin;
@@ -312,10 +300,6 @@ void SimpleValue::setAttr(
         return;
       }
 
-      if (prop && !prop->setter) {
-        throw ErrorReport(loc) << "Tried to set read-only attribute: " << field;
-      }
-
       throw ErrorReport(loc)
           << "Tried to set nonexistent attribute: " << field
           << ". Did you forget to initialize it in __init__()?";
@@ -393,8 +377,7 @@ Value* SimpleValue::len(const SourceRange& loc, Function& m) {
 SugaredValuePtr SimpleValue::getitem(
     const SourceRange& loc,
     Function& m,
-    Value* idx,
-    TypePtr type_hint) {
+    Value* idx) {
   Value* val = getValue();
   TypePtr val_type = val->type();
   Graph& g = *m.graph();
@@ -410,17 +393,6 @@ SugaredValuePtr SimpleValue::getitem(
     return std::make_shared<SimpleValue>(
         g.insert(aten::select, {val, 0, idx}, {}, loc));
   } else if (auto class_type = val_type->cast<ClassType>()) {
-    // Check if this is an indexing operation enabled by a type hint.
-    // The ModuleDict has already been checked during IR generation to make
-    // sure its contents implement the module interface referred to by
-    // type_hint.
-    if (class_type->is_module() && type_hint) {
-      auto res = g.insert(prim::ModuleContainerIndex, {val, idx}, {}, loc);
-      res->setType(type_hint);
-      return std::make_shared<SimpleValue>(res);
-    }
-
-    // Defer to the __getitem__ attr on the class.
     return attr(loc, m, "__getitem__")->call(loc, m, {idx}, {}, 1);
   } else {
     throw ErrorReport(loc) << "'" << val_type->repr_str() << "'"
@@ -513,8 +485,7 @@ Value* RangeValue::len(const SourceRange& loc, Function& m) {
 SugaredValuePtr RangeValue::getitem(
     const SourceRange& loc,
     Function& m,
-    Value* idx,
-    TypePtr type_hint) {
+    Value* idx) {
   if (has_only_end_) {
     return std::make_shared<SimpleValue>(idx);
   } else {
@@ -564,8 +535,7 @@ Value* IterableTree::len(const SourceRange& loc, Function& m) {
 SugaredValuePtr IterableTree::getitem(
     const SourceRange& loc,
     Function& m,
-    Value* idx,
-    TypePtr type_hint) {
+    Value* idx) {
   std::vector<SugaredValuePtr> child_items;
   for (const SugaredValuePtr& child : children_) {
     child_items.emplace_back(child->getitem(loc, m, idx));
@@ -576,7 +546,7 @@ SugaredValuePtr IterableTree::getitem(
 void IterableTree::addChild(
     const SourceRange& range,
     Function& m,
-    const SugaredValuePtr& iter_value) {
+    const SugaredValuePtr iter_value) {
   c10::optional<int64_t> child_len = iter_value->staticLen();
   if (children_.size() == 0) {
     unroll_length_ = child_len;
@@ -641,13 +611,6 @@ std::shared_ptr<SugaredValue> ClassValue::attr(
     const SourceRange& loc,
     Function& m,
     const std::string& field) {
-  // Allow import_source.cpp to resolve calls to a submodule's
-  // hooks. Edge case because normally you wouldn't allow a module to
-  // call functions of a submodule
-  if (Function* hook = type_->findHook(field)) {
-    return std::make_shared<FunctionValue>(hook);
-  }
-
   if (field != "__new__") {
     throw ErrorReport(loc) << "Tried to lookup unknown attribute on class "
                            << type_->annotation_str();
@@ -736,5 +699,110 @@ SugaredValuePtr SugaredEnumClass::iter(const SourceRange& loc, Function& m) {
   return enum_values_list_constant;
 }
 
+static std::shared_ptr<SugaredValue> insertFunctionCall(
+    const std::vector<Function*>& callees,
+    bool isAsync,
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  std::vector<const FunctionSchema*> schemas;
+  for (Function* callee : callees) {
+    try {
+      callee->ensure_defined();
+    } catch (const RecursiveMethodCallError&) {
+      throw ErrorReport(loc)
+          << " function '" << callee->name() << "' is called recursively. "
+          << "Recursive calls are not supported";
+    }
+    schemas.push_back(&callee->getSchema());
+  }
+  auto match = matchSchemas(schemas, loc, *f.graph(), args, kwargs);
+  Value* output =
+      f.graph()->insertFunctionCall(callees[match.first], match.second, isAsync);
+  output->node()->setSourceRange(loc);
+  return std::make_shared<SimpleValue>(output);
+}
+
+std::shared_ptr<SugaredValue> FunctionValue::callAsync(
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  return insertFunctionCall(
+      callees_, /*isAsync=*/true, loc, f, args, kwargs, n_binders);
+}
+
+std::shared_ptr<SugaredValue> FunctionValue::call(
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  return insertFunctionCall(
+      callees_, /*isAsync=*/false, loc, f, args, kwargs, n_binders);
+}
+
+static std::shared_ptr<SugaredValue> insertMethodCall(
+    Value* self,
+    const std::vector<std::string>& method_names,
+    bool isAsync,
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  std::vector<NamedValue> argsWithSelf = {self};
+  argsWithSelf.insert(argsWithSelf.end(), args.begin(), args.end());
+  std::vector<const FunctionSchema*> schemas;
+  for (const std::string& method_name : method_names) {
+    if (auto class_type = self->type()->cast<ClassType>()) {
+      Function& method = class_type->getMethod(method_name);
+      try {
+        method.ensure_defined();
+      } catch (const RecursiveMethodCallError&) {
+        throw ErrorReport(loc)
+            << " method '" << method.name() << "' is called recursively. "
+            << "Recursive calls are not supported";
+      }
+      schemas.push_back(&method.getSchema());
+    } else if (auto interface_type = self->type()->cast<InterfaceType>()) {
+      if (isAsync) {
+        throw ErrorReport(loc) << "cannot fork an interface method";
+      }
+      schemas.push_back(interface_type->getMethod(method_name));
+    } else {
+      TORCH_INTERNAL_ASSERT(
+          false, "method constructed that is not a class or interface");
+    }
+  }
+  auto match = matchSchemas(schemas, loc, *f.graph(), argsWithSelf, kwargs);
+  Value* output = f.graph()->insertMethodCall(
+      method_names[match.first], match.second, isAsync);
+  output->node()->setSourceRange(loc);
+  return std::make_shared<SimpleValue>(output);
+}
+
+std::shared_ptr<SugaredValue> MethodValue::callAsync(
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  return insertMethodCall(
+      self_, method_names_, /*isAsync=*/true, loc, f, args, kwargs, n_binders);
+}
+
+std::shared_ptr<SugaredValue> MethodValue::call(
+    const SourceRange& loc,
+    Function& f,
+    at::ArrayRef<NamedValue> args,
+    at::ArrayRef<NamedValue> kwargs,
+    size_t n_binders) {
+  return insertMethodCall(
+      self_, method_names_, /*isAsync=*/false, loc, f, args, kwargs, n_binders);
+}
 } // namespace jit
 } // namespace torch
