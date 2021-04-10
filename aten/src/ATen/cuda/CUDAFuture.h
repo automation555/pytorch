@@ -19,41 +19,22 @@
 #include <c10/macros/Export.h>
 #include <c10/util/intrusive_ptr.h>
 
-namespace at {
-namespace cuda {
+namespace at { namespace cuda {
 
-struct TORCH_CUDA_CPP_API CUDAFuture : at::ivalue::Future {
+struct TORCH_CUDA_API CUDAFuture final : at::ivalue::Future {
  public:
-  CUDAFuture(at::TypePtr type) : at::ivalue::Future(std::move(type)) {
-    // Use current device to initialize currentDevice_. This is necessary
-    // because preMarkCompletedHook won't be called when the Future contains
-    // an error. Uninitialized currentDevice_ could lead to crash when used
-    // in CUDAGuard.
-    currentDevice_ = c10::cuda::current_device();
-  }
+  using at::ivalue::Future::Future;
 
+ protected:
   c10::intrusive_ptr<Future> createInstance(at::TypePtr type) override {
     return c10::make_intrusive<CUDAFuture>(std::move(type));
   }
 
- protected:
-  /**
-   * The dataPtrs field contains storage pointers of all tensors in the IValue.
-   * This method records CUDAEvents on participating devices and uses those
-   * CUDAEvents to synchronize streams when calling postWaitHook().
-   * If dataPtrs does not have a value, this method will try to inspect the
-   * given IValue by walking through all subvalues and extracting data pointers
-   * from CUDA tensors.
-   */
-  void preMarkCompletedHook(
-      const at::IValue& value,
-      c10::optional<std::vector<std::reference_wrapper<const at::DataPtr>>>
-          dataPtrs) override {
+  void postMarkCompletedHook(const at::IValue& value) override {
     currentDevice_ = c10::cuda::current_device();
 
     // Extract them once and cache them for later uses.
-    dataPtrs_ =
-        dataPtrs.has_value() ? std::move(*dataPtrs) : extractDataPtrs(value);
+    dataPtrs_ = extractDataPtrs(value);
 
     std::vector<bool> isCudaDeviceUsed(c10::cuda::device_count(), false);
     for (const at::DataPtr& data_ptr : dataPtrs_) {
@@ -101,8 +82,7 @@ struct TORCH_CUDA_CPP_API CUDAFuture : at::ivalue::Future {
       for (const at::DataPtr& data_ptr : dataPtrs_) {
         if (data_ptr.device().is_cuda()) {
           c10::cuda::CUDACachingAllocator::recordStream(
-              data_ptr,
-              at::cuda::getCurrentCUDAStream(data_ptr.device().index()));
+              data_ptr, at::cuda::getCurrentCUDAStream(data_ptr.device().index()));
         }
       }
 
@@ -112,34 +92,29 @@ struct TORCH_CUDA_CPP_API CUDAFuture : at::ivalue::Future {
     };
   }
 
-  void postWaitHook(const at::IValue& value) override {
-    for (at::cuda::CUDAEvent& cudaEvent : cudaEvents_) {
-      cudaEvent.block(at::cuda::getCurrentCUDAStream(cudaEvent.device_index()));
+  void postWaitHook(const at::IValue& value, bool nonBlocking) override {
+    if (nonBlocking) {
+      // When non-blocking, we simply insert an instruction in the caller's
+      // current streams that causes additional async operations enqueued on
+      // those streams to wait for our events.
+      for (at::cuda::CUDAEvent& cudaEvent : cudaEvents_) {
+        cudaEvent.block(
+            at::cuda::getCurrentCUDAStream(cudaEvent.device_index()));
+      }
+    } else {
+      // When blocking, we hold up the CPU thread until our async events have
+      // effectively occurred on the device.
+      for (const at::cuda::CUDAEvent& cudaEvent : cudaEvents_) {
+        cudaEvent.synchronize();
+      }
     }
 
     for (const at::DataPtr& data_ptr : dataPtrs_) {
       if (data_ptr.device().is_cuda()) {
         c10::cuda::CUDACachingAllocator::recordStream(
-            data_ptr,
-            at::cuda::getCurrentCUDAStream(data_ptr.device().index()));
+            data_ptr, at::cuda::getCurrentCUDAStream(data_ptr.device().index()));
       }
     }
-  }
-
-  virtual std::vector<std::reference_wrapper<const at::DataPtr>> extractDataPtrs(
-      const at::IValue& value) {
-    at::IValue::HashAliasedIValues sub_values;
-    // Prefer getSubValues() over visit() as the latter is a silent no-op for
-    // some unsupported types, whereas the former at least fails loudly.
-    value.getSubValues(sub_values);
-
-    std::vector<std::reference_wrapper<const at::DataPtr>> data_ptrs;
-    for (const at::IValue& sub_value : sub_values) {
-      if (sub_value.isTensor()) {
-        data_ptrs.emplace_back(sub_value.toTensor().storage().data_ptr());
-      }
-    }
-    return data_ptrs;
   }
 
  private:
@@ -156,6 +131,22 @@ struct TORCH_CUDA_CPP_API CUDAFuture : at::ivalue::Future {
   // A cached version of the data ptrs extracted from the value when the future
   // is first marked completed.
   std::vector<std::reference_wrapper<const at::DataPtr>> dataPtrs_;
+
+  std::vector<std::reference_wrapper<const at::DataPtr>> extractDataPtrs(
+      const at::IValue& value) {
+    at::IValue::HashAliasedIValues sub_values;
+    // Prefer getSubValues() over visit() as the latter is a silent no-op for
+    // some unsupported types, whereas the former at least fails loudly.
+    value.getSubValues(sub_values);
+
+    std::vector<std::reference_wrapper<const at::DataPtr>> data_ptrs;
+    for (const at::IValue& sub_value : sub_values) {
+      if (sub_value.isTensor()) {
+        data_ptrs.emplace_back(sub_value.toTensor().storage().data_ptr());
+      }
+    }
+    return data_ptrs;
+  }
 };
 
 } // namespace cuda
