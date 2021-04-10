@@ -1,3 +1,7 @@
+
+
+
+
 import numpy as np
 import copy
 import time
@@ -13,21 +17,6 @@ import caffe2.python.hypothesis_test_util as hu
 from caffe2.proto import caffe2_pb2
 
 dyndep.InitOpsLibrary('@/caffe2/caffe2/fb/optimizers:sgd_simd_ops')
-
-if workspace.has_gpu_support:
-    # NOTE: During GPU stress tests, the number of workers exceeds the number
-    #       of GPUs which results in flakiness from GPU contention. As a
-    #       result, deadlines are not enforced on CUDA runs.
-    _hypothesis_settings = settings
-
-    def settings(**kwargs):
-        if 'deadline' in kwargs:
-            kwargs['deadline'] = None
-            kwargs.setdefault('max_examples', 50)
-
-        def wrapped(f):
-            return _hypothesis_settings(**kwargs)(f)
-        return wrapped
 
 
 def sigmoid(x):
@@ -342,7 +331,6 @@ class TestOperators(hu.HypothesisTestCase):
 
     @unittest.skipIf(not workspace.has_gpu_support,
                      "Skipping test due to no gpu present.")
-    @settings(deadline=None)
     @given(hidden_size=st.integers(min_value=1, max_value=3),
            num_layers=st.integers(min_value=1, max_value=3),
            bidirectional=st.booleans(),
@@ -1297,7 +1285,11 @@ class TestOperators(hu.HypothesisTestCase):
           original matrices.
         """
         import threading
-        import queue
+        try:
+            import queue
+        except ImportError:
+            # Py3
+            import Queue as queue
         op = core.CreateOperator(
             "CreateBlobsQueue",
             [],
@@ -1644,6 +1636,20 @@ class TestOperators(hu.HypothesisTestCase):
 
         self.assertAlmostEqual(np.linalg.norm(golden - Y), 0, delta=0)
 
+        index = np.array([0, 1, 2, 1, 4], np.int32)
+        lengths = np.array([3, 2], np.int32)
+
+        self.ws.create_blob("index").feed(index)
+        self.ws.run(op)
+        Y = self.ws.blobs[("Y")].fetch()
+        self.assertEqual(list(Y.shape), [2, 8])
+
+        golden = np.array([[768, 768, 768, 768, 768, 768, 768, 768],
+                           [512, 512, 512, 512, 512, 512, 512, 512]])
+
+        self.assertAlmostEqual(np.linalg.norm(golden - Y), 0, delta=0)
+
+
     @given(**hu.gcs_cpu_only)
     def test_tt_sls_gradientop(self, gc, dc):
 
@@ -1687,6 +1693,20 @@ class TestOperators(hu.HypothesisTestCase):
         self.assertEqual(list(dCore1.shape), list(c1.shape))
         self.assertEqual(list(dCore2.shape), list(c2.shape))
 
+        indices = np.array([[0, 0, 0],
+                            [1, 0, 0],
+                            [2, 0, 0],
+                            [1, 0, 0],
+                            [4, 0, 0]], np.int32)
+        self.ws.create_blob("indices").feed(indices)
+
+        self.ws.run(op)
+        dCore0 = self.ws.blobs[("dCore0")].fetch()
+        dCore1 = self.ws.blobs[("dCore1")].fetch()
+        dCore2 = self.ws.blobs[("dCore2")].fetch()
+        self.assertEqual(list(dCore0.shape), list(c0.shape))
+        self.assertEqual(list(dCore1.shape), list(c1.shape))
+        self.assertEqual(list(dCore2.shape), list(c2.shape))
 
     @given(**hu.gcs_cpu_only)
     def test_tt_sls_gradientop1(self, gc, dc):
@@ -1750,6 +1770,9 @@ class TestOperators(hu.HypothesisTestCase):
         c1 = np.ones([10, 16, 2, 16]).astype(np.float32)
         c2 = np.ones([10, 16, 2, 1]).astype(np.float32)
         index = np.array([0, 1, 2, 1, 4], np.int64)
+        lengths = np.array([0, 3, 0, 0, 2, 0, 0], np.int32)
+        self.assertGradientChecks(gc, op, [c0, c1, c2, index, lengths], 0, [0])
+        index = np.array([0, 1, 2, 1, 4], np.int32)
         lengths = np.array([0, 3, 0, 0, 2, 0, 0], np.int32)
         self.assertGradientChecks(gc, op, [c0, c1, c2, index, lengths], 0, [0])
 
@@ -2723,7 +2746,7 @@ class TestOperators(hu.HypothesisTestCase):
             Y[X >= upper_bound] = num_buckets + 1
             Y[(X >= lower_bound) & (X < upper_bound)] = \
                 ((X[(X >= lower_bound) & (X < upper_bound)] - lower_bound) /
-                    segment + 1).astype(np.int32)
+                        segment + 1).astype(np.int32)
 
             for i in range(Y.shape[0]):
                 for j in range(Y.shape[1]):
