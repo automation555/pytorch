@@ -19,7 +19,6 @@
 #include <c10/core/StreamGuard.h>
 
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -226,18 +225,14 @@ Engine::Engine() : max_recursion_depth_(MAX_DEPTH), non_reentrant_device_thread_
 // Send shutdown tasks to all device_ready_queues_ if no backward tasks are running
 // Even though readyQueue should be empty, shutdown tasks have the highest priority
 Engine::~Engine() {
-  // Under some conditions, autograd threads can hang on shutdown
-  // Do not wait for them to shutdown indefinitely but rely on timeout
-  auto wait_duration_str = getenv("TORCH_AUTOGRAD_SHUTDOWN_WAIT_LIMIT");
-  if (!wait_duration_str) {
-    wait_duration_str = "10.0";
-  }
-  auto wait_duration = std::atof(wait_duration_str);
+  // This code in principle is correct, but in practice causes occasional
+  // hangs at shutdown.  See https://github.com/pytorch/pytorch/issues/48888
+#if 0
   bool noBackward = true;
   for (auto& queue: device_ready_queues_) {
     noBackward =  noBackward && queue->empty();
   }
-  if (noBackward && wait_duration > 0.0f) {
+  if (noBackward) {
     for (auto& queue : device_ready_queues_) {
      queue->pushShutdownTask();
     }
@@ -245,18 +240,13 @@ Engine::~Engine() {
     // Because CRT terminates DLL threads before calling
     // global object destructors
 #if !defined(_WIN32) || defined(C10_USE_MSVC_STATIC_RUNTIME)
-
-    using namespace std::chrono_literals;
-    // Set a deadline for how long it is OK to wait device threads to shutdown
-    auto wait_deadline = std::chrono::steady_clock::now() + wait_duration * 1.0s;
     std::unique_lock<std::mutex> lk(non_reentrant_device_thread_mutex_);
     while(non_reentrant_device_thread_count_.load() != 0) {
-      if (non_reentrant_device_thread_condvar_.wait_until(lk, wait_deadline) == std::cv_status::timeout) {
-        break;
-      }
+      non_reentrant_device_thread_condvar_.wait(lk);
     }
 #endif
   }
+#endif
   // Otherwise threads are leaked
 }
 
@@ -838,21 +828,9 @@ void Engine::evaluate_function(
   }
 }
 
-inline static uint64_t compute_min_topological_nr(const edge_list& outputs) {
-  // Computes the mininum topological number among all the outputs
-  if (outputs.empty()) {
-    return 0;
-  }
-  auto min_topo_nr = std::numeric_limits<uint64_t>::max();
-  for (auto & output_edge : outputs) {
-    auto topo_nr = output_edge.function.get()->topological_nr();
-    min_topo_nr = (min_topo_nr < topo_nr) ? min_topo_nr : topo_nr;
-  }
-  return min_topo_nr;
-}
-
-auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo_nr) -> void {
-  // Computes the number of dependencies for each function which requires grad
+/* Computes the number of dependencies for each function which requires grad */
+auto Engine::compute_dependencies(Node* root, GraphTask& task) -> void {
+  // Just to make sure that they will never be added to the queue again
   std::unordered_set<Node*> seen;
   std::vector<Node*> queue { root };
 
@@ -861,9 +839,6 @@ auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo
   auto& dependencies = task.dependencies_;
   while (!queue.empty()) {
     auto fn = queue.back(); queue.pop_back();
-    if (fn->topological_nr() < min_topo_nr) {
-      continue;
-    }
     for (const auto& edge : fn->next_edges()) {
       if (auto next_ptr = edge.function.get()) {
         dependencies[next_ptr] += 1;
@@ -885,7 +860,7 @@ auto Engine::execute(const edge_list& roots,
     return msg;
   });
 
-  // A fresh first time Engine::execute call should start on the CPU device, initialize
+  // A frech first time Engine::execute call should start on the CPU device, initialize
   // a new thread local ready queue on CPU or reuse the existing one (if there is one
   // allocated already, i.e. consecutive backward calls, re-entrant backward calls),
   // then memoize the local_ready_queue in GraphTask
@@ -904,15 +879,13 @@ auto Engine::execute(const edge_list& roots,
     roots.at(0).function :
     std::make_shared<GraphRoot>(roots, inputs);
 
-  auto min_topo_nr = compute_min_topological_nr(outputs);
-  // Now compute the dependencies for all executable functions
-  compute_dependencies(graph_root.get(), *graph_task, min_topo_nr);
+  // Now compute the dependencies for all executable functions and queue the root
+  compute_dependencies(graph_root.get(), *graph_task);
 
   if (!outputs.empty()) {
-    graph_task->init_to_execute(*graph_root, outputs, accumulate_grad, min_topo_nr);
+    graph_task->init_to_execute(*graph_root, outputs, accumulate_grad);
   }
 
-  // Queue the root
   if (skip_dummy_node) {
     InputBuffer input_buffer(roots.at(0).function->num_inputs());
     auto input = inputs.at(0);
@@ -1072,7 +1045,7 @@ size_t Engine::ready_queue_size(const std::shared_ptr<GraphTask>& graph_task, at
 
 // CPU ready queue is per GraphTask, but CUDA device ready queues are shared across all graph tasks
 auto Engine::ready_queue(std::shared_ptr<ReadyQueue> cpu_ready_queue, at::Device device) -> std::shared_ptr<ReadyQueue>{
-  if (device.type() == at::kCPU || device.type() == at::DeviceType::Meta) {
+  if (device.type() == at::kCPU) {
     // return the cpu ready queue passed in
     TORCH_INTERNAL_ASSERT(cpu_ready_queue);
     return cpu_ready_queue;
@@ -1123,7 +1096,7 @@ auto Engine::start_device_threads() -> void {
   // Wait for the threads to start
   {
     std::unique_lock<std::mutex> lk(non_reentrant_device_thread_mutex_);
-    while(non_reentrant_device_thread_count_.load() != static_cast<uint32_t>(num_devices)) {
+    while(non_reentrant_device_thread_count_.load() != num_devices) {
       non_reentrant_device_thread_condvar_.wait(lk);
     }
   }
@@ -1147,7 +1120,7 @@ void Engine::add_thread_pool_task(const std::weak_ptr<GraphTask>& graph_task) {
   thread_pool_shared_->work_.notify_one();
 }
 
-void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool accumulate_grad, uint64_t min_topo_nr) {
+void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool accumulate_grad) {
   // Populates exec_info so nodes that should be executed have `exec_info[node].needed_ = true`
   // Only nodes that have a path to any edge in `outputs` should be executed.
   // The code below populates exec_info using recursion, but the actual code does this
@@ -1234,11 +1207,6 @@ void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool
 
     if (child_fn) {
       // (2) next child exists but has not been seen
-      if (child_fn->topological_nr() < min_topo_nr) {
-        // child created before the first output means this child cannot have
-        // an edge to output
-        continue;
-      }
       stack.emplace_back(child_fn);
     } else {
       // (3) no next child exists for `fn` means its `needed` has already been
