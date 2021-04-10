@@ -47,6 +47,7 @@ TESTS = [
     'test_jit_cuda_fuser',
     'test_cuda_primary_ctx',
     'test_dataloader',
+    'test_dataset',
     'test_datapipe',
     'distributed/test_data_parallel',
     'distributed/test_distributed_fork',
@@ -112,6 +113,7 @@ TESTS = [
     'distributed/rpc/test_faulty_agent',
     'distributed/rpc/test_process_group_agent',
     'distributed/rpc/test_tensorpipe_agent',
+    'test_jit_py3',
     'test_determination',
     'test_futures',
     'test_fx',
@@ -253,6 +255,7 @@ TARGET_DET_LIST = [
     'test_jit_profiling',
     'test_torch',
     'test_binary_ufuncs'
+    'test_binary_ufuncs_ops'
     'test_numpy_interop',
     'test_reductions',
     'test_shape_ops',
@@ -1015,8 +1018,7 @@ def export_S3_test_times(test_times_filename: str, test_times: Dict[str, float])
         print(f'Overwriting existent file: {test_times_filename}')
     with open(test_times_filename, 'w+') as file:
         job_times_json = get_job_times_json(test_times)
-        json.dump(job_times_json, file, indent='    ', separators=(',', ': '))
-        file.write('\n')
+        json.dump(job_times_json, file)
 
 def main():
     options = parse_args()
