@@ -1,6 +1,5 @@
 #include <ATen/cuda/CUDAMultiStreamGuard.h>
 #include <c10/cuda/CUDAGuard.h>
-#include <c10/util/irange.h>
 
 #include <c10d/FileStore.hpp>
 #include <c10d/ProcessGroupGloo.hpp>
@@ -49,9 +48,9 @@ class AsyncTest {
     auto store = c10::make_intrusive<::c10d::FileStore>(path_, size);
 
     // Use tiny timeout to make this test run fast
-    auto options = ::c10d::ProcessGroupGloo::Options::create();
-    options->timeout = std::chrono::milliseconds(50);
-    options->devices.push_back(
+    ::c10d::ProcessGroupGloo::Options options;
+    options.timeout = std::chrono::milliseconds(50);
+    options.devices.push_back(
         ::c10d::ProcessGroupGloo::createDeviceForHostname("127.0.0.1"));
 
     pg_ = std::unique_ptr<::c10d::ProcessGroupGloo>(
@@ -75,8 +74,7 @@ class AsyncInputIsOutputTest : public AsyncTest {
     for (auto i = 0; i < numTensors_; i++) {
       inputs_[i] = at::empty(
           {16, 16},
-          at::device(
-              {at::kCUDA, static_cast<c10::DeviceIndex>(i % numDevices_)}));
+          at::device({at::kCUDA, i % numDevices_}));
     }
 
     // Allocate a stream per device.
@@ -244,9 +242,10 @@ void runAsyncBroadcastTest(
       const auto expected = (rootRank * numTensors + rootTensor);
       for (size_t i = 0; i < numProcesses; i++) {
         auto tensors = tests[i].getTensors();
-        for (const auto & tensor : tensors) {
-          const auto *const data = tensor.data_ptr<float>();
-          for (const auto k : c10::irange(tensor.numel())) {
+        for (size_t j = 0; j < tensors.size(); j++) {
+          auto& tensor = tensors[j];
+          auto data = tensor.data_ptr<float>();
+          for (auto k = 0; k < tensor.numel(); k++) {
             EXPECT_EQ(data[k], expected);
           }
         }
