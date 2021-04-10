@@ -8,8 +8,6 @@
 #include <torch/csrc/jit/tensorexpr/expr.h>
 #include <torch/csrc/jit/tensorexpr/stmt.h>
 
-#include <ATen/core/ivalue.h>
-
 namespace torch {
 namespace jit {
 namespace tensorexpr {
@@ -23,12 +21,6 @@ enum CompareSelectOperation {
   kNE,
 };
 
-enum CompareSelectBias {
-  kUnbiased,
-  kLikely,
-  kUnlikely,
-};
-
 inline int getPrecedence(IRNodeType ty) {
   // Match C++ operator precedence rules, since some pretty-print expressions to
   // C++. SEE: https://en.cppreference.com/w/cpp/language/operator_precedence
@@ -36,46 +28,36 @@ inline int getPrecedence(IRNodeType ty) {
     case kPrimitive:
       return 0;
     case kCast:
-    case kBitCast:
       return 2;
     case kAdd:
     case kSub:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 6;
     case kMul:
     case kDiv:
     case kMod:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 5;
     case kMax:
     case kMin:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 99;
     case kAnd:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 11;
     case kOr:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 13;
     case kLshift:
     case kRshift:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 7;
     case kXor:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 12;
     case kCompareSelect:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 16;
     default:
-      // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
       return 99;
   }
 }
 
 class Placeholder;
 
-class TORCH_API Cast : public ExprNode<Cast> {
+class Cast : public ExprNode<Cast> {
  public:
   const Expr* src_value() const {
     return src_value_;
@@ -97,34 +79,6 @@ class TORCH_API Cast : public ExprNode<Cast> {
 template <typename T>
 ExprHandle cast(const ExprHandle& src_value) {
   return Cast::make(Dtype(ToDtype<T>(), src_value.dtype().lanes()), src_value);
-}
-
-// This is a bitwise cast, akin to bitcast in LLVM
-class TORCH_API BitCast : public ExprNode<BitCast> {
- public:
-  const Expr* src_value() const {
-    return src_value_;
-  }
-  static ExprHandle make(Dtype dtype, const ExprHandle& src_value) {
-    return ExprHandle(new BitCast(dtype, src_value.node()));
-  }
-  BitCast(Dtype dtype, const Expr* src_value)
-      : ExprNodeBase(dtype, kBitCast), src_value_(src_value) {
-    TORCH_CHECK(src_value_->dtype().byte_size() == dtype.byte_size());
-  }
-
-  bool isConstant() const override {
-    return src_value_->isConstant();
-  }
-
- private:
-  const Expr* src_value_;
-};
-
-template <typename T>
-ExprHandle bitcast(const ExprHandle& src_value) {
-  return BitCast::make(
-      Dtype(ToDtype<T>(), src_value.dtype().lanes()), src_value);
 }
 
 // Represent the expression node for binary operators.
@@ -166,85 +120,101 @@ class BinaryOpNode : public ExprNode<Op> {
   const Expr* rhs_;
 };
 
-class TORCH_API Add : public BinaryOpNode<Add> {
+class Add : public BinaryOpNode<Add> {
  public:
   Add(const Expr* lhs, const Expr* rhs)
       : BinaryOpNode(lhs, rhs, IRNodeType::kAdd) {}
 };
 
-class TORCH_API Sub : public BinaryOpNode<Sub> {
+class Sub : public BinaryOpNode<Sub> {
  public:
   Sub(const Expr* lhs, const Expr* rhs)
       : BinaryOpNode(lhs, rhs, IRNodeType::kSub) {}
 };
 
-class TORCH_API Mul : public BinaryOpNode<Mul> {
+class Mul : public BinaryOpNode<Mul> {
  public:
   Mul(const Expr* lhs, const Expr* rhs)
       : BinaryOpNode(lhs, rhs, IRNodeType::kMul) {}
 };
 
-class TORCH_API Div : public BinaryOpNode<Div> {
+class Div : public BinaryOpNode<Div> {
  public:
   Div(const Expr* lhs, const Expr* rhs)
       : BinaryOpNode(lhs, rhs, IRNodeType::kDiv) {}
 };
 
-class TORCH_API Mod : public BinaryOpNode<Mod> {
+class Mod : public BinaryOpNode<Mod> {
  public:
   Mod(const Expr* lhs, const Expr* rhs)
       : BinaryOpNode(lhs, rhs, IRNodeType::kMod) {}
 };
 
-template <typename Op>
-class BitwiseOpNode : public BinaryOpNode<Op> {
+class And : public BinaryOpNode<And> {
  public:
-  BitwiseOpNode(const Expr* lhs, const Expr* rhs, IRNodeType type)
-      : BinaryOpNode<Op>(lhs, rhs, type) {}
-
-  static ExprHandle make(const ExprHandle& lhs, const ExprHandle& rhs) {
-    if (!lhs.dtype().is_integral()) {
+  And(const Expr* lhs, const Expr* rhs)
+      : BinaryOpNode(lhs, rhs, IRNodeType::kAnd) {
+    if (!lhs->dtype().is_integral()) {
       throw unsupported_dtype();
     }
-    if (lhs.dtype() != rhs.dtype()) {
-      throw malformed_input("lhs/rhs dtype mismatch");
+    if (lhs->dtype() != rhs->dtype()) {
+      throw malformed_input("bad dtype in And");
     }
-    return BinaryOpNode<Op>::make(lhs, rhs);
   }
 };
 
-class TORCH_API And : public BitwiseOpNode<And> {
- public:
-  And(const Expr* lhs, const Expr* rhs)
-      : BitwiseOpNode(lhs, rhs, IRNodeType::kAnd) {}
-};
-
-class TORCH_API Or : public BitwiseOpNode<Or> {
+class Or : public BinaryOpNode<Or> {
  public:
   Or(const Expr* lhs, const Expr* rhs)
-      : BitwiseOpNode(lhs, rhs, IRNodeType::kOr) {}
+      : BinaryOpNode(lhs, rhs, IRNodeType::kOr) {
+    if (!lhs->dtype().is_integral()) {
+      throw unsupported_dtype();
+    }
+    if (lhs->dtype() != rhs->dtype()) {
+      throw malformed_input("bad dtype in Or");
+    }
+  }
 };
 
-class TORCH_API Xor : public BitwiseOpNode<Xor> {
+class Xor : public BinaryOpNode<Xor> {
  public:
   Xor(const Expr* lhs, const Expr* rhs)
-      : BitwiseOpNode(lhs, rhs, IRNodeType::kXor) {}
+      : BinaryOpNode(lhs, rhs, IRNodeType::kXor) {
+    if (!lhs->dtype().is_integral()) {
+      throw unsupported_dtype();
+    }
+    if (lhs->dtype() != rhs->dtype()) {
+      throw malformed_input("bad dtype in Xor");
+    }
+  }
 };
 
-class TORCH_API Lshift : public BitwiseOpNode<Lshift> {
+class Lshift : public BinaryOpNode<Lshift> {
  public:
   Lshift(const Expr* lhs, const Expr* rhs)
-      : BitwiseOpNode(lhs, rhs, IRNodeType::kLshift) {}
+      : BinaryOpNode(lhs, rhs, IRNodeType::kLshift) {
+    if (lhs->dtype().scalar_type() != ScalarType::Int) {
+      throw unsupported_dtype();
+    }
+    if (lhs->dtype() != rhs->dtype()) {
+      throw malformed_input("bad dtype in Lshift");
+    }
+  }
 };
 
-class TORCH_API Rshift : public BitwiseOpNode<Rshift> {
+class Rshift : public BinaryOpNode<Rshift> {
  public:
   Rshift(const Expr* lhs, const Expr* rhs)
-      : BitwiseOpNode(lhs, rhs, IRNodeType::kRshift) {}
+      : BinaryOpNode(lhs, rhs, IRNodeType::kRshift) {
+    if (lhs->dtype().scalar_type() != ScalarType::Int) {
+      throw unsupported_dtype();
+    }
+    if (lhs->dtype() != rhs->dtype()) {
+      throw malformed_input("bad dtype in Rshift");
+    }
+  }
 };
 
-// TODO: add TORCH_API
-// Currently adding it results in a compilation error on Windows
 class Max : public BinaryOpNode<Max> {
  private:
   bool propagate_nans_;
@@ -267,8 +237,6 @@ class Max : public BinaryOpNode<Max> {
   }
 };
 
-// TODO: add TORCH_API
-// Currently adding it results in a compilation error on Windows
 class Min : public BinaryOpNode<Min> {
  private:
   bool propagate_nans_;
@@ -293,7 +261,7 @@ class Min : public BinaryOpNode<Min> {
 
 // Encode typed immediate values e.g. IntImm, FloatImm.
 #define IMM_DECLARE(Type, Name)                               \
-  class TORCH_API Name##Imm : public ExprNode<Name##Imm> {    \
+  class Name##Imm : public ExprNode<Name##Imm> {              \
    public:                                                    \
     Name##Imm(Type value)                                     \
         : ExprNodeBase(k##Name, kPrimitive), value_(value) {} \
@@ -346,11 +314,6 @@ T immediateAs(const Expr* e) {
 }
 
 template <typename T>
-T immediateAs(ExprHandle e) {
-  return immediateAs<T>(e.node());
-}
-
-template <typename T>
 bool immediateEquals(const Expr* e, T val) {
 #define TYPE_CASE(Type, Name)                                     \
   if (const Name##Imm* imm = dynamic_cast<const Name##Imm*>(e)) { \
@@ -375,7 +338,7 @@ bool immediateIsNegative(const T* e) {
 
 // Represents a ramp vector node:
 //     [base, base + 1 * stride, ... , base + (lanes - 1) * stride]
-class TORCH_API Ramp : public ExprNode<Ramp> {
+class Ramp : public ExprNode<Ramp> {
  public:
   const Expr* base() const {
     return base_;
@@ -387,9 +350,6 @@ class TORCH_API Ramp : public ExprNode<Ramp> {
       const ExprHandle& base,
       const ExprHandle& stride,
       int lanes) {
-    if (stride.dtype() != base.dtype()) {
-      throw malformed_input("Bad stride in Ramp");
-    }
     return ExprHandle(new Ramp(base.node(), stride.node(), lanes));
   }
   int lanes() const {
@@ -397,10 +357,14 @@ class TORCH_API Ramp : public ExprNode<Ramp> {
   }
 
   Ramp(const Expr* base, const Expr* stride, int lanes)
-      : ExprNodeBase(Dtype(base->dtype(), lanes)),
+      : ExprNodeBase(Dtype(base->dtype(), lanes), kRamp),
         base_(base),
         stride_(stride),
-        lanes_(lanes) {}
+        lanes_(lanes) {
+    if (stride->dtype() != base->dtype()) {
+      throw malformed_input("Bad stride in Ramp");
+    }
+  }
 
  private:
   const Expr* base_;
@@ -435,18 +399,11 @@ class TORCH_API Load : public ExprNode<Load> {
       const BufHandle& buf,
       const std::vector<ExprHandle>& indices,
       const ExprHandle& mask);
-  static ExprHandle make(
-      Dtype dtype,
-      const BufHandle& buf,
-      const std::vector<ExprHandle>& indices);
-  static ExprHandle make(
-      const BufHandle& buf,
-      const std::vector<ExprHandle>& indices);
 
   Load(
       Dtype dtype,
       const Buf* base_handle,
-      std::vector<const Expr*> indices,
+      const std::vector<const Expr*>& indices,
       const Expr* mask);
   Load(
       const Buf* base_handle,
@@ -454,12 +411,14 @@ class TORCH_API Load : public ExprNode<Load> {
       const Expr* mask);
 
  private:
+  void verify_dtypes() const;
+
   const Buf* buf_;
   std::vector<const Expr*> indices_;
   const Expr* mask_;
 };
 
-class TORCH_API Broadcast : public ExprNode<Broadcast> {
+class Broadcast : public ExprNode<Broadcast> {
  public:
   const Expr* value() const {
     return value_;
@@ -471,7 +430,7 @@ class TORCH_API Broadcast : public ExprNode<Broadcast> {
     return ExprHandle(new Broadcast(value.node(), lanes));
   }
   Broadcast(const Expr* value, int lanes)
-      : ExprNodeBase(Dtype(value->dtype(), lanes)),
+      : ExprNodeBase(Dtype(value->dtype(), lanes), kBroadcast),
         value_(value),
         lanes_(lanes) {}
 
@@ -480,7 +439,7 @@ class TORCH_API Broadcast : public ExprNode<Broadcast> {
   int lanes_;
 };
 
-class TORCH_API IfThenElse : public ExprNode<IfThenElse> {
+class IfThenElse : public ExprNode<IfThenElse> {
  public:
   const Expr* condition() const {
     return condition_;
@@ -500,25 +459,78 @@ class TORCH_API IfThenElse : public ExprNode<IfThenElse> {
       const ExprHandle& c,
       const ExprHandle& t,
       const ExprHandle& f) {
-    if (!c.dtype().is_integral()) {
-      throw unsupported_dtype();
-    }
-    if (c.dtype().lanes() != 1) {
-      throw unsupported_dtype();
-    }
-    if (t.dtype() != f.dtype()) {
-      throw malformed_input("Bad dtype in IfThenElse");
-    }
     return ExprHandle(new IfThenElse(c.node(), t.node(), f.node()));
   }
 
   IfThenElse(const Expr* c, const Expr* t, const Expr* f)
-      : ExprNodeBase(t->dtype()), condition_(c), true_(t), false_(f) {}
+      : ExprNodeBase(t->dtype()), condition_(c), true_(t), false_(f) {
+    if (!c->dtype().is_integral()) {
+      throw unsupported_dtype();
+    }
+    if (c->dtype().lanes() != 1) {
+      throw unsupported_dtype();
+    }
+    if (t->dtype() != f->dtype()) {
+      throw malformed_input("Bad dtype in IfThenElse");
+    }
+  }
 
  private:
   const Expr* condition_;
   const Expr* true_;
   const Expr* false_;
+};
+
+class BaseCallNode : public Expr {
+ public:
+  enum CallType {
+    kIntrinsics,
+    kFunctionCall,
+  };
+
+  int nparams() const {
+    return params_.size();
+  }
+
+  const Expr* param(int index) const {
+    return params_[index];
+  }
+  const std::vector<const Expr*>& params() const {
+    return params_;
+  }
+
+  virtual std::string func_name() const = 0;
+
+  CallType call_type() const {
+    return call_type_;
+  }
+
+ protected:
+  BaseCallNode(
+      Dtype dtype,
+      CallType call_type,
+      const std::vector<const Expr*>& params)
+      : Expr(dtype), call_type_(call_type), params_(params) {}
+
+ private:
+  // The handler for the default ir_mutator to make a copy of this node with new
+  // params.
+  virtual const Expr* DefaultMutator(
+      const std::vector<const Expr*>& new_params) const = 0;
+
+  template <class U, class B>
+  friend class ExprNode;
+  friend class IRMutator;
+
+  CallType call_type_;
+  std::vector<const Expr*> params_;
+};
+
+template <typename Op>
+class CallNode : public ExprNode<Op, BaseCallNode> {
+ public:
+  using BaseClass = ExprNode<Op, BaseCallNode>;
+  using BaseClass::BaseClass;
 };
 
 class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
@@ -538,15 +550,11 @@ class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
   const Expr* ret_val2() const {
     return this->ret_val2_;
   }
-  CompareSelectBias bias() const {
-    return bias_;
-  }
 
   static ExprHandle make(
       const ExprHandle& lhs,
       const ExprHandle& rhs,
-      CompareSelectOperation cmp_op,
-      CompareSelectBias bias = kUnbiased) {
+      CompareSelectOperation cmp_op) {
     if (lhs.dtype() != rhs.dtype()) {
       throw malformed_input("bad dtype in CompareSelect");
     }
@@ -555,8 +563,7 @@ class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
         rhs.node(),
         IntImm::make(1).node(),
         IntImm::make(0).node(),
-        cmp_op,
-        bias));
+        cmp_op));
   }
 
   static ExprHandle make(
@@ -564,18 +571,12 @@ class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
       const ExprHandle& rhs,
       const ExprHandle& ret_val1,
       const ExprHandle& ret_val2,
-      CompareSelectOperation cmp_op,
-      CompareSelectBias bias = kUnbiased) {
+      CompareSelectOperation cmp_op) {
     if (lhs.dtype() != rhs.dtype() || ret_val1.dtype() != ret_val2.dtype()) {
       throw malformed_input("bad dtype in CompareSelect");
     }
     return ExprHandle(new CompareSelect(
-        lhs.node(),
-        rhs.node(),
-        ret_val1.node(),
-        ret_val2.node(),
-        cmp_op,
-        bias));
+        lhs.node(), rhs.node(), ret_val1.node(), ret_val2.node(), cmp_op));
   }
 
   CompareSelect(
@@ -583,28 +584,25 @@ class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
       const Expr* rhs,
       const Expr* ret_val1,
       const Expr* ret_val2,
-      CompareSelectOperation cmp_op,
-      CompareSelectBias bias = kUnbiased)
+      CompareSelectOperation cmp_op)
       : ExprNodeBase(ret_val1->dtype()),
         lhs_(lhs),
         rhs_(rhs),
         ret_val1_(ret_val1),
         ret_val2_(ret_val2),
-        compare_op_(cmp_op),
-        bias_(bias) {}
+        compare_op_(cmp_op) {
+    if (ret_val1->dtype() != ret_val2->dtype()) {
+      throw malformed_input("bad dtype in CompareSelect");
+    }
+  }
 
-  CompareSelect(
-      const Expr* lhs,
-      const Expr* rhs,
-      CompareSelectOperation cmp_op,
-      CompareSelectBias bias = kUnbiased)
+  CompareSelect(const Expr* lhs, const Expr* rhs, CompareSelectOperation cmp_op)
       : ExprNodeBase(kInt),
         lhs_(lhs),
         rhs_(rhs),
         ret_val1_(new IntImm(1)),
         ret_val2_(new IntImm(0)),
-        compare_op_(cmp_op),
-        bias_(bias) {}
+        compare_op_(cmp_op) {}
 
  private:
   const Expr* lhs_;
@@ -612,46 +610,60 @@ class TORCH_API CompareSelect : public ExprNode<CompareSelect> {
   const Expr* ret_val1_;
   const Expr* ret_val2_;
   CompareSelectOperation compare_op_;
-  CompareSelectBias bias_;
 };
+
+#define TENSOREXPR_FOR_ALL_INTRINSICS(_) \
+  _(Sin)                                 \
+  _(Cos)                                 \
+  _(Tan)                                 \
+  _(Asin)                                \
+  _(Acos)                                \
+  _(Atan)                                \
+  _(Atan2)                               \
+  _(Sinh)                                \
+  _(Cosh)                                \
+  _(Tanh)                                \
+  _(Sigmoid)                             \
+  _(Exp)                                 \
+  _(Expm1)                               \
+  _(Fabs)                                \
+  _(Log)                                 \
+  _(Log2)                                \
+  _(Log10)                               \
+  _(Log1p)                               \
+  _(Erf)                                 \
+  _(Erfc)                                \
+  _(Sqrt)                                \
+  _(Rsqrt)                               \
+  _(Pow)                                 \
+  _(Ceil)                                \
+  _(Floor)                               \
+  _(Round)                               \
+  _(Trunc)                               \
+  _(Fmod)                                \
+  _(Remainder)                           \
+  _(Lgamma)                              \
+  _(Frac)                                \
+  _(Rand)
+
+// We need more discussions on Rand. Should we consider stateful?
 
 enum IntrinsicsOp {
-  kSin,
-  kCos,
-  kTan,
-  kAsin,
-  kAcos,
-  kAtan,
-  kAtan2,
-  kSinh,
-  kCosh,
-  kTanh,
-  kSigmoid,
-  kExp,
-  kExpm1,
-  kAbs,
-  kLog,
-  kLog2,
-  kLog10,
-  kLog1p,
-  kErf,
-  kErfc,
-  kSqrt,
-  kRsqrt,
-  kPow,
-  kCeil,
-  kFloor,
-  kRound,
-  kTrunc,
-  kFmod,
-  kRemainder,
-  kLgamma,
-  kFrac,
-  kIsNan,
-  kRand, // We need more discussions on this. Should we consider stateful?
+#define DEFINE_ENUM(name) k##name,
+  TENSOREXPR_FOR_ALL_INTRINSICS(DEFINE_ENUM)
+#undef DEFINE_ENUM
 };
 
-class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
+static inline IntrinsicsOp stringToIntrinsics(const std::string& in_op) {
+#define DEFINE_CASE(name) \
+  if (in_op == #name) {   \
+    return k##name;       \
+  }
+  TENSOREXPR_FOR_ALL_INTRINSICS(DEFINE_CASE)
+  throw std::runtime_error("invalid op type: " + in_op);
+}
+
+class Intrinsics : public CallNode<Intrinsics> {
  public:
   static ExprHandle make(IntrinsicsOp op_type, const ExprHandle& v1) {
     return ExprHandle(new Intrinsics(op_type, v1.node()));
@@ -682,83 +694,20 @@ class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
     return op_type_;
   }
 
-  std::string func_name() const {
-    switch (op_type()) {
-      case kSin:
-        return "sin";
-      case kCos:
-        return "cos";
-      case kTan:
-        return "tan";
-      case kAsin:
-        return "asin";
-      case kAcos:
-        return "acos";
-      case kAtan:
-        return "atan";
-      case kAtan2:
-        return "atan2";
-      case kSinh:
-        return "sinh";
-      case kCosh:
-        return "cosh";
-      case kTanh:
-        return "tanh";
-      case kSigmoid:
-        return "sigmoid";
-      case kExp:
-        return "exp";
-      case kAbs:
-        return "abs";
-      case kLog:
-        return "log";
-      case kLog2:
-        return "log2";
-      case kLog10:
-        return "log10";
-      case kLog1p:
-        return "log1p";
-      case kErf:
-        return "erf";
-      case kSqrt:
-        return "sqrt";
-      case kRsqrt:
-        return "rsqrt";
-      case kPow:
-        return "pow";
-      case kCeil:
-        return "ceil";
-      case kFloor:
-        return "floor";
-      case kRound:
-        return "round";
-      case kTrunc:
-        return "trunc";
-      case kRand:
-        return "rand";
-      case kFmod:
-        return "fmod";
-      case kRemainder:
-        return "remainder";
-      case kLgamma:
-        return "lgamma";
-      case kExpm1:
-        return "expm1";
-      case kErfc:
-        return "erfc";
-      case kFrac:
-        return "frac";
-      case kIsNan:
-        return "isnan";
-      default:
-        throw std::runtime_error(
-            "invalid op_type: " + c10::to_string(op_type()));
-    }
+  std::string func_name() const override {
+#define DEFINE_INTRINSIC_CASE(name) \
+  case k##name:                     \
+    return #name;
+
+    switch (op_type()) { TENSOREXPR_FOR_ALL_INTRINSICS(DEFINE_INTRINSIC_CASE) }
+#undef DEFINE_INTRINSIC_CASE
+    throw std::runtime_error("invalid op type: " + c10::to_string(op_type()));
   }
 
+  using BaseClass = CallNode<Intrinsics>;
+
   Intrinsics(IntrinsicsOp op_type, Dtype dtype)
-      : ExprNodeBase(IntrinsicsDtype(op_type, dtype)),
-        params_({}),
+      : BaseClass(IntrinsicsDtype(op_type, dtype), kIntrinsics, {}),
         op_type_(op_type) {
     if (OpArgCount(op_type) != 0) {
       throw malformed_input("bad arg count in Intrinsics");
@@ -766,8 +715,7 @@ class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
   }
 
   Intrinsics(IntrinsicsOp op_type, const Expr* v1)
-      : ExprNodeBase(IntrinsicsDtype(op_type, v1->dtype())),
-        params_({v1}),
+      : BaseClass(IntrinsicsDtype(op_type, v1->dtype()), kIntrinsics, {v1}),
         op_type_(op_type) {
     if (OpArgCount(op_type) != 1) {
       throw malformed_input("bad arg count in Intrinsics");
@@ -775,8 +723,10 @@ class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
   }
 
   Intrinsics(IntrinsicsOp op_type, const Expr* v1, const Expr* v2)
-      : ExprNodeBase(IntrinsicsDtype(op_type, v1->dtype(), v2->dtype())),
-        params_({v1, v2}),
+      : BaseClass(
+            IntrinsicsDtype(op_type, v1->dtype(), v2->dtype()),
+            kIntrinsics,
+            {v1, v2}),
         op_type_(op_type) {
     if (OpArgCount(op_type) != 2) {
       throw malformed_input("bad arg count in Intrinsics");
@@ -784,8 +734,7 @@ class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
   }
 
   Intrinsics(IntrinsicsOp op_type, const std::vector<const Expr*>& params)
-      : ExprNodeBase(IntrinsicsDtype(op_type, params)),
-        params_(params),
+      : BaseClass(IntrinsicsDtype(op_type, params), kIntrinsics, params),
         op_type_(op_type) {
     if (OpArgCount(op_type) != nparams()) {
       throw malformed_input("bad arg count in Intrinsics");
@@ -796,26 +745,23 @@ class TORCH_API Intrinsics : public ExprNode<Intrinsics> {
     return op_type_ != kRand;
   }
 
-  int nparams() const {
-    return params_.size();
-  }
-
-  const Expr* param(int index) const {
-    return params_[index];
-  }
-  const std::vector<const Expr*>& params() const {
-    return params_;
-  }
-
  private:
-  static int OpArgCount(IntrinsicsOp op_type);
-  static Dtype IntrinsicsDtype(IntrinsicsOp op_type, Dtype dt1);
-  static Dtype IntrinsicsDtype(IntrinsicsOp op_type, Dtype dt1, Dtype dt2);
-  static Dtype IntrinsicsDtype(
+  TORCH_API static int OpArgCount(IntrinsicsOp op_type);
+
+  const Expr* DefaultMutator(
+      const std::vector<const Expr*>& new_params) const override {
+    return new Intrinsics(this->op_type(), new_params);
+  }
+
+  TORCH_API static Dtype IntrinsicsDtype(IntrinsicsOp op_type, Dtype dt1);
+  TORCH_API static Dtype IntrinsicsDtype(
+      IntrinsicsOp op_type,
+      Dtype dt1,
+      Dtype dt2);
+  TORCH_API static Dtype IntrinsicsDtype(
       IntrinsicsOp op_type,
       const std::vector<const Expr*>& params);
 
-  std::vector<const Expr*> params_;
   IntrinsicsOp op_type_;
 };
 
@@ -823,6 +769,8 @@ class Polynomial;
 class Term;
 class MaxTerm;
 class MinTerm;
+
+class FunctionCall;
 
 TORCH_API std::vector<const Expr*> ExprHandleVectorToExprVector(
     const std::vector<ExprHandle>&);
