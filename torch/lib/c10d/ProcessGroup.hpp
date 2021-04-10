@@ -19,8 +19,6 @@
 // *************************************************************************
 
 constexpr auto kNoTimeout = std::chrono::milliseconds(0);
-constexpr auto kProcessGroupDefaultTimeout =
-    std::chrono::milliseconds(10 * 1000);
 
 namespace c10d {
 
@@ -45,10 +43,10 @@ enum class OpType : std::uint8_t {
 };
 
 // Converts OpType to human readable string.
-std::string opTypeToString(OpType opType);
+TORCH_API std::string opTypeToString(OpType opType);
 
 // Whether or not an OP is an p2p op (SEND, RECV, RECVANYSOURCE)
-bool isP2POp(OpType opType);
+TORCH_API bool isP2POp(OpType opType);
 
 // ProcessGroup is a base class that captures collective and point to
 // point communication in a fixed set of processes.
@@ -70,20 +68,18 @@ bool isP2POp(OpType opType);
 // process group to find each other (referred to as rendezvous from
 // hereon)
 //
-class ProcessGroup : public torch::CustomClassHolder {
+class TORCH_API ProcessGroup {
  public:
+
   // Please do not use ProcessGroup::Work API, it is going away, to be
   // replaced by ivalue::Future.
   // Python binding for this class might change, please do not assume
   // this will be bound using pybind.
-  class Work : public torch::CustomClassHolder {
+  class TORCH_API Work {
    public:
-    Work(
-        int rank = -1,
-        OpType opType = OpType::UNKNOWN,
-        const char* profilingTitle = nullptr,
-        const c10::optional<std::vector<at::Tensor>>& inputTensors =
-            c10::nullopt);
+    Work();
+
+    Work(int rank, OpType opType);
 
     virtual ~Work();
 
@@ -160,25 +156,6 @@ class ProcessGroup : public torch::CustomClassHolder {
 
     // Operation type that this work object refers to.
     OpType opType_;
-
-    // When profiling, the callback to record end of operation event. This
-    // callback needs to be called when collective operation is complete.
-    std::function<void()> recordFunctionEndCallback_;
-  };
-
-  // ProcessGroup Options is a base struct that defines the basic options
-  // when constructing a ProcessGroup. Each ProcessGroup subclass should
-  // extend this struct and define its options if it wants to provide more
-  // config options (beyond basic ones defined here) to end user.
-  struct Options : torch::CustomClassHolder {
-    explicit Options(std::chrono::milliseconds timeout, std::string backend)
-        : timeout(timeout), backend(backend) {}
-    virtual ~Options() = default;
-
-    std::chrono::milliseconds timeout;
-
-    // backend name
-    const std::string backend;
   };
 
   explicit ProcessGroup(int rank, int size);
@@ -192,29 +169,25 @@ class ProcessGroup : public torch::CustomClassHolder {
     return size_;
   }
 
-  virtual const std::string getBackendName() const {
-    return "undefined";
-  }
-
-  virtual c10::intrusive_ptr<ProcessGroup::Work> broadcast(
+  virtual std::shared_ptr<ProcessGroup::Work> broadcast(
       std::vector<at::Tensor>& data,
       const BroadcastOptions& opts = BroadcastOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> allreduce(
+  virtual std::shared_ptr<ProcessGroup::Work> allreduce(
       std::vector<at::Tensor>& data,
       const AllreduceOptions& opts = AllreduceOptions()) = 0;
 
   // This will be moved out of ProcessGroup, do not add dependencies on this
   // function.
-  virtual c10::intrusive_ptr<ProcessGroup::Work> allreduce_coalesced(
+  virtual std::shared_ptr<ProcessGroup::Work> allreduce_coalesced(
       std::vector<at::Tensor>& tensors,
       const AllreduceCoalescedOptions& opts = AllreduceCoalescedOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> reduce(
+  virtual std::shared_ptr<ProcessGroup::Work> reduce(
       std::vector<at::Tensor>& tensors,
       const ReduceOptions& opts = ReduceOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> allgather(
+  virtual std::shared_ptr<ProcessGroup::Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
       const AllgatherOptions& opts = AllgatherOptions()) = 0;
@@ -222,7 +195,7 @@ class ProcessGroup : public torch::CustomClassHolder {
   // Gathers a single tensor inputBuffer into a single buffer outputBuffer that
   // is interpreted as a contigious collection of size inputBuffer * WORLD_SIZE.
   // For implementers of ProcessGroup API and advanced users only.
-  virtual c10::intrusive_ptr<ProcessGroup::Work> allgather_base(
+  virtual std::shared_ptr<ProcessGroup::Work> allgather_base(
       at::Tensor& outputBuffer,
       at::Tensor& inputBuffer,
       const AllgatherOptions& opts = AllgatherOptions()) = 0;
@@ -231,27 +204,27 @@ class ProcessGroup : public torch::CustomClassHolder {
   // * do not add dependencies on this function,
   // * do not implement it in your ProcessGroup, implement allgather_base
   //   instead.
-  virtual c10::intrusive_ptr<ProcessGroup::Work> allgather_coalesced(
+  virtual std::shared_ptr<ProcessGroup::Work> allgather_coalesced(
       std::vector<std::vector<at::Tensor>>& outputTensorLists,
       std::vector<at::Tensor>& inputTensors,
       const AllgatherOptions& opts = AllgatherOptions());
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> gather(
+  virtual std::shared_ptr<ProcessGroup::Work> gather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
       const GatherOptions& opts = GatherOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> scatter(
+  virtual std::shared_ptr<ProcessGroup::Work> scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ScatterOptions& opts = ScatterOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> reduce_scatter(
+  virtual std::shared_ptr<ProcessGroup::Work> reduce_scatter(
       std::vector<at::Tensor>& outputTensors,
       std::vector<std::vector<at::Tensor>>& inputTensors,
       const ReduceScatterOptions& opts = ReduceScatterOptions()) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> alltoall_base(
+  virtual std::shared_ptr<ProcessGroup::Work> alltoall_base(
       at::Tensor& outputTensor,
       at::Tensor& inputTensor,
       std::vector<int64_t>& outputSplitSizes,
@@ -260,38 +233,28 @@ class ProcessGroup : public torch::CustomClassHolder {
     throw std::runtime_error("ProcessGroup does not support alltoall");
   }
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> alltoall(
+  virtual std::shared_ptr<ProcessGroup::Work> alltoall(
       std::vector<at::Tensor>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
       const AllToAllOptions& opts = AllToAllOptions()) {
     throw std::runtime_error("ProcessGroup does not support alltoall");
   }
 
-  virtual void monitoredBarrier(
-      const BarrierOptions& /* unused */, bool /* unused */ = false ) {
-    auto backendName = getBackendName();
-    throw std::runtime_error(
-        c10::str("ProcessGroup ",
-        backendName,
-        " does not support monitoredBarrier, only GLOO supports monitored barrier.")
-    );
-  }
-
-  virtual c10::intrusive_ptr<ProcessGroup::Work> send(
+  virtual std::shared_ptr<ProcessGroup::Work> send(
       std::vector<at::Tensor>& tensors,
       int dstRank,
       int tag) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> recv(
+  virtual std::shared_ptr<ProcessGroup::Work> recv(
       std::vector<at::Tensor>& tensors,
       int srcRank,
       int tag) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> recvAnysource(
+  virtual std::shared_ptr<ProcessGroup::Work> recvAnysource(
       std::vector<at::Tensor>& tensors,
       int tag) = 0;
 
-  virtual c10::intrusive_ptr<ProcessGroup::Work> barrier(
+  virtual std::shared_ptr<ProcessGroup::Work> barrier(
       const BarrierOptions& opts = BarrierOptions()) = 0;
 
  protected:
