@@ -16,14 +16,6 @@ TorchScript
 
     jit_language_reference
 
-
-.. toctree::
-    :maxdepth: 1
-    :caption: Language Reference V2
-
-    jit_language_reference_v2
-
-
 .. contents:: :local:
     :depth: 2
 
@@ -50,11 +42,9 @@ Creating TorchScript Code
 
 .. autosummary::
     :toctree: generated
-    :nosignatures:
 
     script
     trace
-    script_if_tracing
     trace_module
     fork
     wait
@@ -65,9 +55,6 @@ Creating TorchScript Code
     load
     ignore
     unused
-    isinstance
-    Attribute
-    annotate
 
 Mixing Tracing and Scripting
 ----------------------------
@@ -218,8 +205,8 @@ Disable JIT for Debugging
 
 Setting the environment variable ``PYTORCH_JIT=0`` will disable all script
 and tracing annotations. If there is hard-to-debug error in one of your
-TorchScript models, you can use this flag to force everything to run using native
-Python. Since TorchScript (scripting and tracing) is disabled with this flag,
+TorchScript model, you can use this flag to force everything to run using native
+Python. Since TorchScript (scripting and tracing) are disabled with this flag,
 you can use tools like ``pdb`` to debug the model code.  For example::
 
     @torch.jit.script
@@ -249,7 +236,6 @@ and we will be able to step into the :func:`@torch.jit.script
 TorchScript compiler for a specific function, see
 :func:`@torch.jit.ignore <torch.jit.ignore>`.
 
-.. _inspecting-code:
 
 Inspecting Code
 ~~~~~~~~~~~~~~~
@@ -301,8 +287,6 @@ You can use this to ensure TorchScript (tracing or scripting) has captured
 your model code correctly.
 
 
-.. _interpreting-graphs:
-
 Interpreting Graphs
 ~~~~~~~~~~~~~~~~~~~
 TorchScript also has a representation at a lower level than the code pretty-
@@ -333,7 +317,7 @@ including control flow operators for loops and conditionals. As an example:
 
     ...
 
-``graph`` follows the same rules described in the :ref:`inspecting-code` section
+``graph`` follows the same rules described in the `Inspecting Code`_ section
 with regard to ``forward`` method lookup.
 
 The example script above produces the graph::
@@ -558,18 +542,18 @@ best practices?
 
       cpu_model = gpu_model.cpu()
       sample_input_cpu = sample_input_gpu.cpu()
-      traced_cpu = torch.jit.trace(cpu_model, sample_input_cpu)
-      torch.jit.save(traced_cpu, "cpu.pt")
+      traced_cpu = torch.jit.trace(traced_cpu, sample_input_cpu)
+      torch.jit.save(traced_cpu, "cpu.pth")
 
-      traced_gpu = torch.jit.trace(gpu_model, sample_input_gpu)
-      torch.jit.save(traced_gpu, "gpu.pt")
+      traced_gpu = torch.jit.trace(traced_gpu, sample_input_gpu)
+      torch.jit.save(traced_gpu, "gpu.pth")
 
       # ... later, when using the model:
 
       if use_gpu:
-        model = torch.jit.load("gpu.pt")
+        model = torch.jit.load("gpu.pth")
       else:
-        model = torch.jit.load("cpu.pt")
+        model = torch.jit.load("cpu.pth")
 
       model(input)
 
@@ -630,15 +614,6 @@ Q: I would like to trace module's method but I keep getting this error:
       - On the other hand, invoking ``trace`` with module's instance (e.g. ``my_module``) creates a new module and correctly copies parameters into the new module, so they can accumulate gradients if required.
 
     To trace a specific method on a module, see :func:`torch.jit.trace_module <torch.jit.trace_module>`
-
-Known Issues
----------------
-
-If you're using ``Sequential`` with TorchScript, the inputs of some
-of the ``Sequential`` submodules may be falsely inferred to be
-``Tensor``, even if they're annotated otherwise. The canonical
-solution is to subclass ``nn.Sequential`` and redeclare ``forward``
-with the input typed correctly.
 
 Appendix
 --------

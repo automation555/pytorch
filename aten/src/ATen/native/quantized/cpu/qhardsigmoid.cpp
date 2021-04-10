@@ -39,18 +39,13 @@ Tensor qnnpack_hardsigmoid(Tensor input) {
     std::numeric_limits<uint8_t>::max(), // output max
     0, // flags
     &hardsigmoid_op);
-
-  std::unique_ptr<pytorch_qnnp_operator, QnnpackOperatorDeleter>
-      qnnpack_uniq_ptr(hardsigmoid_op);
-
   TORCH_INTERNAL_ASSERT(createStatus == pytorch_qnnp_status_success,
                         "failed to create QNNPACK Hardsigmoid operator");
   Tensor qy = at::_empty_affine_quantized(
     input_contig.sizes(),
-    at::device(kCPU).dtype(input_contig.dtype()),
+    input_contig.options(),
     o_scale,
-    o_zero_point,
-    input_contig.suggest_memory_format());
+    o_zero_point);
 
   const pytorch_qnnp_status setupStatus = pytorch_qnnp_setup_hardsigmoid_nc_q8(
     hardsigmoid_op,
@@ -75,7 +70,7 @@ Tensor qnnpack_hardsigmoid(Tensor input) {
 #endif // USE_PYTORCH_QNNPACK
 
 } // namespace
-Tensor hardsigmoid_quantized_cpu(const Tensor& qx) {
+Tensor quantized_hardsigmoid(const Tensor& qx) {
 #ifdef USE_PYTORCH_QNNPACK
   if (at::globalContext().qEngine() == at::QEngine::QNNPACK &&
       qx.scalar_type() == kQUInt8) {

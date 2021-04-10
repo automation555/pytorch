@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/api/module.h>
-
 #include <ATen/record_function.h>
 #include <c10/util/Exception.h>
 #include <torch/csrc/autograd/generated/variable_factories.h>
@@ -8,8 +7,6 @@
 #include <torch/csrc/jit/frontend/schema_matching.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/freeze_module.h>
-#include <torch/csrc/jit/passes/frozen_graph_optimizations.h>
 #include <torch/csrc/jit/passes/inliner.h>
 #include <torch/csrc/jit/runtime/operator.h>
 
@@ -78,7 +75,7 @@ void Module::to(at::Device device, bool non_blocking) {
 }
 
 void module_state_to(
-    const autograd::Variable& variable,
+    autograd::Variable variable,
     const c10::optional<at::Device>& device,
     const c10::optional<at::ScalarType>& dtype,
     bool non_blocking) {
@@ -110,57 +107,15 @@ Module Method::owner() const {
   return Module(owner_);
 }
 void Method::run(Stack& stack) {
-  stack.insert(stack.begin(), owner()._ivalue()); // self
+  stack.insert(stack.begin(), owner()._ivalue());
   RECORD_TORCHSCRIPT_FUNCTION(name(), stack);
   function_->run(stack);
 }
 
 IValue Method::operator()(std::vector<IValue> stack, const Kwargs& kwargs) {
-  stack.insert(stack.begin(), owner()._ivalue()); // self
-  RECORD_TORCHSCRIPT_FUNCTION(name(), stack);
-  return (*function_)(std::move(stack), kwargs);
-}
-
-c10::intrusive_ptr<c10::ivalue::Future> Method::run_async(
-    std::vector<IValue> stack,
-    const Kwargs& kwargs,
-    TaskLauncher taskLauncher) {
   stack.insert(stack.begin(), owner()._ivalue());
   RECORD_TORCHSCRIPT_FUNCTION(name(), stack);
-
-  function_->getSchema().checkAndNormalizeInputs(stack, kwargs);
-  return function_->runAsync(stack, std::move(taskLauncher));
-}
-
-IValue Module::operator()(std::vector<IValue> inputs) {
-  const auto& pre_forward_hooks = type()->getForwardPreHooks();
-  const auto& forward_hooks = type()->getForwardHooks();
-
-  // call forward pre_hooks
-  for (const auto& pre_hook : pre_forward_hooks) {
-    auto tuple_input = c10::ivalue::Tuple::create(inputs);
-    IValue result = Method(_ivalue(), pre_hook)({tuple_input});
-    if (!result.isNone()) {
-      if (result.isTuple()) {
-        inputs = result.toTuple()->elements();
-      } else {
-        inputs = {result};
-      }
-    }
-  }
-
-  // call forward
-  auto outputs = forward(inputs);
-
-  // call forward hooks
-  for (const auto& hook : forward_hooks) {
-    auto tuple_input = c10::ivalue::Tuple::create(inputs);
-    auto hook_result = Method(_ivalue(), hook)({tuple_input, outputs});
-    if (!hook_result.isNone()) {
-      outputs = hook_result;
-    }
-  }
-  return outputs;
+  return (*function_)(std::move(stack), kwargs);
 }
 
 void Module::clone_method(
@@ -248,29 +203,18 @@ Module Module::clone_impl(
   size_t N = type()->numAttributes();
   for (size_t i = 0; i < N; ++i) {
     IValue s = _ivalue()->getSlot(i);
-    std::string attr_name = type()->getAttributeName(i);
-    TypePtr attr_type = type()->getAttribute(i);
-    if (attr_type->is_module()) {
+    if (type()->getAttribute(i)->is_module()) {
       const Module& orig = Module(s.toObject());
       Module cloned = orig.clone_impl(type_remap, inplace, memo);
       type_remap[orig.type()] = cloned.type();
-      // NOTE: why do we need to manually setattr on object instead of using
-      // register_module here? because the attr can be a module interface
-      // type and hold a Module object still. register_module will not let us
-      // correctly set up the type for this attr, so we had to do this manually.
-      // In the case it's an interface type, the type will be shared by the new
-      // cloned instance in the same compilation unit bc it only contains a list
-      // of functionSchema
-      r.type()->addOrCheckAttribute(
-          attr_name, attr_type->cast<ClassType>() ? cloned.type() : attr_type);
-      r._ivalue()->setAttr(attr_name, cloned._ivalue());
+      r.register_module(type()->getAttributeName(i), cloned);
     } else {
       // this adds new slot and creates a new attribute for the underlying type
       // if the type is not already cloned, otherwise it will only add a new
       // slot and typecheck
       r.register_attribute(
           type()->getAttributeName(i),
-          attr_type,
+          type()->getAttribute(i),
           // we'll deepcopy the IValue in non inplace option
           inplace ? s : s.deepcopy(memo),
           type()->is_parameter(i),
@@ -287,14 +231,6 @@ Module Module::clone_impl(
     // clone methods, remapping the types to the cloned ones.
     for (auto& fn : type()->methods()) {
       r.clone_method(*this, *fn, type_remap);
-    }
-
-    // Execute __setstate__(__getstate__()) to initialize custom class members.
-    if (auto setstate_method = r.find_method("__setstate__")) {
-      auto getstate_method = r.find_method("__getstate__");
-      TORCH_INTERNAL_ASSERT(getstate_method, "expect __getstate__");
-      auto state = (*getstate_method)(Stack{});
-      (*setstate_method)(Stack{state});
     }
   }
   return r;
@@ -336,21 +272,6 @@ IValue Module::create_class(const c10::QualifiedName& name, Stack stack) const {
   classType->getMethod("__init__").operator()(std::move(stackWithSelf));
 
   return obj;
-}
-
-Module freeze(
-    const Module& module,
-    c10::optional<std::vector<std::string>> preserved_attrs,
-    bool optimize_numerics) {
-  TORCH_CHECK(
-      module.is_training(),
-      "Freezing is currently only implemented for modules in eval mode. Please call .eval() before freezing");
-
-  Module out_mod = freeze_module(
-      module, preserved_attrs.value_or(std::vector<std::string>({})));
-  auto graph = module.get_method("forward").graph();
-  OptimizeFrozenGraph(graph, optimize_numerics);
-  return out_mod;
 }
 
 buffer_list Module::buffers(bool recurse) const {
@@ -396,7 +317,8 @@ void Module::apply(const std::function<void(Module&)>& fn) {
 std::string Module::dump_to_str(
     bool print_method_bodies,
     bool print_attr_values,
-    bool print_param_values) const {
+    bool print_param_values,
+    int level = 0) const {
   std::stringstream ss;
   std::stringstream parameters_ss;
   std::stringstream attributes_ss;
@@ -443,18 +365,16 @@ std::string Module::dump_to_str(
   ss << "  }" << std::endl;
   ss << "  submodules {" << std::endl;
   for (const NameModule& s : named_children()) {
-    // We do 4 spaces here, because one level of indentation comes from
-    // 'submodules' scope and the other one goes from a specific submodule we're
-    // printing.
-    ss << torch::jit::jit_log_prefix(
-        "    ",
-        s.value.dump_to_str(
-            print_method_bodies, print_attr_values, print_param_values));
+    // We do level + 2, because one level of indentation comes from 'submodules'
+    // scope and the other one goes from a specific submodule we're printing.
+    ss << s.value.dump_to_str(
+        print_method_bodies, print_attr_values, print_param_values, level + 2);
   }
   ss << "  }" << std::endl;
   ss << "}" << std::endl;
 
-  return ss.str();
+  std::string indent(2 * level, ' ');
+  return torch::jit::jit_log_prefix(indent, ss.str());
 }
 
 void Module::dump(

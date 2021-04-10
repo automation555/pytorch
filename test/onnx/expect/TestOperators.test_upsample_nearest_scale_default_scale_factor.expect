@@ -1,11 +1,11 @@
 ir_version: 6
 producer_name: "pytorch"
-producer_version: "CURRENT_VERSION"
+producer_version: "XXX"
 graph {
   node {
-    input: "x"
-    input: "5"
-    output: "4"
+    input: "input"
+    input: "9"
+    output: "6"
     name: "Upsample_0"
     op_type: "Upsample"
     attribute {
@@ -16,13 +16,13 @@ graph {
   }
   name: "torch-jit-export"
   initializer {
-    dims: 4
+    dims: 3
     data_type: 1
-    name: "5"
-    raw_data: "\000\000\200?\000\000\200?\000\000\000@\000\000\000@"
+    name: "9"
+    raw_data: "\000\000\200?\000\000\200?\000\000\000@"
   }
   input {
-    name: "x"
+    name: "input"
     type {
       tensor_type {
         elem_type: 1
@@ -44,7 +44,7 @@ graph {
     }
   }
   output {
-    name: "4"
+    name: "6"
     type {
       tensor_type {
         elem_type: 1

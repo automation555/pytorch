@@ -14,8 +14,7 @@ are much faster in ``float16``. Other ops, like reductions, often require the dy
 range of ``float32``.  Mixed precision tries to match each op to its appropriate datatype.
 
 Ordinarily, "automatic mixed precision training" uses :class:`torch.cuda.amp.autocast` and
-:class:`torch.cuda.amp.GradScaler` together, as shown in the :ref:`Automatic Mixed Precision examples<amp-examples>`
-and `Automatic Mixed Precision recipe <https://pytorch.org/tutorials/recipes/recipes/amp_recipe.html>`_.
+:class:`torch.cuda.amp.GradScaler` together, as shown in the :ref:`Automatic Mixed Precision examples<amp-examples>`.
 However, :class:`autocast` and :class:`GradScaler` are modular, and may be used separately if desired.
 
 .. contents:: :local:
@@ -104,21 +103,17 @@ Ops that can autocast to ``float16``
 ``baddbmm``,
 ``bmm``,
 ``chain_matmul``,
-``multi_dot``,
 ``conv1d``,
 ``conv2d``,
 ``conv3d``,
 ``conv_transpose1d``,
 ``conv_transpose2d``,
 ``conv_transpose3d``,
-``GRUCell``,
 ``linear``,
-``LSTMCell``,
 ``matmul``,
 ``mm``,
 ``mv``,
-``prelu``,
-``RNNCell``
+``prelu``
 
 Ops that can autocast to ``float32``
 """"""""""""""""""""""""""""""""""""
@@ -192,7 +187,6 @@ autocast casts all inputs to ``float32`` and runs the op in ``float32``.
 ``dot``,
 ``equal``,
 ``index_put``,
-``scatter_add``,
 ``stack``,
 ``tensordot``
 

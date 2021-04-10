@@ -46,18 +46,13 @@ Tensor qnnpack_tanh(Tensor input) {
     std::numeric_limits<uint8_t>::max() /* output max */,
     0 /* flags */,
     &tanh_op);
-
-  std::unique_ptr<pytorch_qnnp_operator, QnnpackOperatorDeleter>
-      qnnpack_uniq_ptr(tanh_op);
-
   TORCH_INTERNAL_ASSERT(createStatus == pytorch_qnnp_status_success,
                         "failed to create QNNPACK TanH operator");
   qy = at::_empty_affine_quantized(
     input_contig.sizes(),
-    at::device(kCPU).dtype(input_contig.dtype()),
+    input.options(),
     output_scale,
-    output_zero_point,
-    input_contig.suggest_memory_format());
+    output_zero_point);
 
   const pytorch_qnnp_status setupStatus = pytorch_qnnp_setup_tanh_nc_q8(
     tanh_op,
@@ -81,7 +76,7 @@ Tensor qnnpack_tanh(Tensor input) {
 }
 #endif  // USE_PYTORCH_QNNPACK
 
-Tensor tanh_quantized_cpu(const Tensor& qx) {
+Tensor quantized_tanh(const Tensor& qx) {
 #ifdef USE_PYTORCH_QNNPACK
   if (at::globalContext().qEngine() == at::QEngine::QNNPACK &&
       qx.scalar_type() == kQUInt8) {

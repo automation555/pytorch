@@ -120,10 +120,14 @@ public:
   }
 
   int priority() const {
+    #ifndef __HIP_PLATFORM_HCC__
       DeviceGuard guard{stream_.device()};
       int priority = 0;
       C10_CUDA_CHECK(cudaStreamGetPriority(stream(), &priority));
       return priority;
+    #else
+      AT_ERROR("cuStreamGetPriority with HIP is not supported");
+    #endif
   }
 
   /// Explicit conversion to cudaStream_t.
@@ -150,9 +154,10 @@ public:
   }
 
   static std::tuple<int, int> priority_range() {
+    #ifndef __HIP_PLATFORM_HCC__
       // Note: this returns the range of priority **supported by PyTorch**, not
       // the range of priority **supported by CUDA**. The former is a subset of
-      // the latter. Currently PyTorch only supports 0 and -1, which are "low" and
+      // the latter. Curently PyTorch only supports 0 and -1, which are "low" and
       // "high" priority.
       int least_priority, greatest_priority;
       C10_CUDA_CHECK(
@@ -160,6 +165,9 @@ public:
       TORCH_INTERNAL_ASSERT(least_priority >= 0, "Unexpected CUDA stream priority range");
       TORCH_INTERNAL_ASSERT(greatest_priority <= -1, "Unexpected CUDA stream priority range");
       return std::make_tuple(0, -1);
+    #else
+      AT_ERROR("cuDeviceGetStreamPriorityRange with HIP is not supported");
+    #endif
   }
 
   // Deleted for now; use CUDAEvent::block instead
@@ -179,7 +187,7 @@ private:
  * isHighPriority to true, or a stream for a specific device by setting device
  * (defaulting to the current CUDA stream.)
  */
-TORCH_API CUDAStream
+CAFFE2_API CUDAStream
 getStreamFromPool(const bool isHighPriority = false, DeviceIndex device = -1);
 
 /**
@@ -188,7 +196,7 @@ getStreamFromPool(const bool isHighPriority = false, DeviceIndex device = -1);
  * where most computation occurs when you aren't explicitly using
  * streams.
  */
-TORCH_API CUDAStream getDefaultCUDAStream(DeviceIndex device_index = -1);
+CAFFE2_API CUDAStream getDefaultCUDAStream(DeviceIndex device_index = -1);
 
 /**
  * Get the current CUDA stream, for the passed CUDA device, or for the
@@ -197,7 +205,7 @@ TORCH_API CUDAStream getDefaultCUDAStream(DeviceIndex device_index = -1);
  * be different if someone called 'setCurrentCUDAStream' or used 'StreamGuard'
  * or 'CUDAStreamGuard'.
  */
-TORCH_API CUDAStream getCurrentCUDAStream(DeviceIndex device_index = -1);
+CAFFE2_API CUDAStream getCurrentCUDAStream(DeviceIndex device_index = -1);
 
 /**
  * Set the current stream on the device of the passed in stream to be
@@ -209,7 +217,7 @@ TORCH_API CUDAStream getCurrentCUDAStream(DeviceIndex device_index = -1);
  * (which will switch both your current device and current stream in the way you
  * expect, and reset it back to its original state afterwards).
  */
-TORCH_API void setCurrentCUDAStream(CUDAStream stream);
+CAFFE2_API void setCurrentCUDAStream(CUDAStream stream);
 
 C10_API std::ostream& operator<<(std::ostream& stream, const CUDAStream& s);
 
