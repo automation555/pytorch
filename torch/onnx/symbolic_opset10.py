@@ -20,44 +20,6 @@ from sys import maxsize
 # release on 04/24/19
 
 
-def div(g, self, other, *args):
-    if len(args) == 0:
-        return torch.onnx.symbolic_opset9.true_divide(g, self, other)
-    else:
-        return _div_rounding_mode(g, self, other, *args)
-
-
-@parse_args('v', 'v', 's')
-def _div_rounding_mode(g, self, other, rounding_mode):
-    if rounding_mode == 'floor':
-        return _floor_divide(g, self, other)
-    else:
-        return torch.onnx.symbolic_opset9._div_rounding_mode(g, self, other, rounding_mode)
-
-
-def _floor_divide(g, self, other):
-    if sym_help._is_fp(self) or sym_help._is_fp(other):
-        out = torch.onnx.symbolic_opset9.true_divide(g, self, other)
-        return g.op('Floor', out)
-    else:
-        # Integer division does trunction rounding
-        div = g.op('Div', self, other)
-        # Division is negative if: self < 0 != other < 0
-        zero = g.op('Constant', value_t=torch.tensor(0, dtype=torch.int64))
-        negative = g.op('Xor',
-                        g.op('Less', self, zero),
-                        g.op('Less', other, zero))
-
-        # For negative numbers with self % other != 0, subtract 1 to round down instead of up
-        mod = g.op('Mod', self, other, fmod_i=0)
-        fixup_mask = g.op('And', negative,
-                          g.op('Not', g.op('Equal', mod, zero)))
-
-        one = g.op('Constant', value_t=torch.tensor(1, dtype=torch.int64))
-        fixup = g.op('Sub', div, one)
-        return g.op('Where', fixup_mask, fixup, div)
-
-
 @parse_args('v', 'i', 'i', 'none')
 def sort(g, self, dim, decending, out=None):
     return sym_help._sort_helper(g, self, dim, decending=decending, out=out)
@@ -183,7 +145,7 @@ def _slice(g, input, axes, starts, ends, steps=None, dynamic_slice=False):
         assert len(starts) == len(ends)
         assert len(starts) == len(axes)
         assert steps is None or len(starts) == len(steps)
-        if len(starts) == 1 and starts[0] == 0 and ends[0] == 9223372036854775807 \
+        if len(starts) == 1 and starts[0] == 0 and ends[0] == 9223372036854775807\
            and (steps is None or (len(steps) == 1 and steps[0] == 1)):
             return input
         axes = g.op("Constant", value_t=torch.tensor(axes))
@@ -197,10 +159,10 @@ def _slice(g, input, axes, starts, ends, steps=None, dynamic_slice=False):
 
 def slice(g, self, *args):
     if len(args) == 4:
-        # aten::slice(Tensor self, int dim, int start, int end, int step) -> Tensor
+        # aten::slice(Tensor self, int dim, int? start=None, int? end=None, int step=1) -> Tensor
         dim, start, end, step = args
     elif len(args) == 3:
-        # aten::slice(t[] l, int start, int end, int step) -> t[]
+        # aten::slice(t[] l, int? start=None, int? end=None, int step=1) -> t[]
         start, end, step = args
         dim = 0
     else:
@@ -211,10 +173,18 @@ def slice(g, self, *args):
        (not isinstance(end, int) and end.node().kind() != 'onnx::Constant') or
        (not isinstance(dim, int) and dim.node().kind() != 'onnx::Constant')):
         dynamic_slice = True
+        if start.type().kind() == "NoneType":
+            start = g.op("Constant", value_t=torch.tensor(0))
+        if end.type().kind() == "NoneType":
+            end = g.op("Constant", value_t=torch.tensor(9223372036854775807))
     else:
         start = [sym_help._parse_arg(start, 'i')]
         end = [sym_help._parse_arg(end, 'i')]
         dim = [sym_help._parse_arg(dim, 'i')]
+        if start[0] is None:
+            start[0] = 0
+        if end[0] is None:
+            end = 9223372036854775807
         dynamic_slice = False
     return sym_help._slice_helper(g, self, axes=dim, starts=start, ends=end, steps=[step], dynamic_slice=dynamic_slice)
 
@@ -296,7 +266,3 @@ def fake_quantize_per_tensor_affine(g, inputs, scale, zero_point, quant_min=-128
     zero_point_dtype = torch.int8 if quant_min == -128 else torch.uint8
     zero_point = torch.tensor(zero_point, dtype=zero_point_dtype)  # ONNX requires zero_point to be tensor
     return g.op("DequantizeLinear", g.op("QuantizeLinear", inputs, scale, zero_point), scale, zero_point)
-
-def isinf(g, input):
-    from torch.onnx.symbolic_opset9 import _cast_Double  # type: ignore
-    return g.op("IsInf", _cast_Double(g, input, False))  # type: ignore
