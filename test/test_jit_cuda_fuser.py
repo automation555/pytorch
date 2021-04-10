@@ -3,15 +3,14 @@ import os
 
 import torch
 
-from torch.testing._internal.common_utils import run_tests, ProfilingMode, GRAPH_EXECUTOR, TEST_WITH_ROCM
+from torch.testing._internal.common_utils import run_tests, ProfilingMode, GRAPH_EXECUTOR
 from torch.testing._internal.codegen.random_topo_test import runDefaultTestWithSeed
 
 from test_jit import JitTestCase, RUN_CUDA
-
-from jit.test_fuser_common import TestFuserCommon  # noqa: F401
-
 import itertools
 import numpy as np
+
+from typing import List
 
 os.environ['PYTORCH_CUDA_FUSER_DISABLE_FALLBACK'] = '1'
 os.environ['PYTORCH_CUDA_FUSER_DISABLE_FMA'] = '1'
@@ -620,7 +619,6 @@ class TestCudaFuser(JitTestCase):
         self.assertTrue(self._compare("comparing output failed", o, jit_o, 1e-4))
         self.assertGraphContains(t_jit.graph_for(x, y), FUSION_GUARD)
 
-    @unittest.skipIf(TEST_WITH_ROCM, "test doesn't currently work on the ROCm stack")
     @unittest.skipIf(not RUN_CUDA, "requires CUDA")
     @unittest.skipIf(GRAPH_EXECUTOR != ProfilingMode.PROFILING,
                      "Requires fusion optimization pass to be effective")
@@ -806,6 +804,30 @@ class TestCudaFuser(JitTestCase):
         # since the output value is not used at all, the fusion operator should
         # have been optimized away
         self.assertGraphContainsExactly(t_jit.graph_for(x, y), FUSION_GUARD, 0)
+
+    @unittest.skipIf(not RUN_CUDA, "requires CUDA")
+    @unittest.skipIf(GRAPH_EXECUTOR != ProfilingMode.PROFILING,
+                     "Requires fusion optimization pass to be effective")
+    def test_profile_ivalue(self):
+        dtype = torch.float
+        device = "cuda"
+        x = torch.randn([7, 4, 7], dtype=dtype, device=device)
+        y = torch.randn([7, 4, 7], dtype=dtype, device=device)
+
+        # static shape
+        def t(x: torch.Tensor, y: torch.Tensor, dim : List[int], keepdim : bool):
+            o = torch.add(x, y)
+            o = o.sum(dim, keepdim=keepdim)
+            return o
+
+        t_jit = torch.jit.script(t)
+        jit_o = t_jit(x, y, (0, 1), False)
+        jit_o = t_jit(x, y, (0, 1), False)
+        o = t(x, y, (0, 1), False)
+        self.assertEqual(o.dtype, jit_o.dtype)
+        self.assertEqual(o, jit_o)
+        self.assertGraphContains(t_jit.graph_for(x, y, (0, 1), False), FUSION_GUARD)
+        print(t_jit.graph_for(x, y, (0, 1), False))
 
 class TestPassManagerCudaFuser(JitTestCase):
 
