@@ -11,6 +11,8 @@
 #include <ATen/DeviceGuard.h>
 #include <ATen/ExpandUtils.h>
 #include <ATen/Parallel.h>
+#include <ATen/detail/CUDAHooksInterface.h>
+
 #include <c10/util/Exception.h>
 #include <c10/core/Stream.h>
 #include <c10/core/Event.h>
@@ -144,18 +146,25 @@ static thread_local std::shared_ptr<ReadyQueue> local_ready_queue = nullptr;
 // stream used to run the function OR the inputs are on different devices
 // and the function is responsible for properly acquiring them.
 //
-// Historically, the autograd engine ran all CUDA operations on their
-// device's DEFAULT stream. This meant that syncing (implicitly or
-// explicitly) with the default streams was required before and after
-// calling backward(). It also meant, however, that syncing with
-// the default streams after backward() was sufficient to ensure
-// that backward() had finished running. To preserve this historic
-// behavior the engine records "leaf streams," the streams of the
-// leaf variables, and syncs them with their device's default stream
-// at the end of backward. All other streams are already synchronized
-// to happen before at least one leaf stream (per the above), so syncing
-// the leaf streams with the default streams is sufficient to implement
-// the historic behavior.
+// User-facing stream semantics of a backward() (or torch.autograd.grad())
+// call with respect to surrounding ops are the same as for any other call.
+// See "Stream semantics of backward passes" on
+// https://pytorch.org/docs/stable/notes/cuda.html
+//
+// Internally, backward() runs ops (including leaf nodes) on side threads.
+// And streams are thread local. So GraphTask achieves the above semantics by
+//  1. remembering the current and default streams on all active CUDA devices
+//     in the user-facing thread (aka, the thread that called execute() to
+//     launch the GraphTask)
+//  2. remembering the "leaf streams" (streams each backward leaf node ran on)
+//  3. during exec_post_processing, for each leaf stream, sync the remembered
+//     current and default streams (on the leaf stream's device) with that
+//     leaf stream.
+//
+// Syncing default streams (as well as current streams) with leaf streams is
+// done for temporary BC, and is more conservative than the usage guidance
+// (https://pytorch.org/docs/stable/notes/cuda.html) requires.
+// TODO: change 1, 2, 3 to sync only current streams with leaf streams.
 
 int NodeTask::getReentrantDepth() const {
   std::shared_ptr<GraphTask> graph_task = base_.lock();
@@ -516,22 +525,54 @@ void GraphTask::exec_post_processing() {
   // WARNING: Don't use a range-for loop here because more callbacks may be
   // added in between callback calls, so iterators may become invalidated.
   // NOLINTNEXTLINE(modernize-loop-convert)
+
+  // Syncs leaf streams with current and default streams of the thread that called execute().
+  // See Note [Streaming backwards]. leaf_streams is an unordered_set so it should only
+  // hold a small number of streams to sync with.
+  if (leaf_streams.size() > 0) {
+    const auto guard = c10::impl::VirtualGuardImpl{c10::DeviceType::CUDA};
+    for (const auto& leaf_stream : leaf_streams) {
+      // stash_current_streams stashed streams for all device IDs that already had a
+      // CUDA context before the GraphTask executed. For inactive devices, it stashed
+      // a c10::nullopt. I don't expect GraphTask's backward pass ran leaf nodes on
+      // any new devices, so the stashed streams should be enough.
+      // If leaf_stream.device_index() happens to be for a new device,
+      // operator* on the c10::nullopt will throw an error.
+      const auto caller_current_stream = *caller_current_streams_[leaf_stream.device_index()];
+      const auto caller_default_stream = *caller_default_streams_[leaf_stream.device_index()];
+
+      // final_callbacks are about to run in this thread. But this thread is not the thread that
+      // called execute, so this thread's current streams might not be the same as caller_current_streams.
+      // To ensure final_callbacks can access any grad safely on its device's current stream,
+      // we should also sync this thread's current streams with the leaf streams.
+      const auto current_stream = guard.getStream({c10::DeviceType::CUDA, leaf_stream.device_index()});
+
+      if (leaf_stream != caller_current_stream ||
+          leaf_stream != caller_default_stream ||
+          leaf_stream != current_stream) {
+        auto event = c10::Event{c10::DeviceType::CUDA};
+        event.record(leaf_stream);
+        if (caller_current_stream != leaf_stream) {
+          caller_current_stream.wait(event);
+        }
+        if (caller_default_stream != leaf_stream &&
+            caller_default_stream != caller_current_stream) {
+          caller_default_stream.wait(event);
+        }
+        if (current_stream != leaf_stream &&
+            current_stream != caller_current_stream &&
+            current_stream != caller_default_stream) {
+          current_stream.wait(event);
+        }
+      }
+    }
+  }
+
+  // final_callbacks may now use any grad on its device's current or default stream.
   for (size_t i = 0; i < final_callbacks_.size(); ++i) {
     cb_lock.unlock();
     final_callbacks_[i]();
     cb_lock.lock();
-  }
-
-  // Syncs leaf streams with default streams (if necessary)
-  // See note "Streaming backwards"
-  for (const auto& leaf_stream : leaf_streams) {
-    const auto guard = c10::impl::VirtualGuardImpl{c10::DeviceType::CUDA};
-    const auto default_stream = guard.getDefaultStream(leaf_stream.device());
-    if (leaf_stream != default_stream) {
-      auto event = c10::Event{c10::DeviceType::CUDA};
-      event.record(leaf_stream);
-      default_stream.wait(event);
-    }
   }
 }
 
@@ -749,7 +790,7 @@ void Engine::evaluate_function(
   int num_outputs = outputs.size();
   if (num_outputs == 0) { // Note: doesn't acquire the mutex
     // Records leaf stream (if applicable)
-    // See note "Streaming backwards"
+    // See Note [Streaming backwards]
     if (opt_parent_stream) {
       std::lock_guard<std::mutex> lock(graph_task->mutex_);
       graph_task->leaf_streams.emplace(*opt_parent_stream);
@@ -851,10 +892,11 @@ inline static uint64_t compute_min_topological_nr(const edge_list& outputs) {
   return min_topo_nr;
 }
 
-auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo_nr) -> void {
+auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo_nr) -> bool {
   // Computes the number of dependencies for each function which requires grad
   std::unordered_set<Node*> seen;
   std::vector<Node*> queue { root };
+  bool will_use_cuda = false;
 
   // Queue contains all nodes that will start propagating gradients.
   // We no longer have to expand functions that don't require grad.
@@ -864,6 +906,9 @@ auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo
     if (fn->topological_nr() < min_topo_nr) {
       continue;
     }
+    if (!will_use_cuda) {
+      will_use_cuda = fn->stream(c10::DeviceType::CUDA).has_value();
+    }
     for (const auto& edge : fn->next_edges()) {
       if (auto next_ptr = edge.function.get()) {
         dependencies[next_ptr] += 1;
@@ -872,6 +917,8 @@ auto Engine::compute_dependencies(Node* root, GraphTask& task, uint64_t min_topo
       }
     }
   }
+
+  return will_use_cuda;
 }
 
 auto Engine::execute(const edge_list& roots,
@@ -906,7 +953,12 @@ auto Engine::execute(const edge_list& roots,
 
   auto min_topo_nr = compute_min_topological_nr(outputs);
   // Now compute the dependencies for all executable functions
-  compute_dependencies(graph_root.get(), *graph_task, min_topo_nr);
+  auto will_use_cuda = compute_dependencies(graph_root.get(), *graph_task, min_topo_nr);
+  if (will_use_cuda) {
+    // Collects current and default streams for devices where this process has a context,
+    // so GraphTask::exec_post_processing can sync them with leaf_streams.
+    graph_task->stash_current_streams();
+  }
 
   if (!outputs.empty()) {
     graph_task->init_to_execute(*graph_root, outputs, accumulate_grad, min_topo_nr);
@@ -1145,6 +1197,26 @@ void Engine::add_thread_pool_task(const std::weak_ptr<GraphTask>& graph_task) {
   // This works even if new thread is created because wait() will test the
   // predicate before waiting
   thread_pool_shared_->work_.notify_one();
+}
+
+// Remembers current and default streams on all devices where a context has been created.
+// Only called if Engine::execute detects at least one node runs on a cuda stream.
+void GraphTask::stash_current_streams() {
+  const auto guard = c10::impl::VirtualGuardImpl{c10::DeviceType::CUDA};
+  auto num_gpus = guard.deviceCount();
+  caller_current_streams_.resize(num_gpus);
+  caller_default_streams_.resize(num_gpus);
+  if (num_gpus > 0) {
+    for (c10::DeviceIndex idx = 0; idx < num_gpus;  idx++) {
+      if (at::detail::getCUDAHooks().hasPrimaryContext(idx)) {
+        caller_current_streams_[idx] = guard.getStream({c10::DeviceType::CUDA, idx});
+        caller_default_streams_[idx] = guard.getDefaultStream({c10::DeviceType::CUDA, idx});
+      } else {
+        caller_current_streams_[idx] = c10::nullopt;
+        caller_default_streams_[idx] = c10::nullopt;
+      }
+    }
+  }
 }
 
 void GraphTask::init_to_execute(Node& graph_root, const edge_list& outputs, bool accumulate_grad, uint64_t min_topo_nr) {
