@@ -1,11 +1,13 @@
+from typing import Tuple
+
 import torch
-from .optimizer import Optimizer
+from ._optimizer import Optimizer, _params_t
 
 
 class Rprop(Optimizer):
     """Implements the resilient backpropagation algorithm.
 
-    Args:
+    Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
         lr (float, optional): learning rate (default: 1e-2)
@@ -16,7 +18,9 @@ class Rprop(Optimizer):
             maximal allowed step sizes (default: (1e-6, 50))
     """
 
-    def __init__(self, params, lr=1e-2, etas=(0.5, 1.2), step_sizes=(1e-6, 50)):
+    def __init__(self, params: _params_t, lr: float = 1e-2,
+                 etas: Tuple[float, float] = (0.5, 1.2),
+                 step_sizes: Tuple[float, float] = (1e-6, 50)) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 < etas[0] < 1.0 < etas[1]:
@@ -29,7 +33,7 @@ class Rprop(Optimizer):
     def step(self, closure=None):
         """Performs a single optimization step.
 
-        Args:
+        Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
