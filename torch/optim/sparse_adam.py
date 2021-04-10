@@ -9,7 +9,7 @@ class SparseAdam(Optimizer):
     In this variant, only moments that show up in the gradient get updated, and
     only those portions of the gradient get applied to the parameters.
 
-    Args:
+    Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
         lr (float, optional): learning rate (default: 1e-3)
@@ -32,8 +32,6 @@ class SparseAdam(Optimizer):
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
 
-        params = list(params)
-
         sparse_params = []
         for index, param in enumerate(params):
             if isinstance(param, dict):
@@ -54,7 +52,7 @@ class SparseAdam(Optimizer):
     def step(self, closure=None):
         """Performs a single optimization step.
 
-        Args:
+        Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """
@@ -84,8 +82,8 @@ class SparseAdam(Optimizer):
                 state['step'] += 1
 
                 grad = grad.coalesce()  # the update is non-linear so indices must be unique
-                grad_indices = grad._indices()
-                grad_values = grad._values()
+                grad_indices = grad.indices(False)
+                grad_values = grad.values(False)
                 size = grad.size()
 
                 def make_sparse(values):
@@ -100,10 +98,10 @@ class SparseAdam(Optimizer):
                 # Decay the first and second moment running average coefficient
                 #      old <- b * old + (1 - b) * new
                 # <==> old += (1 - b) * (new - old)
-                old_exp_avg_values = exp_avg.sparse_mask(grad)._values()
+                old_exp_avg_values = exp_avg.sparse_mask(grad).values(False)
                 exp_avg_update_values = grad_values.sub(old_exp_avg_values).mul_(1 - beta1)
                 exp_avg.add_(make_sparse(exp_avg_update_values))
-                old_exp_avg_sq_values = exp_avg_sq.sparse_mask(grad)._values()
+                old_exp_avg_sq_values = exp_avg_sq.sparse_mask(grad).values(False)
                 exp_avg_sq_update_values = grad_values.pow(2).sub_(old_exp_avg_sq_values).mul_(1 - beta2)
                 exp_avg_sq.add_(make_sparse(exp_avg_sq_update_values))
 

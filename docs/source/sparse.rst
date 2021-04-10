@@ -106,7 +106,7 @@ which is zero by default. We would then write:
     tensor(indices=tensor([[0, 1, 1],
                            [2, 0, 2]]),
            values=tensor([3, 4, 5]),
-           size=(2, 3), nnz=3, layout=torch.sparse_coo)
+           size=(2, 3), nse=3, layout=torch.sparse_coo)
     >>> s.to_dense()
     tensor([[0, 0, 3],
             [4, 0, 5]])
@@ -130,7 +130,7 @@ only:
     >>> torch.sparse_coo_tensor(size=(2, 3))
     tensor(indices=tensor([], size=(2, 0)),
            values=tensor([], size=(0,)),
-           size=(2, 3), nnz=0, layout=torch.sparse_coo)
+           size=(2, 3), nse=0, layout=torch.sparse_coo)
 
 .. _sparse-hybrid-coo-docs:
 
@@ -173,7 +173,7 @@ Suppose we want to create a (2 + 1)-dimensional tensor with the entry
            values=tensor([[3, 4],
                           [5, 6],
                           [7, 8]]),
-           size=(2, 3, 2), nnz=3, layout=torch.sparse_coo)
+           size=(2, 3, 2), nse=3, layout=torch.sparse_coo)
 
     >>> s.to_dense()
     tensor([[[0, 0],
@@ -219,7 +219,7 @@ uncoalesced tensor:
     >>> s
     tensor(indices=tensor([[1, 1]]),
            values=tensor(  [3, 4]),
-           size=(3,), nnz=2, layout=torch.sparse_coo)
+           size=(3,), nse=2, layout=torch.sparse_coo)
 
 while the coalescing process will accumulate the multi-valued elements
 into a single value using summation:
@@ -227,7 +227,7 @@ into a single value using summation:
     >>> s.coalesce()
     tensor(indices=tensor([[1]]),
            values=tensor([7]),
-           size=(3,), nnz=1, layout=torch.sparse_coo)
+           size=(3,), nse=1, layout=torch.sparse_coo)
 
 In general, the output of :meth:`torch.Tensor.coalesce` method is a
 sparse tensor with the following properties:
@@ -253,7 +253,7 @@ sparse tensor with the following properties:
     >>> a + b
     tensor(indices=tensor([[0, 0, 1, 1]]),
            values=tensor([7, 8, 5, 6]),
-           size=(2,), nnz=4, layout=torch.sparse_coo)
+           size=(2,), nse=4, layout=torch.sparse_coo)
 
   If you repeatedly perform an operation that can produce duplicate
   entries (e.g., :func:`torch.Tensor.add`), you should occasionally
@@ -300,16 +300,10 @@ acquired using methods :meth:`torch.Tensor.indices()` and
 
 .. note::
 
-  Currently, one can acquire the COO format data only when the tensor
-  instance is coalesced:
-
-    >>> s.indices()
-    RuntimeError: Cannot get indices on an uncoalesced tensor, please call .coalesce() first
-
   For acquiring the COO format data of an uncoalesced tensor, use
-  :func:`torch.Tensor._values()` and :func:`torch.Tensor._indices()`:
+  :func:`torch.Tensor.values(False)` and :func:`torch.Tensor.indices(False)`:
 
-    >>> s._indices()
+    >>> s.indices(False)
     tensor([[0, 1, 1],
             [2, 0, 2]])
 
@@ -348,7 +342,7 @@ dimensions:
     tensor(indices=tensor([[0, 2]]),
            values=tensor([[5, 6],
                           [7, 8]]),
-           size=(3, 2), nnz=2, layout=torch.sparse_coo)
+           size=(3, 2), nse=2, layout=torch.sparse_coo)
     >>> s[1, 0, 1]
     tensor(6)
     >>> s[1, 0, 1:]
@@ -405,37 +399,28 @@ matrix arguments.
    applications can still compute this using the matrix relation ``D @
    S == (S.t() @ D.t()).t()``.
 
+.. class:: Tensor()
+   :noindex:
 
+   The following methods are specific to :ref:`sparse tensors <sparse-docs>`:
 
-Tensor methods and sparse
-+++++++++++++++++++++++++
+    .. autoattribute:: is_sparse
+    .. automethod:: dense_dim
+    .. automethod:: sparse_dim
+    .. automethod:: sparse_mask
+    .. automethod:: sparse_resize_
+    .. automethod:: sparse_resize_and_clear_
+    .. automethod:: to_dense
+    .. automethod:: to_sparse
+    .. The following methods are specific to :ref:`sparse COO tensors <sparse-coo-docs>`:
+    .. automethod:: coalesce
+    .. automethod:: is_coalesced
+    .. automethod:: indices
+    .. automethod:: values
+    .. automethod:: nse
 
-The following Tensor methods are related to sparse tensors:
-
-.. autosummary::
-    :nosignatures:
-
-    Tensor.is_sparse
-    Tensor.dense_dim
-    Tensor.sparse_dim
-    Tensor.sparse_mask
-    Tensor.to_sparse
-    Tensor.indices
-    Tensor.values
-
-The following Tensor methods are specific to sparse COO tensors:
-
-.. autosummary::
-    :toctree: generated
-    :nosignatures:
-
-    Tensor.coalesce
-    Tensor.sparse_resize_
-    Tensor.sparse_resize_and_clear_
-    Tensor.is_coalesced
-    Tensor.to_dense
-
-The following Tensor methods support sparse COO tensors:
+The following :class:`torch.Tensor` methods support :ref:`sparse COO
+tensors <sparse-coo-docs>`:
 
 :meth:`~torch.Tensor.add`
 :meth:`~torch.Tensor.add_`
@@ -477,7 +462,6 @@ The following Tensor methods support sparse COO tensors:
 :meth:`~torch.Tensor.resize_as_`
 :meth:`~torch.Tensor.size`
 :meth:`~torch.Tensor.pow`
-:meth:`~torch.Tensor.sqrt`
 :meth:`~torch.Tensor.square`
 :meth:`~torch.Tensor.smm`
 :meth:`~torch.Tensor.sspaddmm`
@@ -489,26 +473,24 @@ The following Tensor methods support sparse COO tensors:
 :meth:`~torch.Tensor.transpose_`
 :meth:`~torch.Tensor.zero_`
 
-Torch functions specific to sparse Tensors
-++++++++++++++++++++++++++++++++++++++++++
-.. autosummary::
-    :toctree: generated
-    :nosignatures:
 
-    sparse_coo_tensor
-    sparse.sum
-    sparse.addmm
-    sparse.mm
-    sspaddmm
-    hspmm
-    smm
-    sparse.softmax
-    sparse.log_softmax
+Sparse tensor functions
++++++++++++++++++++++++
+
+.. autofunction:: torch.sparse_coo_tensor
+.. autofunction:: torch.sparse.sum
+.. autofunction:: torch.sparse.addmm
+.. autofunction:: torch.sparse.mm
+.. autofunction:: torch.sspaddmm
+.. autofunction:: torch.hspmm
+.. autofunction:: torch.smm
+.. autofunction:: torch.sparse.softmax
+.. autofunction:: torch.sparse.log_softmax
 
 Other functions
 +++++++++++++++
 
-The following :mod:`torch` functions support sparse tensors:
+The following :mod:`torch` functions support :ref:`sparse COO tensors <sparse-coo-docs>`:
 
 :func:`~torch.cat`
 :func:`~torch.dstack`

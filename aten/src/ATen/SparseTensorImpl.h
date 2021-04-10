@@ -5,14 +5,14 @@
 #include <c10/util/Exception.h>
 
 namespace at {
-struct TORCH_API SparseTensorImpl : public TensorImpl {
+struct CAFFE2_API SparseTensorImpl : public TensorImpl {
   // Stored in COO format, indices + values.
 
   // INVARIANTS:
   // sparse_dim: range [0, len(shape)]; sparse_dim + dense_dim = len(shape)
   // dense_dim : range [0, len(shape)]; sparse_dim + dense_dim = len(shape)
-  // _indices.shape: dimensionality: 2,  shape: (sparse_dim, nnz)
-  // _values.shape:  dimensionality: 1 + dense_dim.  shape: (nnz, shape[sparse_dim:])
+  // _indices.shape: dimensionality: 2,  shape: (sparse_dim, nse)
+  // _values.shape:  dimensionality: 1 + dense_dim.  shape: (nse, shape[sparse_dim:])
 
   int64_t sparse_dim_ = 0; // number of sparse dimensions
   int64_t dense_dim_ = 0; // number of dense dimensions
@@ -33,9 +33,8 @@ public:
   // Public for now...
   explicit SparseTensorImpl(at::DispatchKeySet, const caffe2::TypeMeta);
 
-  void release_resources() override;
-
   int64_t nnz() const { return values_.size(0); }
+  int64_t nse() const { return values_.size(0); }
   int64_t sparse_dim() const { return sparse_dim_; }
   int64_t dense_dim() const { return dense_dim_; }
   bool coalesced() const { return coalesced_; }
@@ -43,20 +42,22 @@ public:
   Tensor values() const { return values_; }
 
   IntArrayRef strides() const override;
+  bool is_contiguous(at::MemoryFormat memory_format=at::MemoryFormat::Contiguous) const override;
   int64_t stride(int64_t d) const override;
   void set_size(int64_t dim, int64_t new_size) override;
   void set_stride(int64_t dim, int64_t new_stride) override;
   void set_storage_offset(int64_t storage_offset) override;
 
-#ifdef DEBUG
+  int64_t dim() const override;
   bool has_storage() const override;
-#endif
+  const Storage& storage() const override;
+  int64_t storage_offset() const override;
 
   // WARNING: This function does NOT preserve invariants of sparse_dim/dense_dim with
   // respect to indices and values
   void raw_resize_(int64_t sparse_dim, int64_t dense_dim, IntArrayRef size) {
     TORCH_CHECK(allow_tensor_metadata_change(), "raw_resize_ ", err_msg_tensor_metadata_change_not_allowed);
-    sizes_and_strides_.set_sizes(size);
+    sizes_ = size.vec();
     sparse_dim_ = sparse_dim;
     dense_dim_ = dense_dim;
     refresh_numel();
@@ -70,7 +71,7 @@ public:
   // any of the dense dimensions.
   // 2. When we keep the number of sparse dimensions unchanged, and NOT shrinking the size of
   // any of the sparse dimensions.
-  // 3. When the sparse tensor has zero nnz, in which case we are free to change the shapes of
+  // 3. When the sparse tensor has zero nse, in which case we are free to change the shapes of
   // both its sparse and dense dimensions.
   //
   // This function DOESN'T support (and will throw an error) the following cases:
@@ -87,7 +88,7 @@ public:
   void resize_(int64_t sparse_dim, int64_t dense_dim, IntArrayRef size) {
     TORCH_CHECK(allow_tensor_metadata_change(), "resize_ ", err_msg_tensor_metadata_change_not_allowed);
     TORCH_CHECK(sparse_dim + dense_dim == static_cast<int64_t>(size.size()), "number of dimensions must be sparse_dim (", sparse_dim, ") + dense_dim (", dense_dim, "), but got ", size.size());
-    if (nnz() > 0) {
+    if (nse() > 0) {
       auto alt_options_msg = "You could try the following options:\n\
 1. If you need an empty sparse tensor of this size, call `x = torch.sparse_coo_tensor(size)`.\n\
 2. If you need to resize this tensor, you have the following options:\n\
@@ -126,19 +127,16 @@ public:
         "shrinking the size of dense dimensions (from ", dense_size_original, " to ", dense_size_new, ") on a non-empty sparse tensor is not supported.\n", alt_options_msg);
     }
 
-    const bool size_equals_sizes = std::equal(size.begin(), size.end(), sizes_and_strides_.sizes_begin(), sizes_and_strides_.sizes_end());
-    if ((!size_equals_sizes) || (sparse_dim != sparse_dim_) || (dense_dim != dense_dim_)) {
-      auto nnz = values().size(0);
-      std::vector<int64_t> values_size = {nnz};
+    if ((!size.equals(sizes_)) || (sparse_dim != sparse_dim_) || (dense_dim != dense_dim_)) {
+      auto nse = values().size(0);
+      std::vector<int64_t> values_size = {nse};
       auto dense_size = size.slice(sparse_dim);
       values_size.insert(values_size.end(), dense_size.begin(), dense_size.end());
       values_.resize_(values_size);
-      indices_.resize_({sparse_dim, nnz});
+      indices_.resize_({sparse_dim, nse});
     }
 
-    if (!size_equals_sizes) {
-      sizes_and_strides_.set_sizes(size);
-    }
+    sizes_ = size.vec();
     sparse_dim_ = sparse_dim;
     dense_dim_ = dense_dim;
     refresh_numel();
@@ -149,7 +147,7 @@ public:
     TORCH_CHECK(allow_tensor_metadata_change(), "resize_and_clear_ ", err_msg_tensor_metadata_change_not_allowed);
     TORCH_CHECK(sparse_dim + dense_dim == static_cast<int64_t>(size.size()), "number of dimensions must be sparse_dim (", sparse_dim, ") + dense_dim (", dense_dim, "), but got ", size.size());
 
-    sizes_and_strides_.set_sizes(size);
+    sizes_ = size.vec();
     sparse_dim_ = sparse_dim;
     dense_dim_ = dense_dim;
 
@@ -168,11 +166,11 @@ public:
   }
 
   // NOTE: this function is only used internally and not exposed to Python frontend
-  void set_nnz_and_narrow(int64_t new_nnz) {
-    TORCH_CHECK(allow_tensor_metadata_change(), "set_nnz_and_narrow ", err_msg_tensor_metadata_change_not_allowed);
-    AT_ASSERT(new_nnz <= nnz());
-    indices_ = indices_.narrow(1, 0, new_nnz);
-    values_ = values_.narrow(0, 0, new_nnz);
+  void set_nse_and_narrow(int64_t new_nse) {
+    TORCH_CHECK(allow_tensor_metadata_change(), "set_nse_and_narrow ", err_msg_tensor_metadata_change_not_allowed);
+    AT_ASSERT(new_nse <= nse());
+    indices_ = indices_.narrow(1, 0, new_nse);
+    values_ = values_.narrow(0, 0, new_nse);
   }
 
   // Takes indices and values and directly puts them into the sparse tensor, no copy.
@@ -198,25 +196,6 @@ public:
       /*src_impl=*/this,
       /*dest_impl=*/impl.get(),
       /*version_counter=*/version_counter,
-      /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
-    impl->refresh_numel();
-    return impl;
-  }
-
-  /**
-   * Return a TensorImpl that is a shallow-copy of this TensorImpl.
-   *
-   * For usage of `version_counter` and `allow_tensor_metadata_change`,
-   * see NOTE [ TensorImpl Shallow-Copying ].
-   */
-  c10::intrusive_ptr<TensorImpl> shallow_copy_and_detach(
-      c10::VariableVersion&& version_counter,
-      bool allow_tensor_metadata_change) const override {
-    auto impl = c10::make_intrusive<SparseTensorImpl>(key_set(), dtype());
-    copy_tensor_metadata(
-      /*src_impl=*/this,
-      /*dest_impl=*/impl.get(),
-      /*version_counter=*/std::move(version_counter),
       /*allow_tensor_metadata_change=*/allow_tensor_metadata_change);
     impl->refresh_numel();
     return impl;
@@ -261,8 +240,6 @@ private:
     dest_sparse_impl->values_ = src_sparse_impl->values();
     dest_sparse_impl->coalesced_ = src_sparse_impl->coalesced();
   }
-
-  const char* tensorimpl_type_name() const override;
 };
 
 } // namespace at

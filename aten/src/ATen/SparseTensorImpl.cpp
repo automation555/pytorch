@@ -9,8 +9,6 @@ namespace {
   DeviceType sparseTensorSetToDeviceType(DispatchKeySet key_set) {
     if (key_set.has(DispatchKey::SparseCPU)) {
       return kCPU;
-    } else if (key_set.has(DispatchKey::SparseXPU)) {
-      return kXPU;
     } else if (key_set.has(DispatchKey::SparseCUDA)) {
       return kCUDA;
     } else {
@@ -48,20 +46,13 @@ SparseTensorImpl::SparseTensorImpl(at::DispatchKeySet key_set, const caffe2::Typ
   AT_ASSERT(values_.sizes() == IntArrayRef({0}));
   AT_ASSERT(values_.device() == indices_.device());
   AT_ASSERT(values_.device() == device());
-
-  is_non_overlapping_and_dense_ = false;
-  set_storage_access_should_throw();
-  set_has_contiguity_policy(HasContiguityPolicy::ContiguityNotSupported);
-}
-
-void SparseTensorImpl::release_resources() {
-  TensorImpl::release_resources();
-  values_.reset();
-  indices_.reset();
 }
 
 IntArrayRef SparseTensorImpl::strides() const {
   AT_ERROR("sparse tensors do not have strides");
+}
+bool SparseTensorImpl::is_contiguous(at::MemoryFormat memory_format) const {
+  AT_ERROR("sparse tensors do not have is_contiguous");
 }
 int64_t SparseTensorImpl::stride(int64_t d) const {
   AT_ERROR("sparse tensors do not have strides");
@@ -75,17 +66,19 @@ void SparseTensorImpl::set_stride(int64_t dim, int64_t new_stride) {
 void SparseTensorImpl::set_storage_offset(int64_t storage_offset) {
   AT_ERROR("sparse tensors do not have set_storage_offset");
 }
-#ifdef DEBUG
+
+int64_t SparseTensorImpl::dim() const {
+  return sparse_dim_ + dense_dim_;
+}
 bool SparseTensorImpl::has_storage() const {
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!storage_, "SparseTensorImpl assumes that storage_ is never set");
   return false;
 }
-#endif
-
-const char* SparseTensorImpl::tensorimpl_type_name() const {
-  return "SparseTensorImpl";
+const Storage& SparseTensorImpl::storage() const {
+  AT_ERROR("sparse tensors do not have storage");
 }
-
+int64_t SparseTensorImpl::storage_offset() const {
+  AT_ERROR("sparse tensors do not have storage");
+}
 void SparseTensorImpl::set_indices_and_values_unsafe(const Tensor& indices, const Tensor& values) {
   TORCH_CHECK(allow_tensor_metadata_change(), "set_indices_and_values_unsafe ", err_msg_tensor_metadata_change_not_allowed);
 
@@ -98,8 +91,8 @@ void SparseTensorImpl::set_indices_and_values_unsafe(const Tensor& indices, cons
   TORCH_CHECK(indices.options().backend() == values.options().backend(), "backend of indices (", indices.options().backend(), ") must match backend of values (", values.options().backend(), ")");
   TORCH_CHECK(!indices.is_cuda() || indices.get_device() == values.get_device(), "device of indices (", indices.get_device(), ") must match device of values (", values.get_device(), ")");
 
-  TORCH_CHECK(indices.dim() == 2, "indices must be sparse_dim x nnz, but got: ", indices.sizes());
-  TORCH_CHECK(indices.size(1) == values.size(0), "indices and values must have same nnz, but got nnz from indices: ", indices.size(1), ", nnz from values: ", values.size(0));
+  TORCH_CHECK(indices.dim() == 2, "indices must be sparse_dim x nse, but got: ", indices.sizes());
+  TORCH_CHECK(indices.size(1) == values.size(0), "indices and values must have same nse, but got nse from indices: ", indices.size(1), ", nse from values: ", values.size(0));
   TORCH_CHECK(indices.size(0) == sparse_dim_, "indices has incorrect first dimension, expected ", sparse_dim_, ", got ", indices.size(0));
   TORCH_CHECK(values.dim() == dense_dim_ + 1, "values has incorrect number of dimensions, expected ", dense_dim_ + 1, ", got ", values.dim());
 
