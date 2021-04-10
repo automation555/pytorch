@@ -4,7 +4,6 @@
 #include <torch/csrc/autograd/edge.h>
 #include <torch/csrc/autograd/engine.h>
 #include <torch/csrc/autograd/function.h>
-#include <torch/csrc/autograd/functions/basic_ops.h>
 
 namespace torch {
 namespace autograd {
@@ -69,8 +68,7 @@ variable_list run_backward(
     bool keep_graph,
     bool create_graph,
     const variable_list& inputs,
-    bool allow_unused,
-    bool accumulate_grad) {
+    bool allow_unused) {
   size_t num_tensors = outputs.size();
   edge_list roots;
   roots.reserve(num_tensors);
@@ -94,18 +92,11 @@ variable_list run_backward(
       if (!grad_fn) {
         grad_fn = impl::try_get_grad_accumulator(input);
       }
-      if (accumulate_grad) {
-        TORCH_CHECK(
-          input.is_leaf(),
-          "One of the differentiated Tensors given as 'inputs' to backward is not a leaf Tensor"
-        )
-      }
       TORCH_CHECK(
           input.requires_grad(),
           "One of the differentiated Tensors does not require grad");
       if (!grad_fn) {
-        // See NOTE [ Autograd Unreachable Input ] for details
-        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+        output_edges.emplace_back();
       } else {
         output_edges.emplace_back(grad_fn, output_nr);
       }
@@ -113,7 +104,7 @@ variable_list run_backward(
   }
 
   variable_list grad_inputs = Engine::get_default_engine().execute(
-      roots, grad_outputs, keep_graph, create_graph, accumulate_grad, output_edges);
+      roots, grad_outputs, keep_graph, create_graph, output_edges);
   // check if grad_inputs contains None or not base on the allow_unused flag
   if (!inputs.empty() && !allow_unused) {
     size_t num_inputs = inputs.size();
@@ -133,13 +124,12 @@ void backward(
     const variable_list& tensors,
     const variable_list& grad_tensors,
     c10::optional<bool> retain_graph,
-    bool create_graph,
-    const variable_list& inputs) {
+    bool create_graph) {
   variable_list gradients = _make_grads(tensors, grad_tensors);
   if (!retain_graph) {
     retain_graph = create_graph;
   }
-  run_backward(tensors, gradients, retain_graph.value(), create_graph, inputs, /*allow_unused=*/true, /*accumulate_grad=*/true);
+  run_backward(tensors, gradients, retain_graph.value(), create_graph, {}, /*allow_unused=*/true);
 }
 
 variable_list grad(
@@ -154,21 +144,8 @@ variable_list grad(
     retain_graph = create_graph;
   }
   return run_backward(
-    outputs, gradients, retain_graph.value(), create_graph, inputs, allow_unused, /*accumulate_grad=*/false);
+    outputs, gradients, retain_graph.value(), create_graph, inputs, allow_unused);
 }
-
-
-namespace forward_ad {
-
-uint64_t enter_dual_level() {
-  return ForwardADLevel::get_next_idx();
-}
-
-void exit_dual_level(uint64_t level) {
-  ForwardADLevel::release_idx(level);
-}
-
-} // namespace forward_ad
 
 } // namespace autograd
 } // namespace torch
