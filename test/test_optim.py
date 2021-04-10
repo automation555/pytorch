@@ -305,6 +305,7 @@ class TestOptim(TestCase):
                 [lambda opt: StepLR(opt, gamma=0.99999, step_size=300)]
             )
 
+    @skipIfRocm
     def test_multi_tensor_optimizers(self):
         if not torch.cuda.is_available():
             return
@@ -339,15 +340,15 @@ class TestOptim(TestCase):
         for optimizers, params in optimizer_pairs_with_flags:
             res = []
             for opt in optimizers:
-                weight = torch.tensor([[-0.2109, -0.4976], [-0.1413, -0.3420], [-0.2524, 0.6976]],
+                weight = torch.tensor([[-0.2109, -0.4976], [-0.1413, -0.3420], [-0.2524, 0.6976]], 
                                       dtype=torch.float64, device=device, requires_grad=True)
                 bias = torch.tensor([-0.1085, -0.2979, 0.6892], dtype=torch.float64, device=device, requires_grad=True)
-                weight2 = torch.tensor([[-0.0508, -0.3941, -0.2843]],
+                weight2 = torch.tensor([[-0.0508, -0.3941, -0.2843]], 
                                        dtype=torch.float64, device=device, requires_grad=True)
                 bias2 = torch.tensor([-0.0711], dtype=torch.float64, device=device, requires_grad=True)
                 input = torch.tensor([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=torch.float64, device=device).reshape(3, 2)
 
-                model = torch.nn.Sequential(torch.nn.Linear(2, 3),
+                model = torch.nn.Sequential(torch.nn.Linear(2, 3), 
                                             torch.nn.Sigmoid(),
                                             torch.nn.Linear(3, 1),
                                             torch.nn.Sigmoid())
@@ -362,7 +363,7 @@ class TestOptim(TestCase):
 
                 optimizer = opt(model.parameters(), **params)
 
-                for _ in range(kIterations):
+                for _ in range(kIterations): 
                     optimizer.zero_grad()
                     output = model(input)
                     loss = output.sum()
@@ -377,6 +378,7 @@ class TestOptim(TestCase):
 
             for p1, p2 in zip(res[0], res[1]):
                 self.assertEqual(p1, p2)
+
 
     def test_adam(self):
         for optimizer in [optim.Adam, optim_mt.Adam]:
@@ -454,6 +456,55 @@ class TestOptim(TestCase):
             optim.SparseAdam([torch.zeros(3, layout=torch.sparse_coo)])
         with self.assertRaisesRegex(ValueError, "SparseAdam requires dense parameter tensors"):
             optim.SparseAdam([{"params": [torch.zeros(3, layout=torch.sparse_coo)]}])
+
+    def test_sparse_adamw(self):
+        self._test_rosenbrock_sparse(
+            lambda params: optim.SparseAdamW(params, lr=4e-2),
+            [],
+            True
+        )
+        with self.assertRaisesRegex(ValueError, "Invalid beta parameter at index 0: 1.0"):
+            optim.SparseAdamW(None, lr=1e-2, betas=(1.0, 0.0))
+        with self.assertRaisesRegex(ValueError, "SparseAdamW requires dense parameter tensors"):
+            optim.SparseAdamW([torch.zeros(3, layout=torch.sparse_coo)])
+        with self.assertRaisesRegex(ValueError, "SparseAdamW requires dense parameter tensors"):
+            optim.SparseAdamW([{"params": [torch.zeros(3, layout=torch.sparse_coo)]}])
+        with self.assertRaisesRegex(ValueError, "Invalid weight_decay value: -1"):
+            optimizer(None, lr=1e-2, weight_decay=-1)
+
+        # Test if the optimizer behaves the same on dense tensors as AdamW
+        def to_sparse(x):
+            """ converts dense tensor x to sparse format """
+            x_typename = torch.typename(x).split('.')[-1]
+            sparse_tensortype = getattr(torch.sparse, x_typename)
+
+            indices = torch.nonzero(x)
+            if len(indices.shape) == 0:  # if all elements are zeros
+                return sparse_tensortype(*x.shape)
+            indices = indices.t()
+            values = x[tuple(indices[i] for i in range(indices.shape[0]))]
+            return sparse_tensortype(indices, values, x.size())
+
+        weight_data = torch.randn(10, 5)
+        weight = Variable(weight_data, requires_grad=True)
+        sparse_weight = Variable(to_sparse(weight_data), requires_grad=True)
+        grad = torch.randn(10, 5)
+        adamw = optim.AdamW([weight])
+        optimizer = optim.SparseAdamW([weight])
+
+        # to check if the optimizer can be printed as a string
+        optimizer.__repr__()
+
+        adamw.zero_grad()
+        optimizer.zero_grad()
+
+        grad = torch.randn(10, 5)
+        weight.grad.data = grad
+        sparse_weight.grad.data = to_sparse(grad)
+        adamw.step()
+        optimizer.step()
+
+        self.assertEqual(weight.data, sparse_weight.data.to_dense())
 
     # ROCm precision is too low to pass this test
     @skipIfRocm
@@ -631,26 +682,6 @@ class TestOptim(TestCase):
             optim.SGD([param, param], lr=0.1)
             self.assertEqual(len(w), 1)
             self.assertIn('a parameter group with duplicate parameters', str(w[0].message))
-
-    def test_no_grad_for_all_params(self):
-        param = torch.randn(5, 5, requires_grad=False)
-
-        optimizer_list = [
-            optim.Adadelta,
-            optim.AdamW,
-            optim.Adam,
-            optim.Adagrad,
-            optim.Adamax,
-            optim.RMSprop,
-            optim.SGD,
-            optim.SparseAdam,
-            optim.ASGD,
-        ]
-        for optim_ctr in optimizer_list:
-            opt = optim_ctr([param, param], lr=0.1)
-            # make sure step can still run even if
-            # all params have no grad
-            opt.step()
 
 
 class SchedulerTestNet(torch.nn.Module):
