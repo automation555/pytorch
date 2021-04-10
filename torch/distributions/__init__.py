@@ -104,6 +104,7 @@ from .negative_binomial import NegativeBinomial
 from .normal import Normal
 from .one_hot_categorical import OneHotCategorical, OneHotCategoricalStraightThrough
 from .pareto import Pareto
+from .plackett_luce import PlackettLuce
 from .poisson import Poisson
 from .relaxed_bernoulli import RelaxedBernoulli
 from .relaxed_categorical import RelaxedOneHotCategorical
@@ -135,7 +136,6 @@ __all__ = [
     'HalfNormal',
     'Independent',
     'Kumaraswamy',
-    'LKJCholesky',
     'Laplace',
     'LogNormal',
     'LogisticNormal',
@@ -148,6 +148,7 @@ __all__ = [
     'OneHotCategorical',
     'OneHotCategoricalStraightThrough',
     'Pareto',
+    'PlackettLuce',
     'RelaxedBernoulli',
     'RelaxedOneHotCategorical',
     'StudentT',
