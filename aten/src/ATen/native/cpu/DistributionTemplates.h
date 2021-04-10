@@ -1,7 +1,6 @@
 #pragma once
 
 #include <ATen/Dispatch.h>
-#include <ATen/CPUApplyUtils.h>
 #include <ATen/core/DistributionsHelper.h>
 #include <ATen/native/TensorIterator.h>
 #include <ATen/native/cpu/Loops.h>
@@ -112,7 +111,7 @@ void normal_fill_AVX2(Tensor& self, const float mean, const float std, RNG gener
     at::uniform_real_distribution<float> uniform(0, 1);
     data[i] = uniform(generator);
   }
-  const __m256 two_pi = _mm256_set1_ps(2.0f * c10::pi<double>);
+  const __m256 two_pi = _mm256_set1_ps(2.0f * M_PI);
   const __m256 one = _mm256_set1_ps(1.0f);
   const __m256 minus_two = _mm256_set1_ps(-2.0f);
   const __m256 mean_v = _mm256_set1_ps(mean);
@@ -140,7 +139,7 @@ static void normal_fill_16(scalar_t *data, const scalar_t mean, const scalar_t s
     const scalar_t u1 = 1 - data[j]; // [0, 1) -> (0, 1] for log.
     const scalar_t u2 = data[j + 8];
     const scalar_t radius = std::sqrt(-2 * std::log(u1));
-    const scalar_t theta = 2.0f * c10::pi<double> * u2;
+    const scalar_t theta = 2.0f * M_PI * u2;
     data[j] = radius * std::cos(theta) * std + mean;
     data[j + 8] = radius * std::sin(theta) * std + mean;
   }
@@ -180,7 +179,9 @@ void normal_kernel(Tensor& self, double mean, double std, RNG generator) {
     normal_fill(self, static_cast<float>(mean), static_cast<float>(std), generator);
 #endif
   } else {
-    AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16, self.scalar_type(), "normal_kernel_cpu", [&] {
+    // bfloat16 cannot be properly tested due to the lack of other operations
+    // like add/sub/mean implemented for half
+    AT_DISPATCH_FLOATING_TYPES_AND_HALF(self.scalar_type(), "normal_kernel_cpu", [&] {
       if (size >= 16 && self.is_contiguous()) {
         normal_fill<scalar_t>(self, static_cast<scalar_t>(mean), static_cast<scalar_t>(std), generator);
       } else {
@@ -206,7 +207,7 @@ struct NormalKernel {
 
 template<typename RNG>
 void uniform_kernel(TensorIterator& iter, double from_, double to_, RNG generator) {
-  AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16, iter.dtype(), "uniform_kernel_cpu", [&]() {
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, iter.dtype(), "uniform_kernel_cpu", [&]() {
     std::lock_guard<std::mutex> lock(generator->mutex_);
     auto from = static_cast<scalar_t>(from_);
     auto to = static_cast<scalar_t>(to_);
@@ -228,7 +229,7 @@ struct UniformKernel {
 
 template<typename RNG>
 void cauchy_kernel(TensorIterator& iter, double median, double sigma, RNG generator) {
-  AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16, iter.dtype(), "cauchy_cpu", [&]() {
+  AT_DISPATCH_FLOATING_TYPES_AND2(at::ScalarType::Half, at::ScalarType::BFloat16, iter.dtype(), "cauchy_cpu", [&]() {
     std::lock_guard<std::mutex> lock(generator->mutex_);
     at::cauchy_distribution<double> cauchy(median, sigma);
     cpu_serial_kernel(iter, [&cauchy, generator]() -> scalar_t {
