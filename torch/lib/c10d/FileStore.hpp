@@ -15,12 +15,11 @@ class FileStore : public Store {
 
   virtual ~FileStore();
 
-  void set(const std::string& key, const std::vector<uint8_t>& value) override;
-
-  std::vector<uint8_t> compareSet(
-      const std::string& key,
+  std::vector<uint8_t> compareSet(const std::string& key,
       const std::vector<uint8_t>& currentValue,
       const std::vector<uint8_t>& newValue) override;
+
+  void set(const std::string& key, const std::vector<uint8_t>& value) override;
 
   std::vector<uint8_t> get(const std::string& key) override;
 
