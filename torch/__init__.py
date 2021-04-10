@@ -371,8 +371,6 @@ def use_deterministic_algorithms(d):
           ``indices`` is a list of tensors
         * :func:`torch.index_put` with ``accumulate=True`` when called on a CPU
           tensor
-        * :func:`torch.put` with ``accumulate=True`` when called on a CPU
-          tensor
 
     The following normally-nondeterministic operations will throw a
     :class:`RuntimeError` when `d=True`:
@@ -403,8 +401,6 @@ def use_deterministic_algorithms(d):
         * :func:`torch.scatter_add_` when called on a CUDA tensor
         * :func:`torch.index_add_` when called on a CUDA tensor
         * :func:`torch.index_copy`
-        * :func:`torch.put` when ``accumulate=False``
-        * :func:`torch.put` when ``accumulate=True`` and called on a CUDA tensor
         * :func:`torch.index_select` when called on a CUDA tensor that requires grad
         * :func:`torch.repeat_interleave` when called on a CUDA tensor that requires grad
         * :func:`torch.histc` when called on a CUDA tensor
@@ -476,11 +472,29 @@ def is_warn_always_enabled():
     """
     return _C._get_warnAlways()
 
+
+def factory_kwargs(kwargs):
+    simple_keys = {"device", "dtype", "memory_format"}
+    expected_keys = simple_keys | {"factory_kwargs"}
+    if not kwargs.keys() <= expected_keys:
+        raise TypeError(f"unexpected kwargs {kwargs.keys() - expected_keys}")
+
+    # guarantee no input kwargs is untouched
+    r = dict(kwargs.get("factory_kwargs", {}))
+    for k in simple_keys:
+        if k in r:
+            raise TypeError(f"{k} specified twice, in **kwargs and in factory_kwargs")
+        if k in kwargs:
+            r[k] = kwargs[k]
+
+    return r
+
+
 ################################################################################
 # Define Storage and Tensor classes
 ################################################################################
 
-from ._tensor import Tensor
+from .tensor import Tensor
 from .storage import _StorageBase
 
 
@@ -654,7 +668,6 @@ from torch import optim as optim
 import torch.optim._multi_tensor
 from torch import multiprocessing as multiprocessing
 from torch import sparse as sparse
-from torch import special as special
 import torch.utils.backcompat
 from torch import onnx as onnx
 from torch import jit as jit
@@ -687,8 +700,8 @@ def compiled_with_cxx11_abi():
 
 
 # Import the ops "namespace"
-from torch._ops import ops
-from torch._classes import classes
+from torch._ops import ops as ops
+from torch._classes import classes as classes
 
 # Import the quasi random sampler
 from torch import quasirandom as quasirandom

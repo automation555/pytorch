@@ -3,6 +3,7 @@ import math
 import torch
 from torch import Tensor
 from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.types import Device
 from .. import functional as F
 from .. import init
 from .module import Module
@@ -72,16 +73,19 @@ class Linear(Module):
     out_features: int
     weight: Tensor
 
-    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
+    def __init__(self, in_features: int, out_features: int, bias: bool = True,
+                 *, reset_parameters: bool = True, **kwargs) -> None:
+        factory_kwargs = torch.factory_kwargs(kwargs)
         super(Linear, self).__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = Parameter(torch.empty(out_features, in_features))
+        self.weight = Parameter(torch.empty((out_features, in_features), **factory_kwargs))
         if bias:
-            self.bias = Parameter(torch.empty(out_features))
+            self.bias = Parameter(torch.empty(out_features, **factory_kwargs))
         else:
             self.register_parameter('bias', None)
-        self.reset_parameters()
+        if reset_parameters:
+            self.reset_parameters()
 
     def reset_parameters(self) -> None:
         init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -157,10 +161,10 @@ class Bilinear(Module):
         self.in1_features = in1_features
         self.in2_features = in2_features
         self.out_features = out_features
-        self.weight = Parameter(torch.empty(out_features, in1_features, in2_features))
+        self.weight = Parameter(torch.Tensor(out_features, in1_features, in2_features))
 
         if bias:
-            self.bias = Parameter(torch.empty(out_features))
+            self.bias = Parameter(torch.Tensor(out_features))
         else:
             self.register_parameter('bias', None)
         self.reset_parameters()
@@ -181,7 +185,7 @@ class Bilinear(Module):
 
 
 class LazyLinear(LazyModuleMixin, Linear):
-    r"""A :class:`torch.nn.Linear` module where `in_features` is inferred.
+    r"""A :class:`torch.nn.Linear` module with lazy initialization.
 
     In this module, the `weight` and `bias` are of :class:`torch.nn.UninitializedParameter`
     class. They will be initialized after the first call to ``forward`` is done and the
@@ -211,7 +215,6 @@ class LazyLinear(LazyModuleMixin, Linear):
 
     cls_to_become = Linear  # type: ignore[assignment]
     weight: UninitializedParameter
-    bias: UninitializedParameter  # type: ignore[assignment]
 
     def __init__(self, out_features: int, bias: bool = True) -> None:
         # bias is hardcoded to False to avoid creating tensor
