@@ -51,19 +51,6 @@ struct GenericDict;
 struct Object;
 struct PyObjectHolder;
 struct EnumHolder;
-// We need a ComplexHolder because currently the payloads in the Union
-// only take 64 bits. Since ComplexDouble takes up 128 bits, and is too big
-// to fit in the IValue directly, we indirect complex numbers through an intrusive
-// pointer to ComplexHolder (which contains a c10::complex).
-struct ComplexHolder : c10::intrusive_ptr_target {
-  public:
-    template <typename T>
-    ComplexHolder(c10::complex<T> c) {
-      val = convert<decltype(val), c10::complex<T>>(c);
-    }
-    ComplexHolder() {}
-    c10::complex<double> val;
-};
 } // namespace ivalue
 
 // This is an owning wrapper for a c10::optional<std::vector<T>>
@@ -292,13 +279,6 @@ struct TORCH_API IValue final {
     if (this->isTensor()) {
       const auto& thisTensor = this->toTensor();
       const auto& rhsTensor = rhs.toTensor();
-      // mkldnn tensors dont have views or storage, so we compare
-      // based on tensor impl. //TODO: find a way to use mkldnn storage
-      if (thisTensor.is_mkldnn() || rhsTensor.is_mkldnn()) {
-        return thisTensor.unsafeGetTensorImpl() ==
-            rhsTensor.unsafeGetTensorImpl();
-      }
-
       return thisTensor.is_alias_of(rhsTensor);
     }
 
@@ -366,12 +346,6 @@ struct TORCH_API IValue final {
   bool isTensor() const {
     return Tag::Tensor == tag;
   }
-
- private:
-  // Outlined error path so that toTensor() can be inlined.
-  [[noreturn]] void reportToTensorTypeError() const;
-
- public:
   at::Tensor toTensor() &&;
   at::Tensor& toTensor() &;
   const at::Tensor& toTensor() const&;
@@ -453,14 +427,6 @@ struct TORCH_API IValue final {
               guts::negation<std::is_constructible<IValue, Args>>...>::value,
           std::nullptr_t> = nullptr>
   IValue(const std::tuple<Args...>& t);
-  template <
-      typename... Args,
-      std::enable_if_t<
-          !guts::disjunction<
-              std::is_lvalue_reference<Args>...,
-              guts::negation<std::is_constructible<IValue, Args>>...>::value,
-          std::nullptr_t> = nullptr>
-  IValue(std::tuple<Args...>&& t);
   bool isTuple() const {
     return Tag::Tuple == tag;
   }
@@ -682,22 +648,18 @@ struct TORCH_API IValue final {
   }
 
   // Scalar, which gets encoded as either an Int, a Double or a ComplexDouble
-  IValue(const at::Scalar& s) : IValue() {
+  IValue(at::Scalar s) : IValue() {
     if (s.isFloatingPoint()) {
       *this = s.toDouble();
     } else if (s.isComplex()) {
       *this = s.toComplexDouble();
-    } else if (s.isBoolean()) {
-      *this = s.toBool();
-    } else if (s.isIntegral(false)) {
-      *this = s.toLong();
     } else {
-      TORCH_CHECK(false, "Unknown type in Scalar");
+      *this = s.toLong();
     }
   }
 
   bool isScalar() const {
-    return isDouble() || isInt() || isComplexDouble() || isBool();
+    return isDouble() || isInt() || isComplexDouble();
   }
 
   at::Scalar toScalar() const {
@@ -707,8 +669,6 @@ struct TORCH_API IValue final {
       return toInt();
     else if (isComplexDouble())
       return toComplexDouble();
-    else if (isBool())
-      return toBool();
     throw std::runtime_error("IValue is not a Scalar");
   }
 
@@ -870,15 +830,8 @@ struct TORCH_API IValue final {
   struct HashAliasedIValue {
     size_t operator()(const IValue& val) const {
       if (val.isTensor()) {
-        if (val.toTensor().is_mkldnn()) {
-          // MKLDNN tensors dont have storage and dont create views
-          // or aliasing so we can just use Tensor pointer, TODO: find way
-          // to use mkldnn storage
-          return reinterpret_cast<size_t>(val.toTensor().unsafeGetTensorImpl());
-        } else {
-          return reinterpret_cast<size_t>(
-              val.toTensor().storage().unsafeGetStorageImpl());
-        }
+        return reinterpret_cast<size_t>(
+            val.toTensor().storage().unsafeGetStorageImpl());
       }
       // If it is not a Tensor, then two mutable IValues alias each other only
       // if they are the same pointer.
