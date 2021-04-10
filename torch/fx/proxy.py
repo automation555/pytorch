@@ -2,15 +2,15 @@ import dis
 import torch
 import inspect
 import operator
-import traceback
+import builtins
+from typing import Union
 
 from .graph import magic_methods, reflectable_magic_methods, Graph
 from typing import Tuple, Dict, Optional, Iterable, Any, Iterator
-from .node import Target, Node, Argument, base_types, map_aggregate
+from .node import Target, Node, Argument, base_types
 
 class TracerBase:
     graph: Graph
-    record_stack_traces : bool = False
 
     def create_node(self, kind : str, target : Target,
                     args : Tuple[Argument, ...], kwargs : Dict[str, Argument], name : Optional[str] = None,
@@ -38,44 +38,15 @@ class TracerBase:
         a default parameter, we use the ``args`` tuple. ``args`` is
         otherwise empty for ``placeholder`` Nodes.
         '''
-
-        args_ = self.create_arg(args)
-        kwargs_ = self.create_arg(kwargs)
+        try:
+            self._cached_user_frame = self.find_user_frame()
+            args_ = self.create_arg(args)
+            kwargs_ = self.create_arg(kwargs)
+        finally:
+            self._cached_user_frame = None
         assert isinstance(args_, tuple)
         assert isinstance(kwargs_, dict)
-        proxy = self.proxy(self.create_node(kind, target, args_, kwargs_, name, type_expr))
-
-        # Optionally set stack trace on the created Node for debugging purposes
-        if self.record_stack_traces:
-            user_frame = self._find_user_frame()
-            if user_frame:
-                walk_stack_gen = traceback.walk_stack(user_frame)
-                summary = traceback.StackSummary.extract(walk_stack_gen)  # type: ignore
-                tb_lines = summary.format()
-                proxy.node.stack_trace = ''.join(tb_lines)
-
-        return proxy
-
-    def _find_user_frame(self):
-        """
-        Find the Python stack frame executing the user code during
-        symbolic tracing.
-        """
-        # We have to do a little dance here. Basically, walk up the callstack and
-        # record the first frame not in the FX source. This is the frame executing
-        # the user code during tracing.
-        frame = inspect.currentframe()
-
-        fx_files = ['torch/fx/proxy.py', 'torch/fx/symbolic_trace.py']
-        while frame:
-            frame = frame.f_back
-            if frame and all(not frame.f_code.co_filename.endswith(file) for file in fx_files):
-                break
-
-        if not frame:
-            return None
-
-        return frame
+        return self.proxy(self.create_node(kind, target, args_, kwargs_, name, type_expr))
 
     def create_arg(self, a: Any) -> Argument:
         """
@@ -96,17 +67,8 @@ class TracerBase:
         elif isinstance(a, dict):
             r = {}
             for k, v in a.items():
-                # Check for invalid dict keys. We do not want a Proxy to appear
-                # anywhere within the key. Since keys can be collection types,
-                # we iterate through the key with map_aggregate
-                k = self.create_arg(k)
-
-                def no_node(arg):
-                    if isinstance(arg, Node):
-                        raise RuntimeError("Keys for dictionaries used as an argument cannot contain a "
-                                           "Node. Got key: {k}")
-                map_aggregate(k, no_node)
-
+                if not isinstance(k, str):
+                    raise NotImplementedError(f"dictionaries with non-string keys: {a}")
                 r[k] = self.create_arg(v)
             return r
         elif isinstance(a, slice):
@@ -114,11 +76,66 @@ class TracerBase:
 
         if isinstance(a, Proxy):
             # base case: we unwrap the Proxy object
+            reasonable_name = self.find_reasonable_name(a)
+            if reasonable_name is not None and not a.node.name.startswith(reasonable_name):
+                a.node.name = a.tracer.graph._create_unique_name(reasonable_name)
             return a.node
-        elif isinstance(a, base_types) or a is None or a is ...:
+        elif isinstance(a, base_types) or a is None:
             return a
 
         raise NotImplementedError(f"argument of type: {type(a)}")
+
+    def find_user_frame(self):
+        """
+        Find the Python stack frame executing the user code during
+        symbolic tracing.
+        """
+        # We have to do a little dance here. Basically, walk up the callstack and
+        # record the first frame not in the FX source. This is the frame executing
+        # the user code during tracing.
+        frame = inspect.currentframe()
+
+        fx_files = ['torch/fx/proxy.py', 'torch/fx/symbolic_trace.py']
+        while frame:
+            frame = frame.f_back
+            if frame and all(not frame.f_code.co_filename.endswith(file) for file in fx_files):
+                break
+
+        if not frame:
+            return None
+
+        return frame
+
+    def find_reasonable_name(self, obj: 'Proxy') -> Optional[str]:
+        """
+        Find a reasonable name for this proxy object. By default, this introspects
+        the Python interpreter state to find the name this Proxy was assigned to
+        in the user code
+        """
+
+        # Retrieve the cached user frame. This is a performance optimization
+        # so we don't have to do the frame lookup for every single proxy input
+        frame = getattr(self, '_cached_user_frame', None)
+        if not frame:
+            frame = self.find_user_frame()
+
+        if not frame:
+            return None
+
+        f_locals = frame.f_locals
+
+        found_name : Optional[str] = None
+        for k, v in f_locals.items():
+            if obj is v:
+                # Arbitrary tie-breaker: use the shortest name found in the
+                # frame. This will account for cases e.g. `x` and `identity`
+                # in the same frame (as in ResNet). This tie-breaker makes it
+                # so that we use a consistent name. TODO: Futher introspect
+                # into Python bytecode state to get the actual name used?
+                if not found_name or len(k) < len(found_name):  # type: ignore
+                    found_name = k
+
+        return found_name
 
     def to_bool(self, obj: 'Proxy') -> bool:
         """Called when a proxy object is being converted to a boolean, such as
@@ -155,20 +172,17 @@ class TraceError(ValueError):
     pass
 
 
-class Proxy:
-    """
-    ``Proxy`` objects are ``Node`` wrappers that flow through the
-    program during symbolic tracing and record all the operations
-    (``torch`` function calls, method calls, operators) that they touch
-    into the growing FX Graph.
+# Proxy objects are stand-in values for normal values in a PyTorch computation.
+# Instead of performing compute they record computation into Graph.
+# Each proxy wraps the Node instance that represents the expression that define the
+# value.
 
-    If you're doing graph transforms, you can wrap your own ``Proxy``
-    method around a raw ``Node`` so that you can use the overloaded
-    operators to add additional things to a ``Graph``.
-    """
+class Proxy:
     def __init__(self, node: Node, tracer: 'Optional[TracerBase]' = None):
         if tracer is None:
-            # This allows you to create a Proxy object around a raw Node
+            # this allows you to create a proxy object around a raw node
+            # so that if you are doing graph transforms you can use the overloaded operators
+            # to add additional things to a graph.
             tracer = GraphAppendingTracer(node.graph)
         self.tracer = tracer
         self.node = node
@@ -202,22 +216,22 @@ class Proxy:
         return self.tracer.keys(self)
 
     def __len__(self):
-        raise RuntimeError("'len' is not supported in symbolic tracing by default. If you want "
-                           "this call to be recorded, please call torch.fx.wrap('len') at "
-                           "module scope")
+        raise RuntimeError("'len' is not supported. Replace it with 'torch.fx.len'.")
 
     def __torch_function__(self, orig_method, types, args=None, kwargs=None):
         args = args if args else ()
         kwargs = kwargs if kwargs else {}
-        if isinstance(orig_method, torch._C.ScriptMethod):
-            assert isinstance(args[0], torch._C.ScriptMethod)
-            args = (args[0].owner,) + args[1:]
-            return self.tracer.create_proxy('call_method', orig_method.name, args, kwargs)
         if torch.overrides.is_tensor_method_or_property(orig_method):
             return self.tracer.create_proxy('call_method', orig_method.__name__, args, kwargs)
         else:
             return self.tracer.create_proxy('call_function', orig_method, args, kwargs,
                                             name=self.tracer.graph._target_to_str(orig_method.__name__))
+
+def len(item: Any) -> Union[Proxy, int]:
+    if not isinstance(item, Proxy):
+        return builtins.len(item)
+
+    return item.tracer.create_proxy('call_function', builtins.len, (item,), {})
 
 class Attribute(Proxy):
     def __init__(self, root: Proxy, attr: str):

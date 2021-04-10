@@ -2,9 +2,8 @@ from torch.fx.graph_module import GraphModule
 from torch.fx.node import Node, map_arg
 from typing import Dict, List, Set, NamedTuple, Tuple
 import torch
-from torch.fx.passes.split_module import split_module
+from torch.fx.experimental.subgraph_creation_example import split_module
 import operator
-from torch.fx.experimental.graph_manipulation import get_size_of_all_nodes
 from torch.fx.experimental.partitioner_utils import Partition, \
     Device, PartitionerConfig, get_partition_to_latency_mapping,\
     get_latency_of_partitioned_graph, NodeLatency, get_extra_size_of, \
@@ -256,8 +255,6 @@ class Partitioner:
         self.devices = partitioner_config.devices
         if len(self.devices) == 0:
             raise RuntimeError('No devices')
-        # Tag the size in bytes to all nodes in the graph_module.
-        get_size_of_all_nodes(self.graph_module)
         # Check if there are op nodes in the fx module
         nodes = self.graph_module.graph.nodes
         if all(node.op in {'placeholder', 'get_attr', 'output'} for node in nodes):
@@ -436,7 +433,7 @@ class Partitioner:
                 output_nodes = list(node.users)
             else:
                 output_nodes = [node]
-            partition_id = int(node.name.rsplit('_', 1)[-1])
+            partition_id = int(node.target.rsplit('_', 1)[-1])
             device_ids = self.partitions[partition_id].logical_device_ids
             size_bytes = self.partitions[partition_id].used_mem_bytes
             dag.create_node(node, list(input_nodes), output_nodes, device_ids, size_bytes)
