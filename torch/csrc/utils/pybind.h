@@ -2,6 +2,7 @@
 
 #include <torch/csrc/python_headers.h>
 
+#include <c10/util/string_view.h>
 #include <ATen/ATen.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
@@ -11,6 +12,7 @@
 #include <torch/csrc/utils/python_tuples.h>
 #include <torch/csrc/utils/python_numbers.h>
 #include <torch/csrc/Generator.h>
+#include <torch/csrc/Dtype.h>
 
 #include <stdexcept>
 #include <utility>
@@ -28,7 +30,6 @@ namespace pybind11 { namespace detail {
 template <>
 struct type_caster<at::Tensor> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Tensor, _("at::Tensor"));
 
   bool load(handle src, bool) {
@@ -49,7 +50,6 @@ struct type_caster<at::Tensor> {
 template <>
 struct type_caster<at::Generator> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Generator, _("at::Generator"));
 
   bool load(handle src, bool) {
@@ -69,14 +69,12 @@ struct type_caster<at::Generator> {
 
 template<> struct type_caster<at::IntArrayRef> {
 public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::IntArrayRef, _("at::IntArrayRef"));
 
   bool load(handle src, bool) {
     PyObject *source = src.ptr();
     auto tuple = PyTuple_Check(source);
     if (tuple || PyList_Check(source)) {
-      // NOLINTNEXTLINE(bugprone-branch-clone)
       auto size = tuple ? PyTuple_GET_SIZE(source) : PyList_GET_SIZE(source);
       v_value.resize(size);
       for (int idx = 0; idx < size; idx++) {
@@ -102,8 +100,30 @@ private:
   std::vector<int64_t> v_value;
 };
 
+// torch.dtype <-> at::ScalarType conversions
+template<> struct type_caster<at::ScalarType> {
+public:
+  PYBIND11_TYPE_CASTER(at::ScalarType, _("at::ScalarType"));
+
+  bool load(handle src, bool) {
+    value = src.cast<const torch::PyDtype&>().scalar_type;
+    return true;
+  }
+
+  static handle cast(at::ScalarType scalar_type, return_value_policy /* policy */, handle /* parent */) {
+    return py::cast(torch::getPyDtype(scalar_type), return_value_policy::reference).release();
+  }
+};
+
 // Pybind11 bindings for our optional type.
 // http://pybind11.readthedocs.io/en/stable/advanced/cast/stl.html#c-17-library-containers
 template <typename T>
 struct type_caster<c10::optional<T>> : optional_caster<c10::optional<T>> {};
+
+// Pybind11 bindings for our string_view type.
+// https://pybind11.readthedocs.io/en/stable/advanced/cast/strings.html
+template <typename CharT>
+struct type_caster<c10::basic_string_view<CharT>, enable_if_t<is_std_char_type<CharT>::value>>
+    : string_caster<c10::basic_string_view<CharT>, true> {};
+
 }} // namespace pybind11::detail
