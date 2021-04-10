@@ -273,7 +273,8 @@ std::vector<Value*> ReshapeToAdvancedIndexingFormat(
 std::vector<Value*> ConvertIndexPutToONNX(
     Block* new_block,
     Node* old_node,
-    std::unordered_map<Value*, Value*>& env) {
+    std::unordered_map<Value*, Value*>& env,
+    bool static_input_shape) {
   if (old_node->kind() != Symbol::fromQualString("onnx::Placeholder") ||
       (old_node->s(attr::name) != "index_put" &&
        old_node->s(attr::name) != "index_put_")) {
@@ -336,7 +337,7 @@ std::vector<Value*> ConvertIndexPutToONNX(
       continue;
     }
 
-    NodeToONNX(at_n, new_block, torch::onnx::OperatorExportTypes::ONNX, env);
+    NodeToONNX(at_n, new_block, torch::onnx::OperatorExportTypes::ONNX, env, static_input_shape);
   }
 
   // Find onnx outputs corresponding to the aten outputs of index_put.
@@ -352,7 +353,8 @@ std::vector<Value*> ConvertIndexPutToONNX(
 std::vector<Value*> ConvertPatternFromSubblock(
     Block* new_block,
     Node* old_node,
-    std::unordered_map<Value*, Value*>& env) {
+    std::unordered_map<Value*, Value*>& env,
+    bool static_input_shape) {
   std::vector<Value*> res;
 
   if (old_node->kind() != Symbol::fromQualString("onnx::Placeholder")) {
@@ -363,7 +365,7 @@ std::vector<Value*> ConvertPatternFromSubblock(
   // subblock.
   auto op_name = old_node->s(attr::name);
   if (op_name == "index_put" || op_name == "index_put_") {
-    res = ConvertIndexPutToONNX(new_block, old_node, env);
+    res = ConvertIndexPutToONNX(new_block, old_node, env, static_input_shape);
   }
 
   return res;

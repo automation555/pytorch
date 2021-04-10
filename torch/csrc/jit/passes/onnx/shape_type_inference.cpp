@@ -1,6 +1,5 @@
 #include <torch/csrc/jit/passes/onnx/shape_type_inference.h>
 
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/onnx/constant_fold.h>
 #include <torch/csrc/jit/passes/onnx/constant_map.h>
@@ -739,7 +738,7 @@ void ProcessSliceNode(Node* n, int opset_version) {
       std::vector<int64_t> start_vector;
       std::vector<int64_t> end_vector;
       std::vector<int64_t> axes_vector(input0_shape_value.size(), 0);
-      for (const auto i : c10::irange(input0_shape_value.size())) {
+      for (int64_t i = 0; i < input0_shape_value.size(); i++) {
         axes_vector[i] = i;
       }
       std::vector<int64_t> step_vector;
@@ -1074,7 +1073,7 @@ bool IsListConstructIntType(const Value* v) {
   return false;
 }
 
-void ProcessConstantValueMap(Node* n, int opset_version) {
+void ProcessConstantValueMap(Node* n, int opset_version, bool static_input_shape) {
   // Update ConstantValueMap on node outputs from onnx shape inference
   // For outputs, only update static shapes. For input, we update symbolic
   // shapes also. ONNX If can have different types on different branches, skip
@@ -1099,9 +1098,16 @@ void ProcessConstantValueMap(Node* n, int opset_version) {
       if (input_type->dim().has_value()) {
         size_t rank = static_cast<size_t>(input_type->dim().value());
         ConstantValueMap::SetRank(n->input(i)->debugName(), rank);
-        auto shape = input_type->symbolic_sizes();
-        if (!ConstantValueMap::HasShape(n->input(i)->debugName())) {
-          UpdateShape(n->input(i), shape);
+        // Only update shape if the input is onnx node.
+        // If it is aten operators, for example,
+        //   Float(20, 20, strides=[1, 0], requires_grad=0, device=cpu),
+        //     %399 : Float(20, 20, strides=[0, 1], requires_grad=0, device=cpu) = prim::ListUnpack(%397)
+        // The tracer shape may not be correct when dynamic_axes is enabled.
+        if (n->input(i)->node()->kind().is_onnx() || static_input_shape) {
+          auto shape = input_type->symbolic_sizes();
+          if (!ConstantValueMap::HasShape(n->input(i)->debugName())) {
+            UpdateShape(n->input(i), shape);
+          }
         }
       }
     } else if (IsListConstructIntType(n->input(i))) {
@@ -1205,7 +1211,8 @@ void FetchBlockInputMetadataFromParent(Block* b) {
 void ONNXShapeTypeInference(
     Block* b,
     const ParamMap& params_dict,
-    int opset_version) {
+    int opset_version,
+    bool static_input_shape) {
   FetchBlockInputMetadataFromParent(b);
   auto valsToParamsMap = buildValueToParamsMap(b, params_dict);
   for (auto const& it : valsToParamsMap) {
@@ -1228,9 +1235,9 @@ void ONNXShapeTypeInference(
   }
   for (auto n : b->nodes()) {
     for (auto subblock : n->blocks()) {
-      ONNXShapeTypeInference(subblock, params_dict, opset_version);
+      ONNXShapeTypeInference(subblock, params_dict, opset_version, static_input_shape);
     }
-    ONNXShapeTypeInference(n, params_dict, opset_version);
+    ONNXShapeTypeInference(n, params_dict, opset_version, static_input_shape);
   }
 }
 
@@ -1239,7 +1246,8 @@ void ONNXShapeTypeInference(
 void ONNXShapeTypeInference(
     Node* n,
     const ParamMap& params_dict,
-    int opset_version) {
+    int opset_version,
+    bool static_input_shape) {
   GRAPH_UPDATE(
       "Running ONNX shape inference for node: ", n->kind().toDisplayString());
   if (!IsSupportedNode(n)) {
@@ -1295,7 +1303,7 @@ void ONNXShapeTypeInference(
   }
 
   SpecialPostProcess(n);
-  ProcessConstantValueMap(n, opset_version);
+  ProcessConstantValueMap(n, opset_version, static_input_shape);
   GRAPH_DEBUG(
       "Torch graph after shape inference:", n->owningGraph()->toString());
 }
@@ -1502,9 +1510,10 @@ void ONNXAssignOutputShape(
 void ONNXShapeTypeInference(
     std::shared_ptr<Graph>& graph,
     const ParamMap& params_dict,
-    int opset_version) {
+    int opset_version,
+    bool static_input_shape) {
   ConstantValueMap::ClearMaps();
-  ONNXShapeTypeInference(graph->block(), params_dict, opset_version);
+  ONNXShapeTypeInference(graph->block(), params_dict, opset_version, static_input_shape);
 }
 
 } // namespace jit

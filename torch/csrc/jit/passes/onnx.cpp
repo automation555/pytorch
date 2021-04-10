@@ -163,20 +163,32 @@ void PreprocessCaffe2Ops(std::shared_ptr<Graph>& graph) {
 // Transform PythonOps into Nodes that match ONNX semantics.
 std::shared_ptr<Graph> ToONNX(
     std::shared_ptr<Graph>& graph,
-    ::torch::onnx::OperatorExportTypes operator_export_type) {
+    ::torch::onnx::OperatorExportTypes operator_export_type,
+    bool static_input_shape,
+    const ParamMap& params_dict,
+    int opset_version) {
   auto constant_value_map = ConstantValueMap::getInstance();
   ConstantValueMap::ClearMaps();
   auto new_graph = std::make_shared<Graph>(graph->current_scope());
   std::unordered_map<Value*, Value*> env;
-  BlockToONNX(graph->block(), new_graph->block(), operator_export_type, env);
+  auto enable_const_folding = true;
+  BlockToONNX(graph->block(), new_graph->block(), operator_export_type, env, static_input_shape, params_dict, opset_version, enable_const_folding);
   return new_graph;
 }
 
-void BlockToONNX(
+// BlockToONNX.
+// is_sub_block means the old_block (aten graph) is a sub block of the new block (onnx graph).
+// In this case, we don't register the output or eliminate the dead code.
+std::unordered_map<Value*, Value*> BlockToONNX(
     Block* old_block,
     Block* new_block,
     ::torch::onnx::OperatorExportTypes operator_export_type,
-    std::unordered_map<Value*, Value*> env) {
+    std::unordered_map<Value*, Value*>& env,
+    bool static_input_shape,
+    const ParamMap& params_dict,
+    int opset_version,
+    bool enable_const_folding,
+    bool is_sub_block) {
   torch::autograd::SymbolicContext ctx{};
   ctx.block = new_block;
 
@@ -192,24 +204,34 @@ void BlockToONNX(
 
   // Finally, visit all nodes in the graph
   for (auto node : old_block->nodes()) {
-    NodeToONNX(node, ctx.block, operator_export_type, env);
+    NodeToONNX(node, ctx.block, operator_export_type, env, static_input_shape, enable_const_folding, params_dict, opset_version);
   }
+
+  if (is_sub_block) {
+    return env;
+  }
+
   for (auto output : old_block->outputs()) {
     ctx.block->registerOutput(env.at(output));
   }
-
   // Run dce to clean-up unused functional and inplace ops.
   EliminateDeadCode(
       ctx.block,
       true,
       DCESideEffectPolicy::ALLOW_DELETING_NODES_WITH_SIDE_EFFECTS);
+
+  return {};
 }
 
 void NodeToONNX(
     Node* old_node,
     Block* new_block,
     ::torch::onnx::OperatorExportTypes operator_export_type,
-    std::unordered_map<Value*, Value*>& env) {
+    std::unordered_map<Value*, Value*>& env,
+    bool static_input_shape,
+    bool enable_const_folding,
+    const ParamMap& params_dict,
+    int opset_version) {
   py::object onnx = py::module::import("torch.onnx");
   py::object onnx_symbolic = py::module::import("torch.onnx.symbolic_helper");
   py::object onnx_registry = py::module::import("torch.onnx.symbolic_registry");
@@ -249,13 +271,33 @@ void NodeToONNX(
         //
         // If onnx shape inference is turned on, the new outputs will have
         // types inferred, and they will be merged with the old types.
-        outputs[i]->setType(MergeInferredType(old->type(), outputs[i]->type()));
+        if (enable_const_folding &&
+            outputs[i]->node()->kind() != c10::onnx::Constant &&
+            ConstantValueMap::HasValue(outputs[i]->debugName())) {
+          // Perform const folding if the node output value is in ConstantValueMap.
+          auto value =
+              ConstantValueMap::GetValue(outputs[i]->debugName()).value();
+          Node* const_node = new_block->owningGraph()->create(c10::onnx::Constant);
+          const_node->t_(attr::value, value);
+          const_node->output()->setType(TensorType::create(value));
+          // const_node->output()->setType(MergeInferredType(old->type(), outputs[i]->type()));
 
-        // Copy over source location and scope information to all nodes
-        // created by the symbolic
-        outputs[i]->node()->setSourceRange(node->sourceRange());
-        outputs[i]->node()->setScope(node->scope());
-        env[old] = outputs[i];
+          // Copy over source location and scope information to all nodes
+          // created by the symbolic
+          const_node->output()->node()->setSourceRange(node->sourceRange());
+          const_node->output()->node()->setScope(node->scope());
+          new_block->owningGraph()->appendNode(const_node);
+          ONNXShapeTypeInference(const_node, params_dict, opset_version, static_input_shape);
+          env[old] = const_node->output();
+        } else {
+          outputs[i]->setType(MergeInferredType(old->type(), outputs[i]->type()));
+
+          // Copy over source location and scope information to all nodes
+          // created by the symbolic
+          outputs[i]->node()->setSourceRange(node->sourceRange());
+          outputs[i]->node()->setScope(node->scope());
+          env[old] = outputs[i];
+        }
       } else {
         // Null output means that the ONNX op doesn't have outputs corresponding
         // to certain PyTorch outputs

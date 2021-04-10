@@ -28,6 +28,8 @@ void CastAllConstantToFloating(Block* block) {
     if (node->kind() == onnx::Constant) {
       auto val = node->t(attr::value);
       at::ScalarType dtype = val.scalar_type();
+      at::Tensor val_cast = val;
+      val_cast.copy_(val);
       if (dtype != at::ScalarType::Double && dtype != at::ScalarType::Float &&
           dtype != at::ScalarType::Half) {
         int to_type;
@@ -38,12 +40,12 @@ void CastAllConstantToFloating(Block* block) {
           case at::ScalarType::Short:
           case at::ScalarType::Bool:
             to_type = ATenTypeToOnnxType(val.scalar_type());
-            val = val.to(at::ScalarType::Float);
+            val_cast = val.to(at::ScalarType::Float);
             break;
 
           case at::ScalarType::Long:
             to_type = ATenTypeToOnnxType(val.scalar_type());
-            val = val.to(at::ScalarType::Double);
+            val_cast = val.to(at::ScalarType::Double);
             break;
 
           default:
@@ -51,9 +53,10 @@ void CastAllConstantToFloating(Block* block) {
         }
         // create a cast node
         node->removeAttribute(attr::value);
-        node->t_(attr::value, val);
+        node->t_(attr::value, val_cast);
         Node* cast_node = graph->create(onnx::Cast, 1);
         cast_node->i_(attr::to, to_type);
+        cast_node->output()->setType(TensorType::create(val));
         cast_node->insertAfter(node);
         // get input from cast node
         node->outputs().at(0)->replaceAllUsesWith(cast_node->outputs().at(0));

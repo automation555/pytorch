@@ -214,15 +214,17 @@ void initJITBindings(PyObject* module) {
           "_jit_pass_onnx_node_shape_type_inference",
           [](Node* n,
              std::map<std::string, IValue>& params_dict,
-             int opset_version) {
-            ONNXShapeTypeInference(n, params_dict, opset_version);
+             int opset_version,
+             bool static_input_shape) {
+            ONNXShapeTypeInference(n, params_dict, opset_version, static_input_shape);
           })
       .def(
           "_jit_pass_onnx_graph_shape_type_inference",
           [](std::shared_ptr<Graph>& graph,
              std::map<std::string, IValue>& params_dict,
-             int opset_version) {
-            ONNXShapeTypeInference(graph, params_dict, opset_version);
+             int opset_version,
+             bool static_input_shape) {
+            ONNXShapeTypeInference(graph, params_dict, opset_version, static_input_shape);
           })
       .def("_jit_pass_onnx_set_dynamic_input_shape", ONNXSetDynamicInputShape)
       .def("_jit_pass_fuse", FuseGraph)
@@ -295,9 +297,7 @@ void initJITBindings(PyObject* module) {
       .def(
           "_jit_pass_quant_fusion",
           [](std::shared_ptr<Graph>& g) { return QuantFusion(g); })
-      .def(
-          "_jit_pass_fold_convbn",
-          [](Module& module) { return FoldConvBatchNorm(module); })
+      .def("_jit_pass_fold_convbn", &FoldConvBatchNorm)
       .def(
           "_jit_onnx_list_model_parameters",
           [](Module& module) { return list_module_parameters(module); })
