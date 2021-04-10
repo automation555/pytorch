@@ -1,9 +1,8 @@
 /* C++ template for Timer.timeit
 
 This template will be consumed by `cpp_jit.py`, and will replace:
-    `GLOBAL_SETUP_TEMPLATE_LOCATION`,
+    `GLOBAL_SETUP_TEMPLATE_LOCATION`
     `SETUP_TEMPLATE_LOCATION`
-      and
     `STMT_TEMPLATE_LOCATION`
 sections with user provided statements.
 */
@@ -15,9 +14,8 @@ sections with user provided statements.
 // Global setup. (e.g. #includes)
 // GLOBAL_SETUP_TEMPLATE_LOCATION
 
-double timeit(int n) {
-    pybind11::gil_scoped_release no_gil;
 
+double timeit(int n) {
     // Setup
     // SETUP_TEMPLATE_LOCATION
 

@@ -2,7 +2,7 @@
 import enum
 import timeit
 import textwrap
-from typing import overload, Any, Callable, Dict, List, NoReturn, Optional, Tuple, Type, Union
+from typing import Any, Callable, Dict, List, NoReturn, Optional, Type, Union
 
 import numpy as np
 import torch
@@ -32,7 +32,7 @@ class CPPTimer:
         self,
         stmt: str,
         setup: str,
-        global_setup: str,
+        global_setup: Optional[str],
         timer: Callable[[], float],
         globals: Dict[str, Any],
     ) -> None:
@@ -51,15 +51,15 @@ class CPPTimer:
 
         self._stmt: str = textwrap.dedent(stmt)
         self._setup: str = textwrap.dedent(setup)
-        self._global_setup: str = textwrap.dedent(global_setup)
+        self._global_setup: str = textwrap.dedent(global_setup or "")
         self._timeit_module: Optional[TimeitModuleType] = None
 
     def timeit(self, number: int) -> float:
         if self._timeit_module is None:
             self._timeit_module = cpp_jit.compile_timeit_template(
-                stmt=self._stmt,
-                setup=self._setup,
-                global_setup=self._global_setup,
+                self._stmt,
+                self._setup,
+                self._global_setup,
             )
 
         return self._timeit_module.timeit(number)
@@ -179,7 +179,7 @@ class Timer(object):
         self,
         stmt: str = "pass",
         setup: str = "pass",
-        global_setup: str = "",
+        global_setup: Optional[str] = None,
         timer: Callable[[], float] = timer,
         globals: Optional[Dict[str, Any]] = None,
         label: Optional[str] = None,
@@ -201,11 +201,8 @@ class Timer(object):
             # Include `torch` if not specified as a convenience feature.
             self._globals.setdefault("torch", torch)
             self._language: Language = Language.PYTHON
-            if global_setup:
-                raise ValueError(
-                    f"global_setup is C++ only, got `{global_setup}`. Most "
-                    "likely this code can simply be moved to `setup`."
-                )
+            if global_setup is not None:
+                raise ValueError(f"global_setup is C++ only, got `{global_setup}`")
 
         elif language in (Language.CPP, "cpp", "c++"):
             assert self._timer_cls is timeit.Timer, "_timer_cls has already been swapped."
@@ -310,9 +307,6 @@ class Timer(object):
                     break
                 if time_taken > min_run_time:
                     break
-                # Avoid overflow in C++ pybind11 interface
-                if number * 10 > 2147483647:
-                    break
                 number *= 10
         return number
 
@@ -406,36 +400,11 @@ class Timer(object):
             task_spec=self._task_spec
         )
 
-    @overload
-    def collect_callgrind(
-        self,
-        number: int,
-        *,
-        repeats: None,
-        collect_baseline: bool,
-        retain_out_file: bool,
-    ) -> valgrind_timer_interface.CallgrindStats:
-        ...
-
-    @overload
-    def collect_callgrind(
-        self,
-        number: int,
-        *,
-        repeats: int,
-        collect_baseline: bool,
-        retain_out_file: bool,
-    ) -> Tuple[valgrind_timer_interface.CallgrindStats, ...]:
-        ...
-
     def collect_callgrind(
         self,
         number: int = 100,
-        *,
-        repeats: Optional[int] = None,
-        collect_baseline: bool = True,
-        retain_out_file: bool = False,
-    ) -> Any:
+        collect_baseline: bool = True
+    ) -> valgrind_timer_interface.CallgrindStats:
         """Collect instruction counts using Callgrind.
 
         Unlike wall times, instruction counts are deterministic
@@ -470,23 +439,15 @@ class Timer(object):
         if not isinstance(self._task_spec.stmt, str):
             raise ValueError("`collect_callgrind` currently only supports string `stmt`")
 
-        if repeats is not None and repeats < 1:
-            raise ValueError("If specified, `repeats` must be >= 1")
-
         # Check that the statement is valid. It doesn't guarantee success, but it's much
         # simpler and quicker to raise an exception for a faulty `stmt` or `setup` in
         # the parent process rather than the valgrind subprocess.
         self._timer.timeit(1)
         is_python = (self._language == Language.PYTHON)
         assert is_python or not self._globals
-        result = valgrind_timer_interface.wrapper_singleton().collect_callgrind(
+        return valgrind_timer_interface.wrapper_singleton().collect_callgrind(
             task_spec=self._task_spec,
             globals=self._globals,
             number=number,
-            repeats=repeats or 1,
             collect_baseline=collect_baseline and is_python,
-            is_python=is_python,
-            retain_out_file=retain_out_file,
-        )
-
-        return (result[0] if repeats is None else result)
+            is_python=is_python)
