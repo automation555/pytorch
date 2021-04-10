@@ -21,6 +21,7 @@ namespace distributed {
 namespace rpc {
 
 #ifdef USE_CUDA_NOT_ROCM
+using at::cuda::CUDAEvent;
 using at::cuda::CUDAStream;
 #endif
 
@@ -35,9 +36,8 @@ struct TORCH_API LazyStreamContext {
   LazyStreamContext() = default;
   virtual ~LazyStreamContext() = default;
   virtual void waitForCurrentStreams(const std::vector<torch::Tensor>& = {}) {}
-  virtual std::set<c10::DeviceIndex> devices() const {
-    return {};
-  }
+  virtual void recordBarrierEvents() {}
+  virtual std::vector<c10::DeviceIndex> deviceIndices() const {return {};}
 
 #ifdef USE_CUDA_NOT_ROCM
   virtual std::vector<CUDAStream> getReservedStreams() const {
@@ -67,7 +67,7 @@ inline std::shared_ptr<LazyStreamContext> createLazyStreamContext() {
 struct TORCH_CUDA_CPP_API CudaLazyStreamContext : public LazyStreamContext {
   using LazyStreamContext::LazyStreamContext;
 
-  // let streams in this context wiat for current streams.
+  // let streams in this context wait for current streams.
   void waitForCurrentStreams(
       const std::vector<torch::Tensor>& tensors = {}) override {
     for (const auto& tensor : tensors) {
@@ -93,6 +93,15 @@ struct TORCH_CUDA_CPP_API CudaLazyStreamContext : public LazyStreamContext {
     return reservedStreams;
   }
 
+  std::vector<c10::DeviceIndex> deviceIndices() const override {
+    std::vector<c10::DeviceIndex> indices;
+    indices.reserve(streams_.size());
+    for (const auto& entry : streams_) {
+      indices.push_back(entry.first);
+    }
+    return indices;
+  }
+
   // get a stream for the given device. If it is the first time using that
   // device, allocate a new stream and store it in the map.
   CUDAStream getStream(c10::DeviceIndex index) override {
@@ -100,6 +109,9 @@ struct TORCH_CUDA_CPP_API CudaLazyStreamContext : public LazyStreamContext {
     if (iter == streams_.end()) {
       auto cudaStream = at::cuda::getStreamFromPool(
           /* isHighPriority */ false, /* device */ index);
+      for (auto& barrierEvent : barrierEvents_) {
+        barrierEvent.block(cudaStream);
+      }
       streams_.emplace(index, cudaStream);
       return cudaStream;
     } else {
@@ -107,16 +119,22 @@ struct TORCH_CUDA_CPP_API CudaLazyStreamContext : public LazyStreamContext {
     }
   }
 
-  std::set<c10::DeviceIndex> devices() const override {
-    std::set<c10::DeviceIndex> devices;
+  // All a CUDAEvent for each CUDAStream in streams_, and all newly created
+  // CUDAStream after this point must for these barrier events.
+  void recordBarrierEvents() override {
+    TORCH_INTERNAL_ASSERT(
+        barrierEvents_.empty(),
+        "recordBarrierEvents should only be called once");
     for (const auto& entry : streams_) {
-      devices.insert(entry.first);
+      at::cuda::CUDAEvent barrierEvent;
+      barrierEvent.record(entry.second);
+      barrierEvents_.emplace_back(std::move(barrierEvent));
     }
-    return devices;
   }
 
  private:
   std::unordered_map<c10::DeviceIndex, CUDAStream> streams_;
+  std::vector<at::cuda::CUDAEvent> barrierEvents_;
 };
 
 inline std::shared_ptr<LazyStreamContext> createLazyStreamContext() {
