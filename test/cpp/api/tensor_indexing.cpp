@@ -83,27 +83,27 @@ TEST(TensorIndexingTest, TestNoIndices) {
   ASSERT_THROWS_WITH(tensor.index_put_(indices, value), "Passing an empty index list to Tensor::index_put_() is not valid syntax");
 }
 
-TEST(TensorIndexingTest, TestAdvancedIndexingWithListOfTensor) {
+TEST(TensorIndexingTest, TestAdvancedIndexingWithArrayRefOfTensor) {
   {
     torch::Tensor tensor = torch::randn({20, 20});
     torch::Tensor index = torch::arange(10, torch::kLong).cpu();
-    torch::Tensor result = at::index(tensor, {index});
+    torch::Tensor result_with_array_ref = tensor.index(at::ArrayRef<torch::Tensor>({index}));
     torch::Tensor result_with_init_list = tensor.index({index});
-    ASSERT_TRUE(result.equal(result_with_init_list));
+    ASSERT_TRUE(result_with_array_ref.equal(result_with_init_list));
   }
   {
     torch::Tensor tensor = torch::randn({20, 20});
     torch::Tensor index = torch::arange(10, torch::kLong).cpu();
-    torch::Tensor result = at::index_put_(tensor, {index}, torch::ones({20}));
+    torch::Tensor result_with_array_ref = tensor.index_put_(at::ArrayRef<torch::Tensor>({index}), torch::ones({20}));
     torch::Tensor result_with_init_list = tensor.index_put_({index}, torch::ones({20}));
-    ASSERT_TRUE(result.equal(result_with_init_list));
+    ASSERT_TRUE(result_with_array_ref.equal(result_with_init_list));
   }
   {
     torch::Tensor tensor = torch::randn({20, 20});
     torch::Tensor index = torch::arange(10, torch::kLong).cpu();
-    torch::Tensor result = at::index_put_(tensor, {index}, torch::ones({1, 20}));
+    torch::Tensor result_with_array_ref = tensor.index_put_(at::ArrayRef<torch::Tensor>({index}), torch::ones({1, 20}));
     torch::Tensor result_with_init_list = tensor.index_put_({index}, torch::ones({1, 20}));
-    ASSERT_TRUE(result.equal(result_with_init_list));
+    ASSERT_TRUE(result_with_array_ref.equal(result_with_init_list));
   }
 }
 
@@ -173,7 +173,7 @@ TEST(TensorIndexingTest, TestBoolIndices) {
 TEST(TensorIndexingTest, TestBoolIndicesAccumulate) {
   auto mask = torch::zeros({10}, torch::kBool);
   auto y = torch::ones({10, 10});
-  y.index_put_({mask}, {y.index({mask})}, /*accumulate=*/true);
+  y.index_put_({mask}, y.index({mask}), /*accumulate=*/true);
   assert_tensor_equal(y, torch::ones({10, 10}));
 }
 
@@ -352,6 +352,12 @@ TEST(TensorIndexingTest, TestEmptySlice_CUDA) {
   ASSERT_TRUE(z.is_contiguous());
 }
 
+// In general calling data_ptr on rvalue indicates a potential use-after-free,
+// but in our tests we really are not going to dereference the pointer.
+static void* get_data_ptr(const torch::Tensor& v) {
+  return v.data_ptr();
+}
+
 TEST(TensorIndexingTest, TestIndexGetitemCopyBoolsSlices) {
   auto true_tensor = torch::tensor(1, torch::kUInt8);
   auto false_tensor = torch::tensor(0, torch::kUInt8);
@@ -359,20 +365,20 @@ TEST(TensorIndexingTest, TestIndexGetitemCopyBoolsSlices) {
   std::vector<torch::Tensor> tensors = {torch::randn({2, 3}), torch::tensor(3)};
 
   for (auto& a : tensors) {
-    ASSERT_NE(a.data_ptr(), a.index({true}).data_ptr());
+    ASSERT_NE(a.data_ptr(), get_data_ptr(a.index({true})));
     {
       std::vector<int64_t> sizes = {0};
       sizes.insert(sizes.end(), a.sizes().begin(), a.sizes().end());
       assert_tensor_equal(torch::empty(sizes), a.index({false}));
     }
-    ASSERT_NE(a.data_ptr(), a.index({true_tensor}).data_ptr());
+    ASSERT_NE(a.data_ptr(), get_data_ptr(a.index({true_tensor})));
     {
       std::vector<int64_t> sizes = {0};
       sizes.insert(sizes.end(), a.sizes().begin(), a.sizes().end());
       assert_tensor_equal(torch::empty(sizes), a.index({false_tensor}));
     }
-    ASSERT_EQ(a.data_ptr(), a.index({None}).data_ptr());
-    ASSERT_EQ(a.data_ptr(), a.index({"..."}).data_ptr());
+    ASSERT_EQ(a.data_ptr(), get_data_ptr(a.index({None})));
+    ASSERT_EQ(a.data_ptr(), get_data_ptr(a.index({"..."})));
   }
 }
 
@@ -460,9 +466,12 @@ TEST(TensorIndexingTest, TestGetitemScalars) {
   assert_tensor_equal(a.index({0, one}), a.index({zero, 1}));
 
   // indexing by a scalar should slice (not copy)
-  ASSERT_EQ(a.index({0, 1}).data_ptr(), a.index({zero, one}).data_ptr());
-  ASSERT_EQ(a.index({1}).data_ptr(), a.index({one.to(torch::kInt)}).data_ptr());
-  ASSERT_EQ(a.index({1}).data_ptr(), a.index({one.to(torch::kShort)}).data_ptr());
+  ASSERT_EQ(get_data_ptr(a.index({0,1})), get_data_ptr(a.index({zero, one})));
+  ASSERT_EQ(
+      get_data_ptr(a.index({1})), get_data_ptr(a.index({one.to(torch::kInt)})));
+  ASSERT_EQ(
+      get_data_ptr(a.index({1})),
+      get_data_ptr(a.index({one.to(torch::kShort)})));
 
   // scalar indexed with scalar
   auto r = torch::randn({});
@@ -644,7 +653,7 @@ TEST(NumpyTests, TestEllipsisIndex) {
   ASSERT_FALSE(a.index({"..."}).is_same(a));
   assert_tensor_equal(a.index({"..."}), a);
   // `a[...]` was `a` in numpy <1.9.
-  ASSERT_EQ(a.index({"..."}).data_ptr(), a.data_ptr());
+  ASSERT_EQ(get_data_ptr(a.index({"..."})), a.data_ptr());
 
   // Slicing with ellipsis can skip an
   // arbitrary number of dimensions

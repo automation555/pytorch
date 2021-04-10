@@ -8,9 +8,6 @@
 #include <ATen/quantized/Quantizer.h>
 #include <torch/custom_class.h>
 #include <torch/library.h>
-
-#include <c10/util/irange.h>
-
 #include <algorithm>
 #include <vector>
 
@@ -62,7 +59,7 @@ c10::intrusive_ptr<LinearPackedParamsBase> PackedLinearWeight::prepack(
     weight_zero_points_int32[0] = weight.q_zero_point();
   } else if (qtype == c10::kPerChannelAffine) {
     weight_zero_points_int32.resize(N, 0);
-    for (const auto i : c10::irange(N)) {
+    for (int i = 0; i < N; ++i) {
       weight_zero_points_int32[i] =
           weight.q_per_channel_zero_points()[i].item<int32_t>();
     }
@@ -72,7 +69,7 @@ c10::intrusive_ptr<LinearPackedParamsBase> PackedLinearWeight::prepack(
     weight_scales_float[0] = weight.q_scale();
   } else if (qtype == c10::kPerChannelAffine) {
     weight_scales_float.resize(N, 0.0);
-    for (const auto i : c10::irange(N)) {
+    for (int i = 0; i < N; ++i) {
       weight_scales_float[i] = weight.q_per_channel_scales()[i].item<float>();
     }
   }
@@ -198,7 +195,8 @@ namespace at {
 namespace native {
 
 at::Tensor _saturate_weight_to_fp16(const Tensor& weight) {
-  float* weight_contig_ptr = weight.contiguous().data_ptr<float>();
+  auto weight_contig = weight.contiguous();
+  float* weight_contig_ptr = weight_contig.data_ptr<float>();
   quant_utils::HandleWeightsSaturation(weight.size(0) * weight.size(1), weight_contig_ptr);
   return weight;
 }

@@ -24,12 +24,12 @@ bool available(
   return xnnpack::internal::available() &&
           // Weight
           (2 == weight.ndimension()) &&
-          (weight.device().is_cpu()) &&
+          (c10::DeviceType::CPU == weight.device().type()) &&
           (kFloat == weight.scalar_type()) &&
           !weight.requires_grad() &&
           // Bias
           ((bias && bias->defined()) ? ((1 == bias->ndimension()) &&
-                                       (bias->device().is_cpu()) &&
+                                       (c10::DeviceType::CPU == bias->device().type()) &&
                                        (kFloat == bias->scalar_type()) &&
                                        (weight.size(Layout::Filter::output)) == bias->size(0) &&
                                        !bias->requires_grad())
@@ -42,8 +42,8 @@ bool available(
 // TODO: Decouple and improve error handling and messages.
 bool usable(const Tensor& input) {
          // Input
-  return (1 <= input.ndimension()) &&
-         (input.device().is_cpu()) &&
+  return (2 <= input.ndimension()) &&
+         (c10::DeviceType::CPU == input.device().type()) &&
          (kFloat == input.scalar_type()) &&
          !input.requires_grad() &&
          true;
@@ -85,15 +85,14 @@ ContextLinear create(
 
   xnn_operator_t linear_op{};
 
+  Tensor bias_contig = bias && bias->defined() ? bias->contiguous() : Tensor();
   const xnn_status create_status = xnn_create_fully_connected_nc_f32(
       weight_contig.size(Layout::Filter::input),                        // input_channels
       weight_contig.size(Layout::Filter::output),                       // output_channels
       weight_contig.size(Layout::Filter::input),                        // input_pixel_stride
       weight_contig.size(Layout::Filter::output),                       // output_pixel_stride
       weight_contig.data_ptr<float>(),                                  // kernel
-      (bias && bias->defined()) ?
-          bias->contiguous().data_ptr<float>() :
-          nullptr,                                                      // bias
+      bias_contig.defined() ? bias_contig.data_ptr<float>() : nullptr,  // bias
       output_min,                                                     // output_min
       output_max,                                                     // output_max
       0u,                                                             // flags
@@ -114,14 +113,8 @@ Tensor run(
     const Tensor& input) {
   using namespace internal;
 
-  // For compatibility with aten::linear
-  auto ip = input;
-  if (input.ndimension() == 1) {
-    ip = input.unsqueeze(0);
-  }
-
   const Tensor padded_input = mobile::allocate_padded_contiguous_if_needed(
-      ip, ip.suggest_memory_format());
+      input, input.suggest_memory_format());
 
   TORCH_CHECK(
       usable(padded_input),
@@ -157,19 +150,14 @@ Tensor run(
       xnn_status_success == run_status,
       "xnn_run_operator failed!");
 
-  // For compatibility with aten::linear
-  if (input.ndimension() == 1) {
-      output.squeeze_(0);
-  }
-
   return output;
 }
 
 c10::intrusive_ptr<xnnpack::LinearOpContext> createLinearClampPrePackOpContext(
     Tensor weight,
     c10::optional<Tensor> bias,
-    const c10::optional<Scalar>& output_min,
-    const c10::optional<Scalar>& output_max) {
+    c10::optional<Scalar> output_min,
+    c10::optional<Scalar> output_max) {
   return xnnpack::XNNPackLinearOpContext::create_context(
       std::move(weight), std::move(bias), output_min, output_max);
 }
