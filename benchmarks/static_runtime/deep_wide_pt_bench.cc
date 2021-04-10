@@ -75,7 +75,8 @@ static void BM_deep_wide_jit_profiling_executor(benchmark::State& state) {
 
 static void BM_deep_wide_static(benchmark::State& state) {
   auto mod = getDeepAndWideSciptModel();
-  torch::jit::StaticModule smod(mod);
+  auto gs = torch::jit::PrepareForStaticRuntime(mod);
+  torch::jit::StaticRuntime runtime(gs.first, gs.second);
 
   const int batch_size = state.range(0);
   auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
@@ -84,19 +85,21 @@ static void BM_deep_wide_static(benchmark::State& state) {
 
   std::vector<at::Tensor> inputs({ad_emb_packed, user_emb, wide});
 
-  smod(inputs);
+  runtime.run(inputs);
   for (auto _ : state) {
-    smod(inputs);
+    runtime.run(inputs);
   }
 }
 
-torch::jit::StaticRuntime getStaticRuntime() {
-  static auto smod = std::make_shared<torch::jit::StaticModule>(getDeepAndWideSciptModel());
-  return torch::jit::StaticRuntime(*smod);
+const std::pair<std::shared_ptr<torch::jit::Graph>, c10::FunctionSchema> & getStaticGraphAndSchema() {
+  static const std::pair<std::shared_ptr<torch::jit::Graph>, c10::FunctionSchema> gs =
+      torch::jit::PrepareForStaticRuntime(getDeepAndWideSciptModel());
+  return gs;
 }
 
 static void BM_deep_wide_static_threaded(benchmark::State& state) {
-   auto sr = getStaticRuntime();
+  auto gs = getStaticGraphAndSchema();
+  torch::jit::StaticRuntime runtime(gs.first, gs.second);
 
   const int batch_size = 1; // state.range(0);
   auto ad_emb_packed = torch::randn({batch_size, 1, embedding_size});
@@ -105,38 +108,39 @@ static void BM_deep_wide_static_threaded(benchmark::State& state) {
 
   std::vector<at::Tensor> inputs({ad_emb_packed, user_emb, wide});
 
-  sr(inputs);
   for (auto _ : state) {
-    sr(inputs);
+    runtime.run(inputs);
   }
 }
 
 static void BM_leaky_relu_const(benchmark::State& state) {
   auto mod = getLeakyReLUConstScriptModel();
-  torch::jit::StaticModule smod(mod);
+  auto gs = torch::jit::PrepareForStaticRuntime(mod);
+  torch::jit::StaticRuntime runtime(gs.first, gs.second);
 
   const int batch_size = state.range(0);
   auto data = torch::randn({batch_size, num_features});
   std::vector<at::Tensor> inputs({data});
 
-  smod(inputs);
+  runtime.run(inputs);
   for (auto _ : state) {
-    smod(inputs);
+    runtime.run(inputs);
   }
 }
 
 static void BM_leaky_relu(benchmark::State& state) {
   auto mod = getLeakyReLUScriptModel();
-  torch::jit::StaticModule smod(mod);
+  auto gs = torch::jit::PrepareForStaticRuntime(mod);
+  torch::jit::StaticRuntime runtime(gs.first, gs.second);
 
   const int batch_size = state.range(0);
   auto neg_slope = torch::randn(1);
   auto data = torch::randn({batch_size, num_features});
   std::vector<at::Tensor> inputs({data, neg_slope[0]});
 
-  smod(inputs);
+  runtime.run(inputs);
   for (auto _ : state) {
-    smod(inputs);
+    runtime.run(inputs);
   }
 }
 
@@ -145,9 +149,10 @@ BENCHMARK(BM_leaky_relu_const)->RangeMultiplier(8)->Ranges({{1, 20}});
 
 static void BM_long_static_memory_optimization(benchmark::State& state) {
   auto mod = getLongScriptModel();
-  torch::jit::StaticModuleOptions opts;
+  auto gs = torch::jit::PrepareForStaticRuntime(mod);
+  torch::jit::StaticRuntimeOptions opts;
   opts.optimize_memory = state.range(1);
-  torch::jit::StaticModule smod(mod, opts);
+  torch::jit::StaticRuntime runtime(gs.first, gs.second, opts);
 
   const auto N = state.range(0);
   auto a = torch::randn({N, N});
@@ -155,9 +160,9 @@ static void BM_long_static_memory_optimization(benchmark::State& state) {
   auto c = torch::randn({N, N});
   std::vector<at::Tensor> inputs({a, b, c});
 
-  smod(inputs);
+  runtime.run(inputs);
   for (auto _ : state) {
-    smod(inputs);
+    runtime.run(inputs);
   }
 }
 
