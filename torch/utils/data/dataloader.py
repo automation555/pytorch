@@ -9,14 +9,13 @@ import os
 import threading
 import itertools
 import warnings
-import queue
 from typing import Any, Callable, TypeVar, Generic, Sequence, List, Optional
 
 import multiprocessing as python_multiprocessing
 import torch
 import torch.multiprocessing as multiprocessing
 from torch._utils import ExceptionWrapper
-from torch._six import string_classes
+from torch._six import queue, string_classes
 
 from . import IterableDataset, Sampler, SequentialSampler, RandomSampler, BatchSampler, Dataset
 from . import _utils
@@ -159,9 +158,9 @@ class DataLoader(Generic[T_co]):
     def __init__(self, dataset: Dataset[T_co], batch_size: Optional[int] = 1,
                  shuffle: bool = False, sampler: Optional[Sampler[int]] = None,
                  batch_sampler: Optional[Sampler[Sequence[int]]] = None,
-                 num_workers: int = 0, collate_fn: Optional[_collate_fn_t] = None,
+                 num_workers: int = 0, collate_fn: _collate_fn_t = None,
                  pin_memory: bool = False, drop_last: bool = False,
-                 timeout: float = 0, worker_init_fn: Optional[_worker_init_fn_t] = None,
+                 timeout: float = 0, worker_init_fn: _worker_init_fn_t = None,
                  multiprocessing_context=None, generator=None,
                  *, prefetch_factor: int = 2,
                  persistent_workers: bool = False):
@@ -309,6 +308,10 @@ class DataLoader(Generic[T_co]):
     def multiprocessing_context(self, multiprocessing_context):
         if multiprocessing_context is not None:
             if self.num_workers > 0:
+                if not multiprocessing._supports_context:
+                    raise ValueError('multiprocessing_context relies on Python >= 3.4, with '
+                                     'support for different start methods')
+
                 if isinstance(multiprocessing_context, string_classes):
                     valid_start_methods = multiprocessing.get_all_start_methods()
                     if multiprocessing_context not in valid_start_methods:
@@ -963,9 +966,8 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 self._index_queues[idx].put(_utils.worker._ResumeIteration())
             resume_iteration_cnt = self._num_workers
             while resume_iteration_cnt > 0:
-                return_idx, return_data = self._get_data()
-                if isinstance(return_idx, _utils.worker._ResumeIteration):
-                    assert return_data is None
+                data = self._get_data()
+                if isinstance(data, _utils.worker._ResumeIteration):
                     resume_iteration_cnt -= 1
         # prime the prefetch loop
         for _ in range(self._prefetch_factor * self._num_workers):
@@ -1192,6 +1194,9 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                     self._try_put_index()
                     continue
 
+            worker_id = self._task_info[idx][0]
+            self._try_put_index(worker_id)
+
             if idx != self._rcvd_idx:
                 # store out-of-order samples
                 self._task_info[idx] += (data,)
@@ -1199,20 +1204,22 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
                 del self._task_info[idx]
                 return self._process_data(data)
 
-    def _try_put_index(self):
+    def _try_put_index(self, worker_queue_idx=None):
         assert self._tasks_outstanding < self._prefetch_factor * self._num_workers
 
         try:
             index = self._next_index()
         except StopIteration:
             return
-        for _ in range(self._num_workers):  # find the next active worker, if any
-            worker_queue_idx = next(self._worker_queue_idx_cycle)
-            if self._workers_status[worker_queue_idx]:
-                break
-        else:
-            # not found (i.e., didn't break)
-            return
+
+        if (worker_queue_idx is None) or (not self._workers_status[worker_queue_idx]):
+            for _ in range(self._num_workers):  # find the next active worker, if any
+                worker_queue_idx = next(self._worker_queue_idx_cycle)
+                if self._workers_status[worker_queue_idx]:
+                    break
+            else:
+                # not found (i.e., didn't break)
+                return
 
         self._index_queues[worker_queue_idx].put((self._send_idx, index))
         self._task_info[self._send_idx] = (worker_queue_idx,)
@@ -1221,7 +1228,6 @@ class _MultiProcessingDataLoaderIter(_BaseDataLoaderIter):
 
     def _process_data(self, data):
         self._rcvd_idx += 1
-        self._try_put_index()
         if isinstance(data, ExceptionWrapper):
             data.reraise()
         return data
