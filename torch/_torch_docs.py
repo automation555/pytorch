@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Adds docstrings to functions defined in the torch._C"""
 
 import re
@@ -1501,6 +1500,84 @@ Example::
     False
 """)
 
+add_docstr(torch.cov,
+           r"""
+cov(input, other=None, rowvar=True, bias=None, ddof=None, fweights=None, aweights=None) -> Tensor
+
+Estimates a covariance matrix, given input tensor data and weights (optional). The unbiased sample covariance 
+of the variables :math:`x` and :math:`y` is given by
+
+.. math::
+    \text{cov}_w(x,y) = \frac{\sum^{N}_{i = 1}(x_{i} - \bar{x})(y_{i} - \bar{y})}{N~-~1}
+
+where, :math:`\bar{x}` and :math:`\bar{y}` are the simple means of the variables respectively. 
+If :attr:`fweights` and/or :attr:`aweights` are provided, the unbaised weighted covariance 
+is calculated, which is given by
+
+.. math::
+    \text{cov}_w(x,y) = \frac{\sum^{N}_{i = 1}w_i(x_{i} - \mu_x^*)(y_{i} - \mu_y^*)}{\sum^{N}_{i = 1}w_i~-~1}
+
+where :math:`\mu_x^* = = \frac{\sum^{N}_{i = 1}w_ix_{i} }{\sum^{N}_{i = 1}w_i}` 
+is the weighted mean of the variable. 
+
+
+Args:
+    input (Tensor): A 1-D or 2-D tensor containing multiple variables and observations.
+        Each row of :attr:`input` represents a variable, and each column a
+        single observation of all those variables. Also see :attr:`rowvar` below.
+    other (Tensor, optional): An additional set of variables and observations.
+        :attr:`other` has the same form as that of :attr:`input` and can be used to provide
+        additional variables for each of the observations which would be considered along with those provided in
+        :attr:`input`. 
+    rowvar (bool, optional): If :attr:`rowvar` is `True` (default), then each row represents a variable,
+        with observations in the columns.
+        Otherwise, the relationship is transposed: each column represents a variable,
+        while the rows contain observations.
+    bias (bool, optional): Default normalization (`False`) is by :math:`(N - 1)` which produces the unbiased covariance estimate,
+        where :math:`N` is the number of observations given.
+        If :attr:`bias` is `True`, then normalization is by :math:`N`.
+        These values can be overridden by using the keyword :attr:`ddof`.
+    ddof (int, optional): If not `None` the default value implied by :attr:`bias` is overridden.
+        Note that :attr:`ddof`:math:`=1` will return the unbiased estimate,
+        even if both :attr:`fweights` and :attr:`aweights` are specified,
+        and :math:`ddof`:math:`=0` will return the simple average.
+    fweights (tensor, optional): 1-D tensor of integer frequency weights;
+        the number of times each observation vector should be repeated.
+    aweights (tensor, optional): 1-D array of observation vector weights.
+        These relative weights are typically large for observations considered “important” and smaller for 
+        observations considered less “important”. If :attr:`ddof`:math:`=0` the tensor of weights can be used to
+        assign probabilities to observation vectors.
+
+Example::
+    >>> x =  torch.tensor([[0, 2], [1, 1], [2, 0]]).T
+    >>> x
+    tensor([[0, 1, 2],
+            [2, 1, 0]])
+    >>> torch.cov(x)
+    tensor([[ 1., -1.],
+            [-1.,  1.]], dtype=torch.float64)
+    >>> x = torch.tensor([-2.1, -1,  4.3])
+    >>> y = torch.tensor([3,  1.1,  0.12])
+    >>> X = torch.stack ((x, y), 0)
+    >>> torch.cov(X)
+    tensor([[11.7100, -4.2860],
+            [-4.2860,  2.1441]])
+    >>> torch.cov(x, y)
+    tensor([[11.7100, -4.2860],
+            [-4.2860,  2.1441]])
+    >>> torch.cov(x)
+    tensor(11.7100)
+    >>> x = torch.rand(3,10)
+    >>> f = torch.arange(10) * 2
+    >>> a = torch.arange(10) ** 2
+    >>> ddof = 1
+    >>> torch.cov(x, fweights = f, aweights = a, ddof = ddof)
+    tensor([[ 0.1070, -0.0098,  0.0382],
+            [-0.0098,  0.0770,  0.0005],
+            [ 0.0382,  0.0005,  0.0416]])
+
+""")
+
 add_docstr(torch.cat,
            r"""
 cat(tensors, dim=0, *, out=None) -> Tensor
@@ -1551,7 +1628,7 @@ Returns a new tensor with the ceil of the elements of :attr:`input`,
 the smallest integer greater than or equal to each element.
 
 .. math::
-    \text{out}_{i} = \left\lceil \text{input}_{i} \right\rceil
+    \text{out}_{i} = \left\lceil \text{input}_{i} \right\rceil = \left\lfloor \text{input}_{i} \right\rfloor + 1
 """ + r"""
 Args:
     {input}
@@ -2983,22 +3060,75 @@ add_docstr(torch.erf,
            r"""
 erf(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erf`.
-""")
+Computes the error function of each element. The error function is defined as follows:
+
+.. math::
+    \mathrm{erf}(x) = \frac{2}{\sqrt{\pi}} \int_{0}^{x} e^{-t^2} dt
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erf`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erf(torch.tensor([0, -1., 10.]))
+    tensor([ 0.0000, -0.8427,  1.0000])
+""".format(**common_args))
 
 add_docstr(torch.erfc,
            r"""
 erfc(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erfc`.
-""")
+Computes the complementary error function of each element of :attr:`input`.
+The complementary error function is defined as follows:
+
+.. math::
+    \mathrm{erfc}(x) = 1 - \frac{2}{\sqrt{\pi}} \int_{0}^{x} e^{-t^2} dt
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erfc`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erfc(torch.tensor([0, -1., 10.]))
+    tensor([ 1.0000, 1.8427,  0.0000])
+""".format(**common_args))
 
 add_docstr(torch.erfinv,
            r"""
 erfinv(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.erfinv`.
-""")
+Computes the inverse error function of each element of :attr:`input`.
+The inverse error function is defined in the range :math:`(-1, 1)` as:
+
+.. math::
+    \mathrm{erfinv}(\mathrm{erf}(x)) = x
+""" + r"""
+
+.. note:: Alias for :func:`torch.special.erfinv`.
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.erfinv(torch.tensor([0, 0.5, -1.]))
+    tensor([ 0.0000,  0.4769,    -inf])
+""".format(**common_args))
 
 add_docstr(torch.exp,
            r"""
@@ -3026,15 +3156,52 @@ add_docstr(torch.exp2,
            r"""
 exp2(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.exp2`.
-""")
+Computes the base two exponential function of :attr:`input`.
+
+.. math::
+    y_{i} = 2^{x_{i}}
+
+.. note:: Alias for :func:`torch.special.exp2`.
+""" + r"""
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.exp2(torch.tensor([0, math.log2(2.), 3, 4]))
+    tensor([ 1.,  2.,  8., 16.])
+""".format(**common_args))
 
 add_docstr(torch.expm1,
            r"""
 expm1(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.expm1`.
-""")
+Returns a new tensor with the exponential of the elements minus 1
+of :attr:`input`.
+
+.. math::
+    y_{i} = e^{x_{i}} - 1
+
+.. note:: This function provides greater precision than exp(x) - 1 for small values of x.
+
+.. note:: Alias for :func:`torch.special.expm1`.
+""" + r"""
+
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> torch.expm1(torch.tensor([0, math.log(2.)]))
+    tensor([ 0.,  1.])
+""".format(**common_args))
 
 add_docstr(torch.eye,
            r"""
@@ -7588,15 +7755,58 @@ Sets the number of threads used for interop parallelism
 add_docstr(torch.sigmoid, r"""
 sigmoid(input, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.expit`.
-""")
+Returns a new tensor with the sigmoid of the elements of :attr:`input`.
+
+.. math::
+    \text{out}_{i} = \frac{1}{1 + e^{-\text{input}_{i}}}
+""" + r"""
+Args:
+    {input}
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> a = torch.randn(4)
+    >>> a
+    tensor([ 0.9213,  1.0887, -0.8858, -1.7683])
+    >>> torch.sigmoid(a)
+    tensor([ 0.7153,  0.7481,  0.2920,  0.1458])
+""".format(**common_args))
 
 add_docstr(torch.logit,
            r"""
 logit(input, eps=None, *, out=None) -> Tensor
 
-Alias for :func:`torch.special.logit`.
-""")
+Returns a new tensor with the logit of the elements of :attr:`input`.
+:attr:`input` is clamped to [eps, 1 - eps] when eps is not None.
+When eps is None and :attr:`input` < 0 or :attr:`input` > 1, the function will yields NaN.
+
+.. math::
+    y_{i} = \ln(\frac{z_{i}}{1 - z_{i}}) \\
+    z_{i} = \begin{cases}
+        x_{i} & \text{if eps is None} \\
+        \text{eps} & \text{if } x_{i} < \text{eps} \\
+        x_{i} & \text{if } \text{eps} \leq x_{i} \leq 1 - \text{eps} \\
+        1 - \text{eps} & \text{if } x_{i} > 1 - \text{eps}
+    \end{cases}
+""" + r"""
+Args:
+    {input}
+    eps (float, optional): the epsilon for input clamp bound. Default: ``None``
+
+Keyword args:
+    {out}
+
+Example::
+
+    >>> a = torch.rand(5)
+    >>> a
+    tensor([0.2796, 0.9331, 0.6486, 0.1523, 0.6516])
+    >>> torch.logit(a, eps=1e-6)
+    tensor([-0.9466,  2.6352,  0.6131, -1.7169,  0.6261])
+""".format(**common_args))
 
 add_docstr(torch.sign,
            r"""
