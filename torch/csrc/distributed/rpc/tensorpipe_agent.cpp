@@ -135,16 +135,16 @@ constexpr int64_t kMultiplexedUvChannelPriority = 100;
 constexpr int64_t kBasicChannelPriority = 0;
 
 #if TENSORPIPE_HAS_CUDA_IPC_CHANNEL && defined(USE_CUDA_NOT_ROCM)
-constexpr int64_t kCudaIpcChannelPriority = 301;
+constexpr int64_t kCudaIpcChannelPriority = 300;
 #endif
 
 #if TENSORPIPE_HAS_CUDA_GDR_CHANNEL && defined(USE_CUDA_NOT_ROCM)
-constexpr int64_t kCudaGdrChannelPriority = 201;
+constexpr int64_t kCudaGdrChannelPriority = 200;
 #endif
 
 #ifdef USE_CUDA_NOT_ROCM
-constexpr int64_t kCudaXthChannelPriority = 401;
-constexpr int64_t kCudaBasicChannelPriority = 101;
+constexpr int64_t kCudaXthChannelPriority = 400;
+constexpr int64_t kCudaBasicChannelPriority = 100;
 #endif
 
 std::unique_ptr<TransportRegistration> makeUvTransport() {
@@ -676,40 +676,11 @@ void TensorPipeAgent::sendCompletedResponseMessage(
     Message&& responseMessage =
         std::move(*futureResponseMessage->value().toCustomClass<Message>());
     responseMessage.setId(messageId);
-
     std::vector<c10::DeviceIndex> devices;
     try {
       devices = getDevicesForRemote(pipe->getRemoteName(), responseMessage);
     } catch (const std::exception& e) {
       responseMessage = createExceptionResponse(e.what(), messageId);
-    }
-
-    auto ctxDevices = ctx->devices();
-    if (!ctxDevices.empty()) {
-      // FIXME: skipping this check when ctxDevices is empty to allow
-      // RRef.to_here().
-      for (const auto& tensor : responseMessage.tensors()) {
-        const auto device = tensor.device().index();
-        if (device != -1 && ctxDevices.find(device) == ctxDevices.end()) {
-          std::ostringstream oss;
-          std::copy(
-              ctxDevices.begin(),
-              ctxDevices.end(),
-              // interpreting c10::DeviceIndex as int32_t to avoid printing
-              // it as a char.
-              std::ostream_iterator<int32_t>(oss, ", "));
-          responseMessage = createExceptionResponse(
-              c10::str(
-                  "RPC detected that a user-function output tensor on device ",
-                  int32_t(device),
-                  ". This device is not one of the input tensor devices: ",
-                  oss.str(),
-                  "which is not yet supported. Please file a feature request "
-                  "issue in PyTorch GitHub repo."),
-              messageId);
-          break;
-        }
-      }
     }
 
     pipeWrite(
@@ -799,6 +770,19 @@ void TensorPipeAgent::respond(std::shared_ptr<tensorpipe::Pipe>& pipe) {
           std::shared_ptr<JitFuture> futureResponseMessage;
           try {
             futureResponseMessage = cb_->operator()(requestMessage);
+            // FIXME: The user function might use a different device than the
+            // ones used in request Tensors. The agent is not aware of which
+            // streams are used on the new devices. It is also not acceptable
+            // to blindly use default/current stream on response devices as a
+            // proxy, because that would force all RPC responses to sync to the
+            // same stream. A temporary workaround is to use request Tensor
+            // streams as barrier proxy. More specifically, the user function
+            // should synchronize new streams or streams on new devices to the
+            // current stream on one of the request Tensor. Then, the agent
+            // guarantees that all subsequent communication on new devices will
+            // also wait for those barrier streams, i.e.,
+            //   new_device_stream -> existing_device_stream -> new_device_comm
+            ctx->recordBarrierEvents();
           } catch (const std::exception& /* unused */) {
             futureResponseMessage =
                 std::make_shared<JitFuture>(at::AnyClassType::get());
