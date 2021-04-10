@@ -4,8 +4,6 @@
 #include <ATen/native/quantized/cpu/fbgemm_utils.h>
 #include <torch/library.h>
 
-#include <c10/util/irange.h>
-
 torch::class_<EmbeddingPackedParamsBase> register_embedding_params();
 
 /*
@@ -183,7 +181,9 @@ Tensor qembeddingbag_byte_prepack(const Tensor& weight) {
 Tensor _qembeddingbag_nbit_prepack_helper(
     const Tensor& weight,
     int bit_width,
-    bool optimized_qparams) {
+    const bool optimized_qparams,
+    const int64_t nbins,
+    const double ratio) {
   int64_t embedding_rows = weight.size(0);
   int64_t embedding_cols = weight.size(1);
 
@@ -241,7 +241,7 @@ Tensor _qembeddingbag_nbit_prepack_helper(
       if (optimized_qparams) {
         at::Tensor xmax_tensor, xmin_tensor;
         std::tie(xmax_tensor, xmin_tensor) = at::choose_qparams_optimized(
-            weight_contig[row], embedding_cols, 200, 0.16, bit_width);
+            weight_contig[row], embedding_cols, nbins, ratio, bit_width);
         TORCH_CHECK(
             xmax_tensor.numel() == 1 && xmin_tensor.numel() == 1,
             "Expected choose_qparams_optimized to return min/max tensors of size 1");
@@ -273,7 +273,7 @@ Tensor _qembeddingbag_nbit_prepack_helper(
       output_row_scale_zp[1] = Xmin;
 
       // Pack the weight values.
-      for (const auto col : c10::irange(embedding_cols)) {
+      for (int col = 0; col < embedding_cols; ++col) {
         float X = input_row[col];
         std::uint8_t quantized = std::max(
             0,
@@ -305,9 +305,11 @@ Tensor _qembeddingbag_nbit_prepack_helper(
 // values, and then 2-byte fp16 scale and 2-byte zero_offset.
 Tensor qembeddingbag_4bit_prepack(
     const Tensor& weight,
-    bool optimized_qparams) {
+    const bool optimized_qparams,
+    const int64_t nbins,
+    const double ratio) {
   return _qembeddingbag_nbit_prepack_helper(
-      weight, 4 /*bit_width*/, optimized_qparams);
+      weight, 4 /*bit_width*/, optimized_qparams, nbins, ratio);
 }
 
 // Applies 2-bit row-wise quantization by determining the range
@@ -320,9 +322,11 @@ Tensor qembeddingbag_4bit_prepack(
 // TODO() - Add 2Bit Embedding Lookup operator.
 Tensor qembeddingbag_2bit_prepack(
     const Tensor& weight,
-    bool optimized_qparams) {
+    const bool optimized_qparams,
+    const int64_t nbins,
+    const double ratio) {
   return _qembeddingbag_nbit_prepack_helper(
-      weight, 2 /*bit_width*/, optimized_qparams);
+      weight, 2 /*bit_width*/, optimized_qparams, nbins, ratio);
 }
 
 class QEmbeddingPackWeights final {

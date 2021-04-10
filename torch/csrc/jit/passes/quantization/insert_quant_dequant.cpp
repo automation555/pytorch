@@ -308,10 +308,16 @@ Node* insertEmbeddingBagOps(Node* observer, const std::string& op_name) {
   std::vector<Value*> prepack_inputs = {observer_out};
   if (op_name == "embedding_bag_4bit") {
     bool optimized_qparams = false;
+    constexpr int NBINS = 200;
+    constexpr float RATIO = 0.16;
     Value* optimized_qparams_false = g->insertConstant(optimized_qparams);
+    Value* nbins_200 = g->insertConstant(NBINS);
+    Value* ratio_0_16 = g->insertConstant(RATIO);
     prepack_fn = "quantized::embedding_bag_4bit_prepack";
     quant_fn = "quantized::embedding_bag_4bit_rowwise_offsets";
     prepack_inputs.push_back(optimized_qparams_false);
+    prepack_inputs.push_back(nbins_200);
+    prepack_inputs.push_back(ratio_0_16);
   } else if (op_name == "embedding_bag_byte") {
     prepack_fn = "quantized::embedding_bag_byte_prepack";
     quant_fn = "quantized::embedding_bag_byte_rowwise_offsets";
@@ -334,9 +340,7 @@ Node* insertEmbeddingBagOps(Node* observer, const std::string& op_name) {
   // Insert prepack op
   Node* prepack = g->create(Symbol::fromQualString(prepack_fn), prepack_inputs);
   g->insertNode(prepack);
-
-  std::vector<Value*> embedding_bag_inputs =
-      embedding_bag_float_op->inputs().vec();
+  const auto& embedding_bag_inputs = embedding_bag_float_op->inputs().vec();
   std::vector<Value*> qembedding_bag_inputs = {prepack->output()};
   const auto inputs_size = embedding_bag_float_op->inputs().size();
   const bool is_aten_op =
