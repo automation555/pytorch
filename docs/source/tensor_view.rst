@@ -22,8 +22,8 @@ For example, to get a view of an existing tensor ``t``, you can call ``t.view(..
     >>> t[0][0]
     tensor(3.14)
 
-Since views share underlying data with its base tensor, if you edit the data
-in the view, it will be reflected in the base tensor as well.
+Since views share underlying data with its base tensor, which implies, editing data
+ in the view will be reflected in the base tensor as well.
 
 Typically a PyTorch op returns a new tensor as output, e.g. :meth:`~torch.Tensor.add`.
 But in case of view ops, outputs are views of input tensors to avoid unncessary data copy.
@@ -73,8 +73,6 @@ For reference, here’s a full list of view ops in PyTorch:
 - :meth:`~torch.Tensor.unbind`
 - :meth:`~torch.Tensor.split`
 - :meth:`~torch.Tensor.split_with_sizes`
-- :meth:`~torch.Tensor.swapaxes`
-- :meth:`~torch.Tensor.swapdims`
 - :meth:`~torch.Tensor.chunk`
 - :meth:`~torch.Tensor.indices` (sparse tensor only)
 - :meth:`~torch.Tensor.values`  (sparse tensor only)
