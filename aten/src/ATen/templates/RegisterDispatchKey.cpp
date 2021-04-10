@@ -23,6 +23,7 @@
 #include <ATen/Tensor.h>
 #include <ATen/Functions.h>
 #include <ATen/native/Resize.h>
+#include <ATen/MemoryOverlap.h>
 
 #include <cstddef>
 #include <functional>
@@ -30,30 +31,21 @@
 #include <utility>
 
 #include <ATen/Config.h>
-#include <ATen/core/op_registration/adaption.h>
+#include <ATen/core/op_registration/hacky_wrapper_for_legacy_signatures.h>
 #include <torch/library.h>
 $extra_cuda_headers
 $legacy_th_headers
 
 namespace at {
 
-// NB: TORCH_LIBRARY_IMPL must be in an anonymous namespace to avoid
-// ambiguity with conflicting identifiers that may have been defined in
-// at namespace already.
 namespace {
 
-${dispatch_anonymous_definitions}
+${dispatch_definitions}
 
 TORCH_LIBRARY_IMPL(aten, ${DispatchKey}, m) {
   ${dispatch_registrations}
 }
 
 } // anonymous namespace
-
-namespace ${dispatch_namespace} {
-
-${dispatch_namespaced_definitions}
-
-} // namespace ${dispatch_namespace}
 
 } // namespace at
