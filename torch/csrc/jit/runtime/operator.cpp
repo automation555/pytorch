@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/runtime/operator.h>
-
 #include <ATen/ATen.h>
 #include <ATen/core/alias_info.h>
 #include <torch/csrc/jit/frontend/edit_distance.h>
@@ -7,6 +6,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include "ATen/core/interned_strings.h"
 
 namespace torch {
 namespace jit {
@@ -241,13 +241,12 @@ bool printerHasSpecialCaseFor(Symbol sym) {
       prim::CudaFusionGuard, // optimization pass adds it
       prim::TensorExprGroup, // optimization pass adds it
       prim::StaticSubgraph, // optimization pass adds it
-      prim::ConstantMKLDNNTensor, // optimization pass adds it
-      prim::BroadcastMKLDNNTensors, // optimization pass adds it
       prim::Load, // used in interpreter only
       prim::MMTreeReduce, // used as an optimization
       prim::MMBatchSide, // used as an optimization
       prim::Store, // used in interpreter only
       prim::profile, // used in interpreter only
+      prim::profile_optional, // used in interpreter only
       prim::profile_ivalue, // used in interpreter only
       prim::TypeCheck, // used in interpreter only
       prim::RequiresGradCheck, // used in interpreter only
@@ -302,15 +301,13 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::PythonOp,
       prim::ConstantChunk,
       prim::BroadcastingChunk,
-      prim::MKLDNNGroup,
-      prim::ConstantMKLDNNTensor,
-      prim::BroadcastMKLDNNTensors,
       prim::fork,
       prim::CreateObject,
       prim::AutogradAdd,
       prim::GetAttr,
       prim::SetAttr,
       prim::profile,
+      prim::profile_optional,
       prim::profile_ivalue,
       prim::TypeCheck,
       prim::RequiresGradCheck,
