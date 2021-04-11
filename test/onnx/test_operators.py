@@ -1,3 +1,4 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 from test_pytorch_common import TestCase, run_tests, flatten, skipIfNoLapack
 
@@ -776,7 +777,7 @@ class TestOperators(TestCase):
                 return x_out
 
         x = {torch.tensor(1.): torch.randn(1, 2, 3)}
-        self.assertONNX(MyModel(), (x, {}))
+        self.assertONNX(MyModel(), (x,))
 
     def test_dict_str(self):
         class MyModel(torch.nn.Module):
@@ -786,7 +787,7 @@ class TestOperators(TestCase):
                 return x_out
 
         x = {"test_key_in": torch.randn(1, 2, 3)}
-        self.assertONNX(MyModel(), (x, {}))
+        self.assertONNX(MyModel(), (x,))
 
     def test_arange_dynamic(self):
         class TestModel(torch.nn.Module):
@@ -875,7 +876,6 @@ class TestOperators(TestCase):
     def test_det(self):
         x = torch.randn(2, 3, 5, 5, device=torch.device('cpu'))
         self.assertONNX(lambda x: torch.det(x), x, opset_version=11)
-        self.assertONNX(lambda x: torch.linalg.det(x), x, opset_version=11)
 
     def test_softmaxcrossentropy(self):
         x = torch.randn(3, 5)

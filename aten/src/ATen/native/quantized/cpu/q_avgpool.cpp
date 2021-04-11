@@ -386,7 +386,7 @@ Tensor qnnpack_avg_pool2d(
 } // qnnp_avgpool_helper
 #endif
 
-Tensor avg_pool2d_quantized_cpu(
+Tensor quantized_avg_pool2d(
     const Tensor& input,
     IntArrayRef kernel_size,
     IntArrayRef stride,
@@ -408,7 +408,7 @@ Tensor avg_pool2d_quantized_cpu(
         divisor_override);
   }
 #endif
-  AT_DISPATCH_QINT_TYPES(input.scalar_type(), "avg_pool2d_quantized_cpu", [&]() {
+  AT_DISPATCH_QINT_TYPES(input.scalar_type(), "quantized_avg_pool2d", [&]() {
     output = q_avg_pool2d<scalar_t>(
         input,
         kernel_size,
