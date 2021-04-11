@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/serialization/python_print.h>
-
 #include <ATen/core/qualified_name.h>
 #include <c10/util/Exception.h>
 #include <c10/util/StringUtil.h>
@@ -9,6 +8,7 @@
 #include <torch/csrc/jit/ir/attributes.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/csrc/jit/ir/ir_views.h>
+#include <torch/csrc/jit/ir/type_hashing.h>
 #include <torch/csrc/jit/resource_guard.h>
 
 #include <algorithm>
@@ -45,8 +45,6 @@ const static std::unordered_set<std::string> reserved_names = {
     "getattr",
     "inf",
     "nan",
-    "infj",
-    "nanj",
     "ops",
     "__torch__",
     // the python keywords
@@ -89,27 +87,6 @@ const static std::unordered_set<std::string> reserved_names = {
     "uninitialized",
     "unchecked_cast",
 };
-
-// Helper to avoid duplicating class types
-void PrintDepsTable::add(const c10::NamedTypePtr& type) {
-  // Despite doing the linear search below, we don't want to do
-  // wasteful work and only try to insert each instance once.
-  if (!non_unique_.insert(type).second) {
-    return;
-  }
-  // Need to do actual equality comparison, not a pointer equality. This is
-  // because for some types (e.g. FunctionType), we may have multiple
-  // TypePtr's that represent the same underlying thing.
-  // TODO: this should be really swapped for something more efficient
-  auto it = std::find_if(
-      table_.cbegin(), table_.cend(), [&](const c10::NamedTypePtr& dep) {
-        return *dep == *type;
-      });
-
-  if (it == table_.cend()) {
-    table_.push_back(type);
-  }
-}
 
 struct PythonPrintImpl {
   using SourceRangeStack = std::vector<SourceRange>;
@@ -193,6 +170,18 @@ struct PythonPrintImpl {
     const SourceRangeStack* srs_;
   };
 
+  // Helper to avoid duplicating class types
+  void registerDependency(const c10::NamedTypePtr& type) {
+    // We are actually doing actual equality via , not a pointer equality. This is
+    // because for some types (e.g. FunctionType), we may have multiple
+    // TypePtr's that represent the same underlying thing.
+    auto it = deps_table_.find(type);
+
+    if (it == deps_table_.cend()) {
+      deps_table_.emplace(type);
+    }
+
+  }
   // scanValue, scanNode, scanBlock:
   // decide if it is safe to omit the output of a temporary variable,
   // and inline the expression into its use
@@ -239,9 +228,7 @@ struct PythonPrintImpl {
       return false;
 
     // subgraph may use this more than once, so disable inlining
-    if (use.user->kind() == prim::fork || use.user->kind() == prim::rpc_async ||
-        use.user->kind() == prim::rpc_sync ||
-        use.user->kind() == prim::rpc_remote)
+    if (use.user->kind() == prim::fork || use.user->kind() == prim::rpc_async)
       return false;
 
     // isinstance appearing in an if expression
@@ -312,12 +299,12 @@ struct PythonPrintImpl {
     // because it doesn't hash any information about the tensors.
     // We will probably need to optimize this at some point using hashing.
     if (val.isTensor()) {
-      auto& t = val.toTensor();
+      auto t = val.toTensor();
       for (size_t i = 0; i < constant_table_.size(); ++i) {
         if (!constant_table_[i].isTensor()) {
           continue;
         }
-        auto& t2 = constant_table_[i].toTensor();
+        auto t2 = constant_table_[i].toTensor();
         if (t.options().type_equal(t2.options()) && t.equal(t2)) {
           return i;
         }
@@ -676,15 +663,15 @@ struct PythonPrintImpl {
   // Recursively check contained types for any class dependencies
   void registerClassDependencies(const TypePtr& type) {
     if (const auto classType = type->cast<ClassType>()) {
-      deps_table_.add(classType);
+      registerDependency(classType);
     } else if (const auto tupleType = type->cast<TupleType>()) {
       if (tupleType->name()) {
-        deps_table_.add(tupleType);
+        registerDependency(tupleType);
       }
     } else if (const auto interfaceType = type->cast<InterfaceType>()) {
-      deps_table_.add(interfaceType);
+      registerDependency(interfaceType);
     } else if (const auto enumType = type->cast<EnumType>()) {
-      deps_table_.add(enumType);
+      registerDependency(enumType);
     }
     for (const auto& containedType : type->containedTypes()) {
       registerClassDependencies(containedType);
@@ -804,7 +791,7 @@ struct PythonPrintImpl {
         }
         level--;
       } break;
-      case prim::Closure: {
+      case prim::Function: {
         if (enforce_importable_) {
           throw ErrorReport(node->sourceRange())
               << "closures are not exportable";
@@ -824,15 +811,6 @@ struct PythonPrintImpl {
         }
         body_ << "):\n";
         printBody(graph->block());
-      } break;
-      case prim::ModuleContainerIndex: {
-        const auto container = node->inputs().at(0);
-        const auto key = node->inputs().at(1);
-        const auto out = node->outputs().at(0);
-        assignValuesToTheirUniqueNames(out);
-        indent();
-        body_ << useOf(out) << " : " << out->type()->annotation_str() << " = "
-              << useOf(container) << "[" << useOf(key) << "]\n";
       } break;
       default:
         auto ss = std::make_shared<TaggedStringStream>(&source_range_stack_);
@@ -876,16 +854,15 @@ struct PythonPrintImpl {
 
   void printConstant(TaggedStringStream& stmt, const IValue& v) {
     const auto customFormatter = [&](std::ostream& ss, const IValue& v) {
-      if (v.isTensor() || containsNonASCIIString(v) || v.isObject()) {
-        TORCH_INTERNAL_ASSERT(!v.type()->is_module());
+      if (v.isTensor() || containsNonASCIIString(v)) {
         ss << "CONSTANTS.c" << getOrAddConstant(v);
         return true;
       }
 
-      if (v.isTuple() && v.type()->expectRef<TupleType>().schema()) {
+      if (v.isTuple() && v.type()->expect<TupleType>()->schema()) {
         // print the namedtuple constructor and let rest of tuple printing
         // continue
-        ss << v.type()->expectRef<TupleType>().annotation_str(type_printer_);
+        ss << v.type()->expect<TupleType>()->annotation_str(type_printer_);
       }
       return false;
     };
@@ -944,7 +921,7 @@ struct PythonPrintImpl {
         if (node->outputs().size() == 1 &&
             node->output()->type()->kind() == TypeKind::FunctionType) {
           auto fn = node->output()->type()->expect<FunctionType>();
-          deps_table_.add(fn);
+          registerDependency(fn);
           stmt << fn->annotation_str(type_printer_);
         } else if (!node->mustBeNone()) {
           IValue v = toIValue(node->output()).value();
@@ -983,7 +960,7 @@ struct PythonPrintImpl {
       } break;
       case prim::TupleConstruct: {
         if (auto qualname =
-                node->output()->type()->expectRef<TupleType>().name()) {
+                node->output()->type()->expect<TupleType>()->name()) {
           stmt << node->output()->type()->annotation_str(type_printer_);
         }
         printValueList(
@@ -1074,13 +1051,13 @@ struct PythonPrintImpl {
         stmt << ")";
 
         if (auto selfClass = self->type()->cast<ClassType>()) {
-          deps_table_.add(selfClass);
+          registerDependency(selfClass);
           const Function& method = selfClass->getMethod(node->s(attr::name));
           TORCH_INTERNAL_ASSERT(
               method.qualname() ==
               QualifiedName(selfClass->name()->qualifiedName(), methodName));
         } else if (auto selfInterface = self->type()->cast<InterfaceType>()) {
-          deps_table_.add(selfInterface);
+          registerDependency(selfInterface);
         } else {
           TORCH_INTERNAL_ASSERT(
               false, "method call to unhandled type in serialization");
@@ -1139,16 +1116,6 @@ struct PythonPrintImpl {
         stmt << useOf(node->input(0)) << ".tolist()"
              << ")";
       } break;
-      case prim::EnumValue:
-        // Note: This CAN NOT be printed as raw operator ops.prim.EnumValue
-        // because its return type depends on type of enum and must be further
-        // resolved, but ops.prim.EnumValue construction does not provide such
-        // functionality.
-        stmt << "(" << useOf(node->input()) << ").value";
-        break;
-      case prim::EnumName:
-        stmt << "(" << useOf(node->input()) << ").name";
-        break;
       default: {
         printOpName(stmt, node->kind());
         const FunctionSchema& schema = node->schema();
@@ -1259,7 +1226,6 @@ struct PythonPrintImpl {
     body_ << "def " << func.name() << "(";
     auto param_it = graph.inputs().begin();
     for (const Argument& arg : schema.arguments()) {
-      registerClassDependencies(arg.type());
       std::string arg_name = genName(arg.name());
       if (param_it == graph.inputs().begin()) {
         // the first argument may omit its type when it is implied by context
@@ -1278,10 +1244,9 @@ struct PythonPrintImpl {
       assignValue(*param_it++, arg_name);
     }
 
-    const auto& returnType = schema.returns().at(0).type();
-    body_ << ") -> " << returnType->annotation_str(type_printer_) << ":\n";
-    registerClassDependencies(returnType);
-
+    body_ << ") -> "
+          << schema.returns().at(0).type()->annotation_str(type_printer_)
+          << ":\n";
     printBody(graph.block());
   }
 
@@ -1291,13 +1256,13 @@ struct PythonPrintImpl {
 
   PythonPrintImpl(
       std::vector<at::IValue>& constant_table,
-      PrintDepsTable& deps_table,
+      std::vector<c10::NamedTypePtr>& deps_table,
       c10::TypePrinter type_printer,
       bool enforce_importable)
       : body_(&source_range_stack_),
         constant_table_(constant_table),
-        deps_table_(deps_table),
-        type_printer_(std::move(type_printer)),
+        deps_table_(std::make_move_iterator(deps_table.begin()), std::make_move_iterator(deps_table.end())),
+        type_printer_(type_printer),
         enforce_importable_(enforce_importable) {}
 
   void printClass(const ClassTypePtr& classType) {
@@ -1342,32 +1307,15 @@ struct PythonPrintImpl {
           body_ << "\"" << param << "\", ";
         }
         body_ << "]\n";
-
+#ifndef FBCODE_CAFFE2
+        // Note: Forward compat gated. TODO: @voznesenskym to remove when ready.
         indent();
         body_ << "__buffers__ = [";
         for (const auto& buffer : buffers) {
           body_ << "\"" << buffer << "\", ";
         }
         body_ << "]\n";
-        auto forwardPreHooks = classType->getForwardPreHooks();
-        if (forwardPreHooks.size() > 0) {
-          indent();
-          body_ << "__forward_pre_hooks__ = [";
-          for (const auto& pre_hook : forwardPreHooks) {
-            body_ << "\"" << pre_hook->name() << "\", ";
-          }
-          body_ << "]\n";
-        }
-
-        auto forwardHooks = classType->getForwardHooks();
-        if (forwardHooks.size() > 0) {
-          indent();
-          body_ << "__forward_hooks__ = [";
-          for (const auto& hook : forwardHooks) {
-            body_ << "\"" << hook->name() << "\", ";
-          }
-          body_ << "]\n";
-        }
+#endif
       }
 
       for (size_t i = 0; i < numAttrs; i++) {
@@ -1413,19 +1361,6 @@ struct PythonPrintImpl {
       // TODO fields
       for (auto& method : classType->methods()) {
         printFunction(*method);
-      }
-      std::set<std::string> already_printed;
-      for (auto& hook : classType->getForwardHooks()) {
-        if (already_printed.count(hook->name()) == 0) {
-          already_printed.insert(hook->name());
-          printFunction(*hook);
-        }
-      }
-      for (auto& pre_hook : classType->getForwardPreHooks()) {
-        if (already_printed.count(pre_hook->name()) == 0) {
-          already_printed.insert(pre_hook->name());
-          printFunction(*pre_hook);
-        }
       }
     }
   }
@@ -1499,7 +1434,7 @@ struct PythonPrintImpl {
     }
   }
 
-  ~PythonPrintImpl() = default;
+  ~PythonPrintImpl() {}
 
   TaggedStringStream body_;
   // When printing this node, is it safe to write it inline (i.e. without
@@ -1522,7 +1457,7 @@ struct PythonPrintImpl {
 
   // Any NamedTypes (classes, functions, NamedTuples) used are written to this
   // table.
-  PrintDepsTable& deps_table_;
+  std::unordered_set<c10::TypePtr, HashType, EqualType> deps_table_;
 
   // A function that, given a named type, returns us the correct string to print
   // for it.
@@ -1538,13 +1473,13 @@ struct PythonPrintImpl {
 
 PythonPrint::PythonPrint(
     std::vector<at::IValue>& constant_table,
-    PrintDepsTable& deps_table,
+    std::vector<c10::NamedTypePtr>& deps_table,
     c10::TypePrinter type_printer,
     bool enforce_importable)
     : pImpl(std::make_shared<PythonPrintImpl>(
           constant_table,
           deps_table,
-          std::move(type_printer),
+          type_printer,
           enforce_importable)) {}
 
 void PythonPrint::printNamedType(const c10::NamedTypePtr& type) {
