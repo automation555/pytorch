@@ -84,7 +84,7 @@ VulkanTensor reshape_copy(
 VulkanTensor cat(
     VulkanTensor& output,
     ArrayRef<VulkanTensor> inputs,
-    int64_t dim);
+    const int64_t dim);
 
 void add(
     VulkanTensor& output,
