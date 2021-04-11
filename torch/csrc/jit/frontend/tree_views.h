@@ -4,7 +4,6 @@
 #include <torch/csrc/jit/frontend/strtod.h>
 #include <torch/csrc/jit/frontend/tree.h>
 
-#include <c10/util/complex.h>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -292,7 +291,6 @@ struct Expr : public TreeView {
       case TK_TRUE:
       case TK_FALSE:
       case TK_NONE:
-      case TK_NONE_TYPE:
       case TK_CAST:
       case TK_APPLY:
       case '.':
@@ -311,7 +309,6 @@ struct Expr : public TreeView {
       case '^':
       case '|':
       case TK_LIST_COMP:
-      case TK_DICT_COMP:
       case TK_DOTS:
       case TK_IN:
       case TK_WITH_ITEM:
@@ -428,30 +425,6 @@ struct Def : public TreeView {
   }
 };
 
-// Property represents a named attribute combined with a getter and setter
-// method to access and mutate that attribute.
-struct Property : public TreeView {
-  explicit Property(const TreeRef& tree) : TreeView(tree) {
-    tree->match(TK_PROP);
-  }
-  Ident name() const {
-    return Ident(subtree(0));
-  }
-  Def getter() const {
-    return Def(subtree(1));
-  }
-  Maybe<Def> setter() const {
-    return Maybe<Def>(subtree(2));
-  }
-  static Property create(
-      const SourceRange& range,
-      const Ident& name,
-      const Def& getter,
-      const Maybe<Def>& setter) {
-    return Property(Compound::create(TK_PROP, range, {name, getter, setter}));
-  }
-};
-
 struct ClassDef : public TreeView {
   explicit ClassDef(const TreeRef& tree) : TreeView(tree) {
     tree->match(TK_CLASS_DEF);
@@ -469,20 +442,13 @@ struct ClassDef : public TreeView {
   List<Stmt> body() const {
     return List<Stmt>(subtree(2));
   }
-  Maybe<List<Property>> properties() const {
-    return Maybe<List<Property>>(subtree(3));
-  }
   static ClassDef create(
       const SourceRange& range,
       const Ident& name,
       const Maybe<Expr>& superclass,
-      const List<Stmt>& body,
-      c10::optional<const List<Property>> properties = {}) {
-    auto props = properties.has_value()
-        ? Maybe<List<Property>>::create(range, properties.value())
-        : Maybe<List<Property>>::create(range);
+      const List<Stmt>& body) {
     return ClassDef(
-        Compound::create(TK_CLASS_DEF, range, {name, superclass, body, props}));
+        Compound::create(TK_CLASS_DEF, range, {name, superclass, body}));
   }
 };
 
@@ -582,35 +548,6 @@ struct ListComp : public Expr {
   }
 };
 
-// TODO: supports only single comprehension for now
-struct DictComp : public Expr {
-  explicit DictComp(const TreeRef& tree) : Expr(tree) {
-    tree->match(TK_DICT_COMP);
-  }
-  Expr key() const {
-    return Expr(subtree(0));
-  }
-  Expr value() const {
-    return Expr(subtree(1));
-  }
-  Expr target() const {
-    return Expr(subtree(2));
-  }
-  Expr iter() const {
-    return Expr(subtree(3));
-  }
-  // TODO: no ifs for now
-  static DictComp create(
-      const SourceRange& range,
-      const Expr& key,
-      const Expr& value,
-      const Expr& target,
-      const Expr& iter) {
-    return DictComp(
-        Compound::create(TK_DICT_COMP, range, {key, value, target, iter}));
-  }
-};
-
 struct Global : public Stmt {
   explicit Global(const TreeRef& tree) : Stmt(tree) {
     tree_->match(TK_GLOBAL);
@@ -631,12 +568,6 @@ struct AugAssignKind : public TreeView {
       case '*':
       case '/':
       case '%':
-      case '|':
-      case '&':
-      case '^':
-      case TK_POW:
-      case TK_LSHIFT:
-      case TK_RSHIFT:
         return;
       default:
         throw ErrorReport(tree) << "is not a valid AugAssignKind";
@@ -715,11 +646,15 @@ struct Raise : public Stmt {
   explicit Raise(const TreeRef& tree) : Stmt(tree) {
     tree_->match(TK_RAISE);
   }
-  Expr expr() const {
-    return Expr(subtree(0));
+  Maybe<Expr> expr() const {
+    return Maybe<Expr>(subtree(0));
   }
-  static Raise create(const SourceRange& range, const Expr& expr) {
+  static Raise create(const SourceRange& range, const Maybe<Expr>& expr) {
     return Raise(Compound::create(TK_RAISE, range, {expr}));
+  }
+  static Raise create(const SourceRange& range) {
+    return Raise(
+        Compound::create(TK_RAISE, range, {Maybe<Expr>::create(range)}));
   }
 };
 
@@ -869,22 +804,17 @@ struct Const : public Expr {
     tree_->matchNumSubtrees(TK_CONST, 1);
   }
   bool isFloatingPoint() const {
-    if (isComplex())
-      return false;
-
     bool is_inf = subtree(0)->stringValue() == "inf";
     return is_inf ||
         subtree(0)->stringValue().find_first_of(".eE") != std::string::npos;
   }
   bool isIntegral() const {
-    return !isFloatingPoint() && !isComplex();
-  }
-  bool isComplex() const {
-    return subtree(0)->stringValue().find_first_of('j') != std::string::npos;
+    return !isFloatingPoint();
   }
   int64_t asIntegral() const {
     try {
-      return c10::stoll(subtree(0)->stringValue(), /*__idx=*/0, /*base=*/0);
+      return c10::stoll(
+          subtree(0)->stringValue(), /*__idx=*/nullptr, /*base=*/0);
     } catch (const std::out_of_range& e) {
       throw ErrorReport(range()) << "Integral constant out of range "
                                     "(must fit in a signed 64 bit integer)";
@@ -895,17 +825,6 @@ struct Const : public Expr {
     // Android version of strtod_c().
     char* dummy;
     return torch::jit::strtod_c(subtree(0)->stringValue().c_str(), &dummy);
-  }
-  c10::complex<double> asComplex() const {
-    char* dummy;
-    auto str = subtree(0)->stringValue();
-    // Complex numbers (a+bj, where a is non-zero) are parsed as an addition
-    // between float/int a and a complex number "bj". When a is 0, a complex
-    // number bj is created as above. So, while parsing the string, we don't
-    // have to worry about the real component of the complex number.
-    auto imag =
-        torch::jit::strtod_c(str.substr(0, str.size() - 1).c_str(), &dummy);
-    return c10::complex<double>(0, imag);
   }
   const std::string& text() const {
     return subtree(0)->stringValue();
@@ -984,15 +903,15 @@ struct SliceExpr : public Expr {
   Maybe<Expr> step() const {
     return Maybe<Expr>(subtree(2));
   }
-  Expr startOr(int64_t alternative) const {
+  Expr startOr(int alternative) const {
     const auto startOption = start();
     return startOption.present() ? startOption.get() : createInt(alternative);
   }
-  Expr endOr(int64_t alternative) const {
+  Expr endOr(int alternative) const {
     const auto endOption = end();
     return endOption.present() ? endOption.get() : createInt(alternative);
   }
-  Expr stepOr(int64_t alternative) const {
+  Expr stepOr(int alternative) const {
     const auto stepOption = step();
     return stepOption.present() ? stepOption.get() : createInt(alternative);
   }
@@ -1006,7 +925,7 @@ struct SliceExpr : public Expr {
   }
 
  private:
-  Expr createInt(int64_t value) const {
+  Expr createInt(int value) const {
     return Expr(Const::create(range(), c10::to_string(value)));
   }
 };
@@ -1175,11 +1094,11 @@ struct Delete : public Stmt {
   explicit Delete(const TreeRef& tree) : Stmt(tree) {
     tree_->match(TK_DELETE);
   }
-  List<Expr> targets() const {
-    return subtree(0);
+  Expr expr() const {
+    return Expr(subtree(0));
   }
-  static Delete create(const SourceRange& range, const List<Expr>& targets) {
-    return Delete(Compound::create(TK_DELETE, range, {targets}));
+  static Delete create(const Expr& value) {
+    return Delete(Compound::create(TK_DELETE, value.range(), {value}));
   }
 };
 

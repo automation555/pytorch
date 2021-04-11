@@ -25,7 +25,6 @@
 #include <ostream>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 // This file contains classes which assist in desugaring Python style
@@ -95,6 +94,10 @@ struct TORCH_API Module : public Object {
       bool shouldMangle = false);
   Module(ModulePtr module_value) : Object(std::move(module_value)) {}
   ~Module() = default;
+  Module(const Module&) = default;
+  Module(Module&&) = default;
+  Module& operator=(const Module&) = default;
+  Module& operator=(Module&&) = default;
 
   void set_optimized(bool o) {
     TORCH_WARN(
@@ -173,7 +176,8 @@ struct TORCH_API Module : public Object {
   std::string dump_to_str(
       bool print_method_bodies,
       bool print_attr_values,
-      bool print_param_values) const;
+      bool print_param_values,
+      int level) const;
 
   /// Enables "training" mode.
   void train(bool on = true);
@@ -221,13 +225,11 @@ struct TORCH_API Module : public Object {
 
   void _save_for_mobile(
       std::ostream& out,
-      const ExtraFilesMap& extra_files = ExtraFilesMap(),
-      bool save_mobile_debug_info = false) const;
+      const ExtraFilesMap& extra_files = ExtraFilesMap()) const;
 
   void _save_for_mobile(
       const std::string& filename,
-      const ExtraFilesMap& extra_files = ExtraFilesMap(),
-      bool save_mobile_debug_info = false) const;
+      const ExtraFilesMap& extra_files = ExtraFilesMap()) const;
 
   Module copy() const;
 
@@ -240,8 +242,6 @@ struct TORCH_API Module : public Object {
   Module clone(bool inplace = false) const;
 
   void clone_method(const Module& orig, const std::string& name);
-
-  IValue operator()(std::vector<IValue> inputs);
 
   template <typename... Types>
   IValue create_class(const c10::QualifiedName& name, Types&&... args) const {
@@ -275,13 +275,6 @@ struct TORCH_API Module : public Object {
       bool non_blocking);
 };
 
-// C++ equivalent api of `torch.jit.freeze`. See documentation there for
-// details.
-TORCH_API Module freeze(
-    const Module& module,
-    c10::optional<std::vector<std::string>> preserved_attrs = c10::nullopt,
-    bool optimize_numerics = true);
-
 namespace detail {
 
 struct TORCH_API SlotCursor {
@@ -303,7 +296,7 @@ struct slot_iterator_impl {
   using SlotCursor = detail::SlotCursor;
   using value_type = typename Policy::value_type;
   slot_iterator_impl(
-      Module root,
+      const Module& root,
       bool recurse, // if true, do a depth-first search, otherwise, just look at
                     // slots of root
       bool return_module) // if true include root itself as the first thing
@@ -449,7 +442,7 @@ struct slot_list_impl {
   }
 
   slot_list_impl(Module module, bool recurse, bool return_module)
-      : module_(module),
+      : module_(std::move(module)),
         recurse_(recurse),
         return_module_(return_module),
         size_(c10::nullopt) {
@@ -516,7 +509,7 @@ struct TORCH_API BufferPolicy {
   }
   static bool valid(const ClassTypePtr& typ, size_t i, const IValue& v) {
     return typ->getAttribute(i)->isSubtypeOf(TensorType::get()) &&
-        typ->is_buffer(i);
+        !typ->is_parameter(i);
   }
   static CONSTEXPR_EXCEPT_WIN_CUDA bool all_slots = false;
 };
@@ -542,7 +535,7 @@ struct NamedPolicy {
   using value_type = Named<typename Policy::value_type>;
   static value_type create(
       const std::vector<detail::SlotCursor>& cursors,
-      IValue v) {
+      const IValue& v) {
     std::string name;
     if (cursors.size() == 1) {
       name = (cursors.back().i_ == -1) ? "" : nameFragment(cursors.back());
@@ -556,7 +549,7 @@ struct NamedPolicy {
       }
       name = ss.str();
     }
-    return value_type{std::move(name), Policy::create(cursors, std::move(v))};
+    return value_type{std::move(name), Policy::create(cursors, v)};
   }
   static bool valid(const ClassTypePtr& t, size_t i, const IValue& v) {
     return Policy::valid(t, i, v);
