@@ -14,7 +14,7 @@ import os
 import sys
 from clang_format_utils import get_and_check_clang_format, CLANG_FORMAT_PATH
 
-# Allowlist of directories to check. All files that in that directory
+# Allowlist of directories to check. All files in that directory
 # (recursively) will be checked.
 # If you edit this, please edit the allowlist in clang_format_ci.sh as well.
 CLANG_FORMAT_ALLOWLIST = ["torch/csrc/jit/", "test/cpp/jit/", "test/cpp/tensorexpr/"]
@@ -108,6 +108,7 @@ async def run_clang_format(max_processes, diff=False, verbose=False):
         await asyncio.gather(*[run_clang_format_on_file(f, semaphore, verbose) for f in get_allowlisted_files()])
 
     return ok
+
 
 def parse_args(args):
     """
