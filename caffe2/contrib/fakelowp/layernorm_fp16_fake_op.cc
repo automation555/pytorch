@@ -1,11 +1,11 @@
-#include <algorithm>
 #include "layernorm_fp16_fake_op.h"
 #include "caffe2/contrib/fakelowp/common.h"
 #include "caffe2/contrib/fakelowp/fp16_fma.h"
 
 namespace caffe2 {
 
-void LayerNormUtils::calcY(
+template <>
+void LayerNormFakeFp16Op<CPUContext>::calcY(
     const int M,
     const int N,
     const float* X,
@@ -18,11 +18,12 @@ void LayerNormUtils::calcY(
   ConstEigenVectorArrayMap<float> mean_arr(mean, M);
   ConstEigenVectorArrayMap<float> std_arr(std, M);
   EigenArrayMap<float> Y_arr(Y, N, M);
+  float tmp = 0.0;
 
   std::vector<float> normalized(N);
   for (int i = 0; i < M; ++i) {
-    float normFactor = float(1.0f / std_arr[i]);
-    fbgemm::RoundToFloat16(&normFactor, &normFactor, 1, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+    float normFactor = 1.0f / std_arr[i];
+    fp16_wrap(&normFactor);
 
     for (int j = 0; j < N; ++j) {
       normalized[j] = X_arr.col(i)[j] - mean[i];
@@ -31,7 +32,10 @@ void LayerNormUtils::calcY(
     for (int j = 0; j < N; ++j) {
       normalized[j] *= normFactor;
     }
-    fbgemm::RoundToFloat16(normalized.data(), &Y_arr.col(i)[0], N, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+    fbgemm::RoundToFloat16(normalized.data(), normalized.data(), N, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+    for (int j = 0; j < N; ++j) {
+      Y_arr.col(i)[j] = normalized[j];
+    }
   }
 
   if (gamma != nullptr && beta != nullptr) {
@@ -51,23 +55,38 @@ void LayerNormUtils::calcY(
   }
 }
 
-float LayerNormUtils::ReducedAdd(const std::vector<float>& vec) {
+template <>
+float LayerNormFakeFp16Op<CPUContext>::ReducedAdd(const std::vector<float>& vec) {
   constexpr int VEC_SIZE = 32;
-  std::vector<float> v(vec.begin(), vec.end());
-
-  for (int factor = 2; factor <=32; factor *=2) {
-    int range = VEC_SIZE / factor;
-
-    for (int i = 0; i < range; ++i) { // 16
-      v[i] = v[2 * i] + v[2 * i + 1];
-    }
-    fbgemm::RoundToFloat16(v.data(), v.data(), range, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+  std::vector<float> v(VEC_SIZE, 0.0);
+  for (int i = 0; i < VEC_SIZE; ++i) { // 32
+    v[i] = vec[i];
   }
+  for (int i = 0; i < VEC_SIZE / 2; ++i) { // 16
+    v[i] = v[2 * i] + v[2 * i + 1];
+  }
+  fbgemm::RoundToFloat16(v.data(), v.data(), VEC_SIZE / 2, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
 
+  for (int i = 0; i < VEC_SIZE / 4; ++i) { // 8
+    v[i] = v[2 * i] + v[2 * i + 1];
+  }
+  fbgemm::RoundToFloat16(v.data(), v.data(), VEC_SIZE / 4, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+
+  for (int i = 0; i < VEC_SIZE / 8; ++i) { // 4
+    v[i] = v[2 * i] + v[2 * i + 1];
+    fp16_wrap(&v[i]);
+  }
+  for (int i = 0; i < VEC_SIZE / 16; ++i) { // 2
+    v[i] = v[2 * i] + v[2 * i + 1];
+    fp16_wrap(&v[i]);
+  }
+  v[0] = v[0] + v[1];
+  fp16_wrap(&v[0]);
   return v[0];
 }
 
-void LayerNormUtils::calcMeanStd(
+template <>
+void LayerNormFakeFp16Op<CPUContext>::calcMeanStd(
     const int M,
     const int N,
     const float eps,
@@ -76,17 +95,17 @@ void LayerNormUtils::calcMeanStd(
     float* std) {
   ConstEigenArrayMap<float> X_arr(X, N, M);
 
-  std::vector<float> sqr(M, 0.0f);
-  std::vector<float> var(M, 0.0f);
+  float sqr[M];
+  float var[M];
   float inv_N_val = 1.0f / N;
-  fbgemm::RoundToFloat16(&inv_N_val, &inv_N_val, 1, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
+  fp16_wrap(&inv_N_val);
+  float tmp = 0.0f;
 
   constexpr int VEC_SIZE = 32;
   std::vector<float> inv_N_vec(VEC_SIZE, inv_N_val);
   std::vector<float> inv_N_prod_vec(VEC_SIZE, 0);
-  std::vector<float> avgVec(VEC_SIZE, 0.0f);
-  std::vector<float> sqrVec(VEC_SIZE, 0.0f);
-  std::vector<float> negMeanVec(M, 0.0f);
+  std::vector<float> avgVec(VEC_SIZE, 0.0);
+  std::vector<float> sqrVec(VEC_SIZE, 0.0);
   int numVecs = N / VEC_SIZE;
   int tailSize = N - (numVecs * VEC_SIZE);
 
@@ -95,8 +114,8 @@ void LayerNormUtils::calcMeanStd(
       X, X_fp16.data(), M * N, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
 
   for (int i = 0; i < M; ++i) {
-    std::fill(avgVec.begin(), avgVec.end(), 0.0f);
-    std::fill(sqrVec.begin(), sqrVec.end(), 0.0f);
+    std::fill(avgVec.begin(), avgVec.end(), 0.0);
+    std::fill(sqrVec.begin(), sqrVec.end(), 0.0);
     for (int j = 0; j < numVecs; ++j) {
       fake_fp16::fma_fp16(
           VEC_SIZE,
@@ -140,62 +159,34 @@ void LayerNormUtils::calcMeanStd(
           inv_N_prod_vec.data(),
           sqrVec.data());
     }
+
     mean[i] = ReducedAdd(avgVec);
     sqr[i] = ReducedAdd(sqrVec);
-  }
+    // compute variance and std deviation
 
-  // // compute variance and std deviation
-  std::copy(mean, mean + M, negMeanVec.begin());
-  std::transform(negMeanVec.cbegin(),
-      negMeanVec.cend(),
-      negMeanVec.begin(),
-      std::negate<float>());
-  fake_fp16::fma_fp16(M, mean, negMeanVec.data(), sqr.data());
-  std::copy(sqr.cbegin(), sqr.cend(), var.begin());
+    float neg_mean = -mean[i];
+    fake_fp16::fma_fp16(1, &mean[i], &neg_mean, &sqr[i]);
+    var[i] = sqr[i];
 
-  float teps = eps;
-  std::vector<float> tmpVec(M, 0.0f);
-  fbgemm::RoundToFloat16(&teps, &teps, 1, FLAGS_caffe2_fbgemm_fake_fp16_clamp);
-  int i = 0;
-  for (auto& v: var) {
-    if (v < 0.0) {
-      LOG_EVERY_N(WARNING, 1000) << "Variance " << v
-          << " negative, resetting to 0.";
-      v = 0.0;
+    if (var[i] < 0.0) {
+      LOG_EVERY_N(WARNING, 1000) << "Variance " << var[i] << "negative, resetting to 0.";
+      var[i] = 0.0;
     }
-    tmpVec[i] = var[i] + teps;
-    ++i;
-  }
-  fbgemm::RoundToFloat16(
-      tmpVec.data(),
-      tmpVec.data(),
-      M,
-      FLAGS_caffe2_fbgemm_fake_fp16_clamp);
-  i = 0;
-  for (auto& v: tmpVec) {
-    if (v < 0) {
-      LOG_EVERY_N(WARNING, 1000) << "Variance " << v
-          << " negative, resetting to 0.";
-      v = 0.0;
+
+    float teps = eps;
+    fp16_wrap(&teps);
+    tmp = var[i] + teps;
+    fp16_wrap(&tmp);
+    if (tmp < 0) {
+      LOG_EVERY_N(WARNING, 1000) << "Variance " << var[i] << "negative, resetting to 0.";
+      tmp = 0.0;
     }
-    std[i] = std::sqrt(v);
-    ++i;
+    std[i] = std::sqrt(tmp);
+    fp16_wrap(&std[i]);
   }
-  fbgemm::RoundToFloat16(
-    std,
-    std,
-    M,
-    FLAGS_caffe2_fbgemm_fake_fp16_clamp);
 }
 
-REGISTER_CPU_OPERATOR(LayerNormFakeFP16NNPI, LayerNormFakeFp16Op<false>);
+REGISTER_CPU_OPERATOR(LayerNormFakeFP16NNPI, LayerNormFakeFp16Op<CPUContext>);
 OPERATOR_SCHEMA(LayerNormFakeFP16NNPI).NumInputs({1, 3}).NumOutputs(3);
-
-REGISTER_CPU_OPERATOR(LayerNormInt8QuantizeFakeNNPI,
-                      LayerNormFakeFp16Op<true>);
-OPERATOR_SCHEMA(LayerNormInt8QuantizeFakeNNPI)
-    .IdenticalTypeAndShape()
-    .NumInputs({1, 3})
-    .NumOutputs(3);
 
 } // namespace caffe2
