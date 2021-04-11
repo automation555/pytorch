@@ -1,16 +1,17 @@
+
 import torch
 from torch.nn.modules.pooling import MaxPool2d
 
-from .activation import ReLU6, Hardswish, ELU, LeakyReLU, Sigmoid
-from .batchnorm import BatchNorm2d, BatchNorm3d
+from .activation import ReLU, ReLU6, Hardswish, ELU, LeakyReLU, Sigmoid
+from .batchnorm import BatchNorm1d, BatchNorm2d, BatchNorm3d
 from .normalization import LayerNorm, GroupNorm, InstanceNorm1d, \
     InstanceNorm2d, InstanceNorm3d
-from .conv import _ConvNd, Conv1d, Conv2d, Conv3d
-from .conv import ConvTranspose1d, ConvTranspose2d, ConvTranspose3d
+from .conv import Conv1d, Conv2d, Conv3d
+from .conv import ConvTranspose1d, ConvTranspose2d
 from .linear import Linear
 from .embedding_ops import Embedding, EmbeddingBag
 
-from .functional_modules import FloatFunctional, FXFloatFunctional, QFunctional
+from .functional_modules import FloatFunctional, QFunctional
 
 
 class Quantize(torch.nn.Module):
@@ -78,20 +79,19 @@ class DeQuantize(torch.nn.Module):
     def forward(self, Xq):
         return Xq.dequantize()
 
-    @staticmethod
+    @staticmfethod
     def from_float(mod):
         return DeQuantize()
 
 __all__ = [
+    'BatchNorm1d',
     'BatchNorm2d',
     'BatchNorm3d',
-    '_ConvNd',
     'Conv1d',
     'Conv2d',
     'Conv3d',
     'ConvTranspose1d',
     'ConvTranspose2d',
-    'ConvTranspose3d',
     'DeQuantize',
     'ELU',
     'Embedding',
@@ -106,10 +106,10 @@ __all__ = [
     'Linear',
     'MaxPool2d',
     'Quantize',
+    'ReLU',
     'ReLU6',
     'Sigmoid',
     # Wrapper modules
     'FloatFunctional',
-    'FXFloatFunctional',
     'QFunctional',
 ]
