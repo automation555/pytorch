@@ -1,4 +1,5 @@
 #include <torch/csrc/jit/python/script_init.h>
+#include "jit/api/object.h"
 
 #include <torch/csrc/Device.h>
 #include <torch/csrc/jit/api/module.h>
@@ -118,7 +119,14 @@ struct PythonResolver : public Resolver {
         py::cast<std::string>(py::module::import("torch._jit_internal")
                                   .attr("_qualified_name")(obj)));
 
-    return get_python_cu()->get_type(qualifiedName);
+    auto pyClass =
+        py::module::import("torch.jit._state")
+            .attr("_get_script_class")(qualifiedName.qualifiedName());
+    if (!pyClass.is_none()) {
+      return get_python_cu()->get_type(qualifiedName);
+    }
+
+    return nullptr;
   }
 
   TypePtr resolveType(const std::string& name, const SourceRange& loc)
@@ -761,8 +769,18 @@ void initJitScriptBindings(PyObject* module) {
                       self.type()->getConstant(name));
                 }
                 TypePtr type = self.type()->getAttribute(name);
-                auto ivalue = toIValue(std::move(value), type);
-                self.setattr(name, ivalue);
+                try {
+                  auto ivalue = toIValue(std::move(value), type);
+                  self.setattr(name, ivalue);
+                } catch (std::exception& e) {
+                  throw py::cast_error(c10::str(
+                      "Could not cast attribute '",
+                      name,
+                      "' to type ",
+                      type->repr_str(),
+                      ": ",
+                      e.what()));
+                }
               })
           .def(
               "getattr",
@@ -841,6 +859,11 @@ void initJitScriptBindings(PyObject* module) {
                   return method.name();
                 });
               })
+          .def(
+              "_properties", [](Object& self) { return self.get_properties(); })
+          .def(
+              "equals",
+              [](Object& self, const Object& rhs) { return self.equals(rhs); })
           .def("__copy__", &Object::copy)
           .def(
               "__hash__",
@@ -905,8 +928,17 @@ void initJitScriptBindings(PyObject* module) {
                 throw std::runtime_error(err.str());
               }));
 
-  // Special case __str__ to make sure we can print Objects/Modules regardless
-  // of if the user defined a __str__
+  py::class_<Object::Property>(m, "ScriptObjectProperty")
+      .def("name", [](const Object::Property& self) { return self.name; })
+      .def(
+          "getter",
+          [](const Object::Property& self) { return self.getter_func; })
+      .def("setter", [](const Object::Property& self) {
+        return self.setter_func;
+      });
+
+  // Special case __str__ to make sure we can print Objects/Modules
+  // regardless of if the user defined a __str__
   using MagicMethodImplType = std::function<py::object(
       const Object& self, py::args args, py::kwargs kwargs)>;
   std::unordered_map<std::string, MagicMethodImplType> special_magic_methods{
@@ -1267,7 +1299,11 @@ void initJitScriptBindings(PyObject* module) {
       .def(
           "get_interface",
           [](const std::shared_ptr<CompilationUnit>& self,
-             const std::string& name) { return self->get_interface(name); });
+             const std::string& name) { return self->get_interface(name); })
+      .def(
+          "get_class",
+          [](const std::shared_ptr<CompilationUnit>& self,
+             const std::string& name) { return self->get_class(name); });
 
   py::class_<StrongFunctionPtr>(m, "ScriptFunction", py::dynamic_attr())
       .def(
@@ -1497,10 +1533,7 @@ void initJitScriptBindings(PyObject* module) {
               << "Torchscript does not support class inheritance.";
         }
         auto cu = get_python_cu();
-        auto classname = c10::QualifiedName(qualifiedName);
-        if (cu->get_type(classname) != nullptr) {
-          classname = cu->mangle(classname);
-        }
+        const auto classname = c10::QualifiedName(qualifiedName);
         auto classType = ClassType::create(classname, cu);
         cu->register_type(classType);
         std::vector<ResolverPtr> methodRcbs, propRcbs;
@@ -1555,7 +1588,6 @@ void initJitScriptBindings(PyObject* module) {
               default_it->second));
           ++defs_it;
         }
-        return classType;
       });
   m.def(
       "_jit_script_interface_compile",
@@ -1563,15 +1595,11 @@ void initJitScriptBindings(PyObject* module) {
          const ClassDef& classDef,
          const ResolutionCallback& rcb,
          bool is_module) {
-        auto cu = get_python_cu();
-        auto className = c10::QualifiedName(qualifiedName);
-        if (cu->get_type(className) != nullptr) {
-          className = cu->mangle(className);
-        }
-
         get_python_cu()->define_interface(
-            className, classDef, pythonResolver(rcb), is_module);
-        return className.qualifiedName();
+            c10::QualifiedName(qualifiedName),
+            classDef,
+            pythonResolver(rcb),
+            is_module);
       });
 
   py::class_<torch::jit::ErrorReport::CallStack>(
@@ -1746,7 +1774,9 @@ void initJitScriptBindings(PyObject* module) {
   m.def("_get_graph_executor_optimize", &torch::jit::getGraphExecutorOptimize);
 
   m.def("_create_module_with_type", [](const ClassTypePtr& type) {
-    return Module(get_python_cu(), type);
+     return Module(get_python_cu(), type);
+   }).def("_create_object_with_type", [](const ClassTypePtr& type) {
+    return Object(get_python_cu(), type);
   });
 
   m.def("_export_opnames", [](Module& sm) {
