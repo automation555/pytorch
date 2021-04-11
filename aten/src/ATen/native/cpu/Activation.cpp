@@ -85,9 +85,9 @@ static void log_sigmoid_backward_cpu_kernel(TensorIterator& iter) {
 
 static void threshold_kernel(
     TensorIterator& iter,
-    const Scalar& threshold_scalar,
-    const Scalar& value_scalar) {
-  AT_DISPATCH_ALL_TYPES_AND(kBFloat16, iter.dtype(), "threshold_cpu", [&] {
+    Scalar threshold_scalar,
+    Scalar value_scalar) {
+  AT_DISPATCH_ALL_TYPES(iter.dtype(), "threshold_cpu", [&] {
     using Vec = Vec256<scalar_t>;
     scalar_t threshold = threshold_scalar.to<scalar_t>();
     Vec threshold_v = Vec(threshold);
@@ -199,7 +199,7 @@ void GeluBackwardMKLKernelImpl(TensorIterator* /* it */) {
 
 #endif // AT_MKL_ENABLED()
 
-void elu_kernel(TensorIterator& it, const Scalar& alpha, const Scalar& scale, const Scalar& input_scale) {
+void elu_kernel(TensorIterator& it, Scalar alpha, Scalar scale, Scalar input_scale) {
   AT_DISPATCH_FLOATING_TYPES(it.dtype(), "elu_cpu", [&]() {
     using Vec = Vec256<scalar_t>;
     auto negcoef = alpha.to<scalar_t>() * scale.to<scalar_t>();
@@ -226,7 +226,7 @@ void elu_kernel(TensorIterator& it, const Scalar& alpha, const Scalar& scale, co
   });
 }
 
-void elu_backward_kernel(TensorIterator& it, const Scalar& alpha, const Scalar& scale, const Scalar& input_scale, bool is_result) {
+void elu_backward_kernel(TensorIterator& it, Scalar alpha, Scalar scale, Scalar input_scale) {
   AT_DISPATCH_FLOATING_TYPES(it.dtype(), "elu_backward_cpu", [&]() {
     using Vec = Vec256<scalar_t>;
     auto negcoef = alpha.to<scalar_t>() * scale.to<scalar_t>();
@@ -238,23 +238,15 @@ void elu_backward_kernel(TensorIterator& it, const Scalar& alpha, const Scalar& 
     const Vec zero_vec(static_cast<scalar_t>(0));
     cpu_kernel_vec(
         it,
-        [negcoef, negiptcoef, poscoef, is_result](scalar_t a, scalar_t b) -> scalar_t {
-          if (is_result) {
-            return b <= scalar_t(0) ? a * negiptcoef * (b + negcoef) : a * poscoef;
-          } else {
-            return b <= scalar_t(0) ? a * negiptcoef * negcoef * std::exp(b * negiptcoef): a * poscoef;
-          }
+        [negcoef, negiptcoef, poscoef](scalar_t a, scalar_t b) -> scalar_t {
+          return b <= scalar_t(0) ? a * negiptcoef * (b + negcoef) : a * poscoef;
         },
-        [&negcoef_vec, &negiptcoef_vec, &poscoef_vec, &zero_vec, is_result](Vec a, Vec b) -> Vec {
+        [&negcoef_vec, &negiptcoef_vec, &poscoef_vec, &zero_vec](Vec a, Vec b) -> Vec {
           auto cmp = (b > zero_vec);
-          if (is_result) {
-            if (!cmp.zero_mask()) {  // only a * poscoef (which is very quick) needs to be computed
-              return a * poscoef_vec;
-            } else {
-              return Vec::blendv(a * negiptcoef_vec * (b + negcoef_vec), a * poscoef_vec, cmp);
-            }
+          if (!cmp.zero_mask()) {  // only a * poscoef (which is very quick) needs to be computed
+            return a * poscoef_vec;
           } else {
-            return Vec::blendv(a * negiptcoef_vec * negcoef_vec * (b * negiptcoef_vec).exp(), a * poscoef_vec, cmp);
+            return Vec::blendv(a * negiptcoef_vec * (b + negcoef_vec), a * poscoef_vec, cmp);
           }
         }
     );
@@ -358,7 +350,7 @@ void hardsigmoid_backward_kernel(TensorIterator& iter) {
     cpu_kernel_vec(
         iter,
         [=](scalar_t grad_val, scalar_t self_val) {
-          return (self_val > neg_three && self_val < three)
+          return (self_val >= neg_three && self_val <= three)
             ? grad_val * one_sixth
             : zero;
         },
@@ -369,7 +361,7 @@ void hardsigmoid_backward_kernel(TensorIterator& iter) {
   });
 }
 
-void hardshrink_kernel(TensorIterator& iter, const Scalar& lambd) {
+void hardshrink_kernel(TensorIterator& iter, Scalar lambd) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "hardshrink_cpu", [&] {
     auto lambd_val = lambd.to<scalar_t>();
     cpu_kernel_vec(
@@ -384,7 +376,7 @@ void hardshrink_kernel(TensorIterator& iter, const Scalar& lambd) {
   });
 }
 
-void softshrink_kernel(TensorIterator& iter, const Scalar& lambd) {
+void softshrink_kernel(TensorIterator& iter, Scalar lambd) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "softshrink_cpu", [&]() {
     auto lambd_val = lambd.to<scalar_t>();
     cpu_kernel(iter, [=](scalar_t a) -> scalar_t {
@@ -393,7 +385,7 @@ void softshrink_kernel(TensorIterator& iter, const Scalar& lambd) {
   });
 }
 
-void shrink_backward_kernel(TensorIterator& iter, const Scalar& lambd) {
+void shrink_backward_kernel(TensorIterator& iter, Scalar lambd) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "shrink_backward_cpu", [&] {
     auto lambd_val = lambd.to<scalar_t>();
     cpu_kernel_vec(
@@ -408,7 +400,7 @@ void shrink_backward_kernel(TensorIterator& iter, const Scalar& lambd) {
   });
 }
 
-void hardtanh_backward_kernel(TensorIterator& iter, const Scalar& min, const Scalar& max) {
+void hardtanh_backward_kernel(TensorIterator& iter, Scalar min, Scalar max) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "hardshrink_backward_cpu", [&] {
     auto min_val = min.to<scalar_t>();
     auto max_val = max.to<scalar_t>();
@@ -484,7 +476,7 @@ void hardswish_backward_kernel(TensorIterator& iter) {
   });
 }
 
-static void leaky_relu_kernel(TensorIterator& iter, const Scalar& negval_) {
+static void leaky_relu_kernel(TensorIterator& iter, Scalar negval_) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "leaky_relu_cpu", [&] {
     using Vec = Vec256<scalar_t>;
     auto zero_vec = Vec((scalar_t)(0));
@@ -503,7 +495,7 @@ static void leaky_relu_kernel(TensorIterator& iter, const Scalar& negval_) {
   });
 }
 
-static void leaky_relu_backward_kernel(TensorIterator& iter, const Scalar& negval_) {
+static void leaky_relu_backward_kernel(TensorIterator& iter, Scalar negval_) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "leaky_relu_backward_cpu", [&] {
     using Vec = Vec256<scalar_t>;
     auto zero_vec = Vec((scalar_t)(0));
@@ -522,7 +514,7 @@ static void leaky_relu_backward_kernel(TensorIterator& iter, const Scalar& negva
   });
 }
 
-void softplus_kernel(TensorIterator& iter, const Scalar& beta_, const Scalar& threshold_) {
+void softplus_kernel(TensorIterator& iter, Scalar beta_, Scalar threshold_) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "softplus_cpu", [&]() {
     using Vec = Vec256<scalar_t>;
     auto beta = beta_.to<scalar_t>();
@@ -542,7 +534,7 @@ void softplus_kernel(TensorIterator& iter, const Scalar& beta_, const Scalar& th
   });
 }
 
-void softplus_backward_kernel(TensorIterator& iter, const Scalar& beta_, const Scalar& threshold_) {
+void softplus_backward_kernel(TensorIterator& iter, Scalar beta_, Scalar threshold_) {
   AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "softplus_backward_cpu", [&]() {
     using Vec = Vec256<scalar_t>;
     auto beta = beta_.to<scalar_t>();
@@ -632,6 +624,54 @@ void silu_backward_kernel(TensorIterator& iter) {
       });
 }
 
+void hardglu_kernel(TensorIterator& iter) {
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "hardglu_cpu", [&] {
+    scalar_t zero(0.0f);
+    scalar_t one_sixth(1.0f / 6.0f);
+    scalar_t three(3.0f);
+    scalar_t six(6.0f);
+
+    using Vec = Vec256<scalar_t>;
+    const Vec zero_vec(zero);
+    const Vec one_sixth_vec(one_sixth);
+    const Vec three_vec(three);
+    const Vec six_vec(six);
+    cpu_kernel_vec(
+      iter,
+      [&](scalar_t a, scalar_t b) -> scalar_t {
+        return a * std::min(std::max(b + three, zero), six) * one_sixth;
+      },
+      [&](Vec a, Vec b) -> Vec {
+        return a * vec256::minimum(
+            vec256::maximum(b + three_vec, zero_vec),
+          six_vec) * one_sixth_vec;
+      }
+    );
+  });
+}
+
+void hardglu_backward_kernel(TensorIterator& iter) {
+  AT_DISPATCH_FLOATING_TYPES(iter.dtype(), "hardglu_backward_cpu", [&] {
+    const scalar_t zero(0.0f);
+    const scalar_t three(3.0f);
+    const scalar_t neg_three(-3.0f);
+    const scalar_t one_sixth(1.0f / 6.0f);
+    using Vec = Vec256<scalar_t>;
+    Vec zero_vec(zero);
+    Vec one_sixth_vec(one_sixth);
+    cpu_kernel_vec(
+      iter,
+      [&](scalar_t a, scalar_t b, scalar_t c) -> scalar_t {
+        return (a >= neg_three && a <= three) ? one_sixth * b * c : zero;
+      },
+      [&](Vec a, Vec b, Vec c) -> Vec {
+        Vec da_mask = (a >= neg_three) & (a <= three);
+        return Vec::blendv(zero_vec, one_sixth_vec * b * c, da_mask);
+      }
+    );
+  });
+}
+
 } // namespace
 
 REGISTER_DISPATCH(log_sigmoid_cpu_stub, &log_sigmoid_cpu_kernel);
@@ -657,6 +697,7 @@ REGISTER_DISPATCH(glu_stub, &glu_kernel);
 REGISTER_DISPATCH(glu_backward_stub, &glu_backward_kernel);
 REGISTER_DISPATCH(silu_stub, &silu_kernel);
 REGISTER_DISPATCH(silu_backward_stub, &silu_backward_kernel);
-
+REGISTER_DISPATCH(hardglu_stub, &hardglu_kernel);
+REGISTER_DISPATCH(hardglu_backward_stub, &hardglu_backward_kernel);
 } // namespace native
 } // namespace at
