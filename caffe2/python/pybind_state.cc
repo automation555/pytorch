@@ -23,19 +23,18 @@
 #include "caffe2/onnx/offline_tensor.h"
 #include "caffe2/onnx/onnx_exporter.h"
 #include "caffe2/opt/converter.h"
-#include "caffe2/opt/fakefp16_transform.h"
 #include "caffe2/opt/fusion.h"
 #include "caffe2/opt/mobile.h"
 #include "caffe2/opt/onnxifi_transformer.h"
 #include "caffe2/opt/optimize_ideep.h"
 #include "caffe2/opt/passes.h"
 #include "caffe2/opt/shape_info.h"
+#include "caffe2/opt/fakefp16_transform.h"
 #include "caffe2/predictor/emulator/data_filler.h"
 #include "caffe2/predictor/predictor.h"
 #include "caffe2/python/pybind_state_registry.h"
 #include "caffe2/utils/cpuid.h"
 #include "caffe2/utils/proto_convert.h"
-#include "caffe2/utils/signal_handler.h"
 #include "caffe2/utils/string_utils.h"
 #include "torch/csrc/autograd/variable.h"
 #include "torch/csrc/jit/python/module_python.h"
@@ -86,13 +85,6 @@ Workspace* GetCurrentWorkspace() {
   return gWorkspace;
 }
 
-Workspace* GetWorkspaceByName(const std::string& name) {
-  if (gWorkspaces.count(name)) {
-    return gWorkspaces[name].get();
-  }
-  return nullptr;
-}
-
 class StringFetcher : public BlobFetcherBase {
  public:
   py::object Fetch(const Blob& blob) override {
@@ -118,7 +110,7 @@ static_assert(
     sizeof(int) == sizeof(int32_t),
     "We make an assumption that int is always int32 for numpy "
     "type mapping.");
-int CaffeToNumpyType(const TypeMeta meta) {
+int CaffeToNumpyType(const TypeMeta& meta) {
 #ifdef USE_NUMPY
   static std::map<TypeIdentifier, int> numpy_type_map{
       {TypeMeta::Id<bool>(), NPY_BOOL},
@@ -143,7 +135,7 @@ int CaffeToNumpyType(const TypeMeta meta) {
 #endif // USE_NUMPY
 }
 
-const TypeMeta NumpyTypeToCaffe(int numpy_type) {
+const TypeMeta& NumpyTypeToCaffe(int numpy_type) {
 #ifdef USE_NUMPY
   static std::map<int, TypeMeta> caffe_type_map{
       {NPY_BOOL, TypeMeta::Make<bool>()},
@@ -369,17 +361,10 @@ class BackgroundPlan {
 };
 
 void addObjectMethods(py::module& m) {
-  py::class_<NetBase>(m, "Net")
-      .def(
-          "run",
-          [](NetBase* net) {
-            py::gil_scoped_release g;
-            CAFFE_ENFORCE(net->Run());
-          })
-      .def("cancel", [](NetBase* net) {
-        py::gil_scoped_release g;
-        net->Cancel();
-      });
+  py::class_<NetBase>(m, "Net").def("run", [](NetBase* net) {
+    py::gil_scoped_release g;
+    CAFFE_ENFORCE(net->Run());
+  });
 
   py::class_<ObserverBase<NetBase>>(m, "Observer")
       .def(
@@ -1032,13 +1017,6 @@ void addObjectMethods(py::module& m) {
 
 void addGlobalMethods(py::module& m) {
   m.attr("is_asan") = py::bool_(C10_ASAN_ENABLED);
-  m.attr("has_fbgemm") = py::bool_(
-#ifdef USE_FBGEMM
-      true
-#else
-      false
-#endif
-  );
   m.def("get_build_options", []() { return GetBuildOptions(); });
 
   // The old mkl backend has been removed permanently, but we
@@ -1769,17 +1747,6 @@ void addGlobalMethods(py::module& m) {
         return true;
       });
   m.def(
-      "onnxifi_set_option",
-      [](const std::string& optionName,
-         const std::string& optionValue) -> bool {
-        OnnxifiOptionHelper ts;
-        return ts.setOnnxifiOption(optionName, optionValue);
-      });
-  m.def("onnxifi_get_option", [](const std::string& optionName) -> std::string {
-    OnnxifiOptionHelper ts;
-    return ts.getOnnxifiOption(optionName);
-  });
-  m.def(
       "onnxifi",
       [](const py::bytes& pred_net_str,
          const py::bytes& shapes_str,
@@ -1857,7 +1824,8 @@ void addGlobalMethods(py::module& m) {
   m.def("fakeFp16FuseOps", [](const py::bytes& net_str) {
     caffe2::NetDef netDef;
     CAFFE_ENFORCE(
-        ParseProtoFromLargeString(net_str.cast<std::string>(), &netDef),
+        ParseProtoFromLargeString(
+            net_str.cast<std::string>(), &netDef),
         "broken pred_net protobuf");
     opt::fakeFp16FuseOps(&netDef);
     std::string out_net;
@@ -1921,11 +1889,6 @@ void addGlobalMethods(py::module& m) {
     new_proto.SerializeToString(&out);
     return py::bytes(out);
   });
-
-#if defined(CAFFE2_SUPPORTS_FATAL_SIGNAL_HANDLERS)
-  m.def("set_print_stack_traces_on_fatal_signal",
-    &caffe2::setPrintStackTracesOnFatalSignal);
-#endif
 
   auto initialize = [&]() {
   // Initialization of the module
