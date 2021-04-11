@@ -16,7 +16,7 @@ else()
 endif()
 
 if(USE_TBB)
-  include_directories(${TBB_ROOT_DIR}/include)
+include_directories(${TBB_ROOT_DIR}/include)
 endif()
 
 if(USE_GLOO)
@@ -39,22 +39,31 @@ if(USE_MPI)
   endif()
 endif()
 
+if(USE_UCX)
+  find_package(UCX)
+  if(UCX_FOUND)
+    message(STATUS "UCX_INCLUDE_PATH: ${UCX_INCLUDE_DIR}")
+    message(STATUS "UCX_LIBRARIES: ${UCX_LIBRARIES}")
+    option(USE_C10D_UCX "USE C10D UCX" ON)
+  else()
+    message(STATUS "Not able to find UCX, will compile c10d without UCX support")
+  endif()
+endif()
+
 function(copy_header file)
   configure_file(${file} ${CMAKE_BINARY_DIR}/include/c10d/${file} COPYONLY)
 endfunction()
 
 set(C10D_SRCS
   FileStore.cpp
-  PrefixStore.cpp
+  HashStore.cpp
   ProcessGroup.cpp
+  ProcessGroupRoundRobin.cpp
   Store.cpp
+  PrefixStore.cpp
   TCPStore.cpp
   Utils.cpp
   )
-
-if(NOT WIN32)
-  list(APPEND C10D_SRCS HashStore.cpp ProcessGroupRoundRobin.cpp)
-endif()
 
 set(C10D_LIBS torch)
 
@@ -76,20 +85,25 @@ if(USE_C10D_GLOO)
   endif()
 endif()
 
+if(USE_C10D_UCX)
+  list(APPEND C10D_SRCS ProcessGroupUCX.cpp
+                        UCXSendRecv.cpp
+                        UCXColl.cpp
+                        UCXAllToAll.cpp)
+  list(APPEND C10D_LIBS ${UCX_LIBRARIES})
+endif()
+
 add_library(c10d STATIC ${C10D_SRCS})
 set_property(TARGET c10d PROPERTY POSITION_INDEPENDENT_CODE ON)
 set_property(TARGET c10d PROPERTY CXX_STANDARD 14)
-
-if(NOT MSVC)
-  target_compile_options(c10d PUBLIC
-    -Wall
-    -Wextra
-    -Wno-unused-parameter
-    -Wno-missing-field-initializers
-    -Wno-write-strings
-    -Wno-unknown-pragmas
-    )
-endif()
+target_compile_options(c10d PUBLIC
+  -Wall
+  -Wextra
+  -Wno-unused-parameter
+  -Wno-missing-field-initializers
+  -Wno-write-strings
+  -Wno-unknown-pragmas
+  )
 
 add_dependencies(c10d torch)
 
@@ -107,6 +121,8 @@ target_include_directories(c10d PUBLIC
 
 # For <c10d/...>
 target_include_directories(c10d PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/..)
+# For torch/csrc/utils/hash.h
+target_include_directories(c10d PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../..)
 
 if(USE_C10D_NCCL)
   target_compile_definitions(c10d INTERFACE USE_C10D_NCCL)
@@ -120,7 +136,12 @@ if(USE_C10D_GLOO)
   target_compile_definitions(c10d INTERFACE USE_C10D_GLOO)
 endif()
 
+if(USE_C10D_UCX)
+  target_compile_definitions(c10d INTERFACE USE_C10D_UCX)
+endif()
+
 copy_header(FileStore.hpp)
+copy_header(HashStore.hpp)
 copy_header(PrefixStore.hpp)
 copy_header(ProcessGroup.hpp)
 copy_header(Store.hpp)
@@ -131,12 +152,6 @@ if(USE_GLOO)
   copy_header(ProcessGroupGloo.hpp)
   copy_header(GlooDeviceFactory.hpp)
 endif()
-if(NOT WIN32)
-  copy_header(HashStore.hpp)
-  copy_header(UnixSockUtils.hpp)
-else()
-  copy_header(WinSockUtils.hpp)
-endif()
 
 if(USE_C10D_NCCL)
   copy_header(ProcessGroupNCCL.hpp)
@@ -146,6 +161,12 @@ endif()
 if(USE_C10D_MPI)
   target_include_directories(c10d PUBLIC ${MPI_INCLUDE_PATH})
   copy_header(ProcessGroupMPI.hpp)
+endif()
+
+if(USE_C10D_UCX)
+  target_include_directories(c10d PUBLIC ${UCX_INCLUDE_DIR})
+  copy_header(ProcessGroupUCX.hpp)
+  copy_header(UCXSendRecv.hpp)
 endif()
 
 target_link_libraries(c10d PUBLIC ${C10D_LIBS})
