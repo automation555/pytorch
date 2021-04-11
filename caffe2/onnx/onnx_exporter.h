@@ -24,22 +24,16 @@ using ::ONNX_NAMESPACE::TensorProto;
 using ConvertedResult =
     std::pair<std::vector<NodeProto>, std::vector<TensorProto>>;
 
-// Useful utility function
-void rewriteSubnet(
-    Argument* arg,
-    std::map<std::string, std::string> oldname_to_newname);
-
 // Rewrite Caffe2 nets into SSA forms. Notice that we will preserve the external
 // output names for predict net.
-TORCH_API std::unordered_map<std::string, std::string> SsaRewrite(
+CAFFE2_API std::unordered_map<std::string, std::string> SsaRewrite(
     caffe2::NetDef* init_net,
-    caffe2::NetDef* pred_net,
-    bool PreserveInPlaceOps = true);
+    caffe2::NetDef* pred_net);
 
 ::ONNX_NAMESPACE::TensorProto::DataType Caffe2TypeToOnnxType(
     caffe2::TensorProto::DataType t);
 
-class TORCH_API OnnxExporter {
+class CAFFE2_API OnnxExporter {
   using SpecialOpConverter = ConvertedResult (OnnxExporter::*)(
       const caffe2::OperatorDef&,
       const std::unordered_map<std::string, caffe2::TensorShape>&);
