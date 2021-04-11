@@ -1,9 +1,5 @@
-#include <c10/util/Optional.h>
-#include <c10/util/irange.h>
-#include <torch/csrc/jit/runtime/custom_operator.h>
 #include <torch/csrc/jit/runtime/operator.h>
 #include <torch/csrc/jit/runtime/register_ops_utils.h>
-#include <torch/csrc/jit/runtime/slice_indices_adjust.h>
 #include <torch/library.h>
 
 #include <algorithm>
@@ -32,23 +28,23 @@ namespace {
 
 std::string stringSlice(
     std::string string,
-    c10::optional<int64_t> start,
-    c10::optional<int64_t> end,
+    int64_t start,
+    int64_t end,
     int64_t step) {
-  int64_t start_val = start.has_value() ? start.value() : INT64_MAX;
-  int64_t end_val = end.has_value() ? end.value() : INT64_MAX;
+  TORCH_CHECK(step == 1, "Slicing a string only supports step=1");
 
-  const int64_t num_vals =
-      slice_indices_adjust(string.size(), &start_val, &end_val, step);
+  const int64_t size = string.size();
 
-  int64_t i = start_val;
-  std::string result = "";
-  for (const auto j : c10::irange(num_vals)) {
-    (void)j; // Suppress unused variable warning
-    result += string[i];
-    i += step;
+  // Clamp start and end to the bounds of the list
+  start = std::max(int64_t(0), normalizeIndex(start, size));
+  end = std::min(size, normalizeIndex(end, size));
+
+  if (end <= start) {
+    // Slice is empty
+    return std::string("");
   }
 
+  std::string result(string.begin() + start, string.begin() + end);
   return result;
 }
 
@@ -79,6 +75,59 @@ c10::List<std::string> splitNoneSeparator(const std::string& string) {
   return splits;
 }
 
+TORCH_LIBRARY_IMPL(aten, CatchAll, m) {
+  m.impl("slice.str", TORCH_FN(stringSlice));
+  m.impl("strip", [](std::string string, const std::string& chars) {
+    auto rindex = string.find_last_not_of(chars);
+    if (rindex != std::string::npos) {
+      string = string.substr(0, rindex + 1);
+    } else {
+      string = "";
+    }
+    auto lindex = string.find_first_not_of(chars);
+    if (lindex != std::string::npos) {
+      string = string.substr(lindex, string.size());
+    } else {
+      string = "";
+    }
+    return string;
+  });
+  m.impl(
+      "split.str",
+      [](const std::string& string,
+         c10::optional<std::string> separator,
+         int64_t max) {
+        if (!separator.has_value()) {
+          // if separator is not specified,
+          // a different splitting algorithm is applied as Python
+          return splitNoneSeparator(string);
+          ;
+        }
+        if (separator.value().empty()) {
+          throw std::runtime_error("ValueError: empty separator");
+        }
+
+        std::string::size_type prev_pos = 0;
+        std::string::size_type pos = 0;
+        c10::List<std::string> splits;
+        auto count = 0;
+
+        while ((pos = string.find(separator.value(), pos)) !=
+               std::string::npos) {
+          count++;
+          if (max >= 0 && count > max) {
+            break;
+          } else {
+            splits.emplace_back(string.substr(prev_pos, pos - prev_pos));
+          }
+          pos += separator.value().size();
+          prev_pos = pos;
+        }
+        splits.emplace_back(string.substr(prev_pos, string.size() - prev_pos));
+        return splits;
+      });
+}
+
 RegisterOperators reg(
     {OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::str(t elem) -> str"),
@@ -90,7 +139,7 @@ RegisterOperators reg(
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::list(str t) -> str[]"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            auto str = pop(stack).toStringRef();
            c10::List<std::string> chars;
            chars.reserve(str.size());
@@ -98,107 +147,14 @@ RegisterOperators reg(
              chars.push_back(std::string(1, c));
            }
            push(stack, std::move(chars));
+           return 0;
          },
          aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::cpu(Tensor(a) self) -> Tensor(a|b)"),
-         [](Stack* stack) {
-           at::Tensor a;
-           pop(stack, a);
-           push(stack, a.cpu());
-         },
-         aliasAnalysisFromSchema()),
-     Operator(
-         "prim::layout(Tensor a) -> int",
-         [](Stack* stack) {
-           at::Tensor a;
-           pop(stack, a);
-           push(stack, a.layout());
-         },
-         aliasAnalysisFromSchema()),
-     Operator(
-         prim::tolist,
-         // This operator has to be unschematized because the return type
-         // depends on the type hint and input. The implementation of this
-         // operator below is intended to be as close to the Python
-         // implementation in torch/csrc/utils/tensor_list.cpp as possible.
-         [](const Node* /*node*/) -> Operation {
-           return [](Stack* stack) {
-             int elem_ty_val;
-             int dim_val;
-             at::Tensor t;
-
-             pop(stack, elem_ty_val);
-             pop(stack, dim_val);
-             pop(stack, t);
-
-             // If the Tensor is not on the CPU, transfer it.
-             if (!t.device().is_cpu()) {
-               t = t.cpu();
-             }
-
-             // Rebuild the output type using elem_ty_val and dim_val. Start
-             // with the element type corresponding to elem_ty_val.
-             TypePtr out_ty;
-             if (elem_ty_val == 0) {
-               out_ty = IntType::get();
-             } else if (elem_ty_val == 1) {
-               out_ty = FloatType::get();
-             } else if (elem_ty_val == 2) {
-               out_ty = BoolType::get();
-             } else if (elem_ty_val == 3) {
-               out_ty = ComplexType::get();
-             } else {
-               TORCH_CHECK(
-                   false,
-                   "Unsupported element type for tolist; only int, float, complex and bool are supported");
-             }
-
-             // Check that type of the Tensor matches that of the annotation.
-             // Make an exception for the case in which the annotated type is
-             // float/complex and the Tensor data type is also float/complex;
-             // the elements will be casted to double/c10::complex<double>
-             // later.
-             TORCH_CHECK(
-                 (out_ty == FloatType::get() && t.is_floating_point()) ||
-                     (out_ty == ComplexType::get() && t.is_complex()) ||
-                     tryScalarTypeFromJitType(out_ty) == t.scalar_type(),
-                 "Output annotation element type and runtime tensor element type must match for tolist()");
-
-             // Check that the dimension of the Tensor matches that of the
-             // annotation.
-             TORCH_CHECK(
-                 dim_val == t.dim(),
-                 "Output annotation list dimension and runtime tensor dimension must match for tolist()");
-
-             // Wrap out_ty in a ListType dim times.
-             for (int i = 0; i < dim_val; ++i) {
-               out_ty = ListType::create(out_ty);
-             }
-
-             int64_t dim = t.dim();
-             auto sizes = t.sizes();
-             auto strides = t.strides();
-             size_t element_size = t.element_size();
-             char* data = static_cast<char*>(t.data_ptr());
-             auto result = tensorToListRecursive(
-                 data,
-                 0,
-                 dim,
-                 out_ty,
-                 t.scalar_type(),
-                 sizes,
-                 strides,
-                 element_size);
-             push(stack, std::move(result));
-           };
-         },
-         aliasAnalysisSpecialCase()),
      // only used internally in range() translation
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
              "aten::__range_length(int lo, int hi, int step) -> int"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            int64_t lo, hi, step;
            pop(stack, lo, hi, step);
            // error handling when step_val = 0 during runtime
@@ -212,15 +168,17 @@ RegisterOperators reg(
            } else {
              push(stack, 0);
            }
+           return 0;
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
              "aten::__derive_index(int index, int start, int step) -> int"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            int64_t index, start, step;
            pop(stack, index, start, step);
            push(stack, start + index * step);
+           return 0;
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
@@ -238,15 +196,6 @@ RegisterOperators reg(
            pop(stack, a);
            checkImplicitTensorToNum(a, /*to int*/ true);
            push(stack, a.item<int64_t>());
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::ComplexImplicit(Tensor a) -> complex"),
-         [](Stack* stack) {
-           at::Tensor a;
-           pop(stack, a);
-           checkImplicitTensorToNum(a, /*to int*/ false);
-           push(stack, a.item<c10::complex<double>>());
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
@@ -292,59 +241,6 @@ RegisterOperators reg(
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Int.Tensor(Tensor a) -> int"),
-         [](Stack* stack) {
-           at::Tensor a;
-           pop(stack, a);
-           push(stack, a.item<int64_t>());
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Int.bool(bool a) -> int"),
-         [](Stack* stack) {
-           bool b;
-           pop(stack, b);
-           push(stack, static_cast<int64_t>(b));
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Int.float(float a) -> int"),
-         [](Stack* stack) {
-           double d;
-           pop(stack, d);
-           push(stack, static_cast<int64_t>(d));
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Int.Scalar(Scalar a) -> int"),
-         [](Stack* stack) {
-           IValue scalar;
-           pop(stack, scalar);
-           if (scalar.isInt()) {
-             push(stack, std::move(scalar));
-           } else {
-             // toScalar() needed to avoid strict type check in IValue::toInt.
-             push(stack, static_cast<int64_t>(scalar.toScalar().toInt()));
-           }
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Int.str(str a) -> int"),
-         [](Stack* stack) {
-           auto s = pop(stack).toString();
-           std::string::size_type sz;
-           int64_t val = static_cast<int64_t>(c10::stoll(s->string(), &sz));
-           if (sz == s->string().size()) {
-             push(stack, val);
-           } else {
-             std::stringstream error_str;
-             error_str << "invalid literal for int() "
-                       << "with base 10: '" << s->string() << "'";
-             throw std::runtime_error(error_str.str());
-           }
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::Float.Tensor(Tensor a) -> float"),
          [](Stack* stack) {
            at::Tensor a;
@@ -359,8 +255,6 @@ RegisterOperators reg(
            pop(stack, scalar);
            if (scalar.isDouble()) {
              push(stack, std::move(scalar));
-           } else if (scalar.isComplexDouble()) {
-             push(stack, scalar.toComplexDouble().real());
            } else {
              push(stack, static_cast<double>(scalar.toInt()));
            }
@@ -396,30 +290,6 @@ RegisterOperators reg(
                        << "to float: '" << s->string() << "'";
              throw std::runtime_error(error_str.str());
            }
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::Complex.Scalar(Scalar a) -> complex"),
-         [](Stack* stack) {
-           IValue scalar;
-           pop(stack, scalar);
-           if (scalar.isComplexDouble()) {
-             push(stack, std::move(scalar));
-           } else if (scalar.isDouble()) {
-             push(stack, c10::complex<double>(scalar.toDouble(), 0));
-           } else {
-             push(stack, c10::complex<double>(scalar.toInt(), 0));
-           }
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA(
-             "aten::Complex.Tensor_Tensor(Tensor a, Tensor b) -> complex"),
-         [](Stack* stack) {
-           at::Tensor a, b;
-           pop(stack, a, b);
-           push(
-               stack, c10::complex<double>(a.item<double>(), b.item<double>()));
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
@@ -650,7 +520,7 @@ RegisterOperators reg(
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
-             "aten::slice.t(t[] l, int? start=0, int? end=9223372036854775807, int step=1) -> t[]"),
+             "aten::slice.t(t[] l, int start, int end=9223372036854775807, int step=1) -> t[]"),
          listSlice,
          aliasAnalysisFromSchema()),
      OperatorGenerator(
@@ -676,38 +546,6 @@ RegisterOperators reg(
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::eq.int_list(int[] a, int[] b) -> bool"),
          listEq<int64_t>,
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::eq.device(Device a, Device b) -> bool"),
-         [](Stack* stack) {
-           auto a = pop(stack).toDevice();
-           auto b = pop(stack).toDevice();
-           push(stack, a == b);
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::ne.device(Device a, Device b) -> bool"),
-         [](Stack* stack) {
-           auto a = pop(stack).toDevice();
-           auto b = pop(stack).toDevice();
-           push(stack, a != b);
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::eq.bool(bool a, bool b) -> bool"),
-         [](Stack* stack) {
-           auto a = pop(stack);
-           auto b = pop(stack);
-           push(stack, a == b);
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("aten::ne.bool(bool a, bool b) -> bool"),
-         [](Stack* stack) {
-           auto a = pop(stack);
-           auto b = pop(stack);
-           push(stack, a != b);
-         },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("prim::Uninitialized() -> Any"),
@@ -750,12 +588,6 @@ RegisterOperators reg(
            push(stack, x != y);
          },
          aliasAnalysisFromSchema()),
-     // We define aten::dequantize in both native_functions.yaml and here,
-     // however, aten::dequantize.any defined here overrides
-     // aten::dequantize.tensors in native_functions.yaml. The variants here
-     // are only for graph mode quantization, and they should be removed once
-     // we deprecate graph mode quantization, and use the variants in
-     // native_functions.yaml.
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
              "aten::dequantize.tensor(Tensor qtensor) -> Tensor"),
@@ -766,18 +598,9 @@ RegisterOperators reg(
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA(
-             "aten::dequantize.list(Tensor[] qtensors) -> Tensor[]"),
-         [](Stack* stack) {
-           auto qtensors = pop(stack).toTensorVector();
-           push(stack, at::dequantize(qtensors));
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::dequantize.any(Any tensors) -> Any"),
          [](Stack* stack) { dequantize(*stack); },
          aliasAnalysisFromSchema()),
-     DEFINE_UNARY_OP_WITH_COMPLEX(aten::log, std::log(a), float, float),
      DEFINE_STRING_OP(aten::add, a + b, str),
      DEFINE_COMPARISON_OP(aten::eq, a == b),
      DEFINE_COMPARISON_OP(aten::ne, a != b),
@@ -785,17 +608,16 @@ RegisterOperators reg(
      DEFINE_COMPARISON_OP(aten::gt, a > b),
      DEFINE_COMPARISON_OP(aten::le, a <= b),
      DEFINE_COMPARISON_OP(aten::ge, a >= b),
-     DEFINE_BINARY_OP_WITH_COMPLEX(aten::add, a + b),
-     DEFINE_BINARY_OP_WITH_COMPLEX(aten::sub, a - b),
-     DEFINE_BINARY_OP_WITH_COMPLEX(aten::mul, a* b),
+     DEFINE_BINARY_OP(aten::add, a + b),
+     DEFINE_BINARY_OP(aten::sub, a - b),
+     DEFINE_BINARY_OP(aten::mul, a* b),
      DEFINE_BOOL_OP(aten::__and__, a&& b),
      DEFINE_BOOL_OP(aten::__or__, a || b),
      DEFINE_BOOL_OP(aten::__xor__, a != b),
-     DEFINE_UNARY_OP(aten::round, round_to_even(a), float, float),
      DEFINE_UNARY_OP(aten::floor, floor(a), int, int),
      DEFINE_UNARY_OP(aten::ceil, ceil(a), int, int),
-     DEFINE_UNARY_OP_WITH_COMPLEX(aten::neg, -a, int, float),
-     DEFINE_UNARY_OP_WITH_COMPLEX(aten::exp, std::exp(a), float, float),
+     DEFINE_UNARY_OP(aten::neg, -a, int, float),
+     DEFINE_UNARY_OP(aten::exp, std::exp(a), float, float),
      // Pass in two ops for handling int and float separately as % in C++ only
      // works for int The modulus calculation is different between C++ and
      // Python (on negative), we preserve the python behavior as it's more
@@ -884,7 +706,7 @@ RegisterOperators reg(
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::ord(str string) -> int"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            auto string = pop(stack).toStringRef();
            TORCH_CHECK(
                string.size() == 1,
@@ -892,23 +714,20 @@ RegisterOperators reg(
                string.size());
            uint8_t ord = string.at(0);
            push(stack, int64_t(ord));
+           return 0;
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::lower(str self) -> str"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            auto string = pop(stack).toStringRef();
            std::stringstream ss;
            for (char c : string) {
              ss << static_cast<char>(::tolower(c));
            }
            push(stack, ss.str());
+           return 0;
          },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA(
-             "aten::__contains__.int_list(int[] l, int item) -> bool"),
-         listContains<int64_t>,
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
@@ -917,28 +736,22 @@ RegisterOperators reg(
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("aten::len.str(str s) -> int"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            auto string = pop(stack).toStringRef();
            push(stack, static_cast<int64_t>(string.size()));
-         },
-         aliasAnalysisFromSchema()),
-     Operator(
-         "aten::dict() -> Dict(str, Tensor)",
-         [](Stack* stack) {
-           auto dict =
-               c10::impl::GenericDict(StringType::get(), TensorType::get());
-           push(stack, dict);
+           return 0;
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA(
              "aten::__getitem__.str(str s, int index) -> str"),
-         [](Stack* stack) {
+         [](Stack& stack) {
            auto index = pop(stack).toInt();
            auto string = pop(stack).toStringRef();
            auto norm_index = normalizeIndex(index, string.size());
            char c = string.at(norm_index);
            push(stack, std::string(&c, 1));
+           return 0;
          },
          aliasAnalysisFromSchema()),
 #define CREATE_COPY_OP(other_type, c_type)                               \
@@ -983,7 +796,7 @@ RegisterOperators reg(
          TORCH_SELECTIVE_SCHEMA(
              "aten::index.Tensor_hacked_twin(Tensor self, Tensor[] indices) -> Tensor"),
          [](Stack* stack) {
-           auto indices = pop(stack).to<List<c10::optional<at::Tensor>>>();
+           auto indices = pop(stack).toTensorVector();
            auto self = pop(stack).toTensor();
            auto result = at::index(self, indices);
            push(stack, std::move(result));
@@ -996,7 +809,7 @@ RegisterOperators reg(
            auto unsafe = pop(stack).toBool();
            auto accumulate = pop(stack).toBool();
            auto values = pop(stack).toTensor();
-           auto indices = pop(stack).to<List<c10::optional<at::Tensor>>>();
+           auto indices = pop(stack).toTensorVector();
            auto self = pop(stack).toTensor();
            auto result =
                at::_index_put_impl_(self, indices, values, accumulate, unsafe);
@@ -1009,7 +822,7 @@ RegisterOperators reg(
          [](Stack* stack) {
            auto accumulate = pop(stack).toBool();
            auto values = pop(stack).toTensor();
-           auto indices = pop(stack).to<List<c10::optional<at::Tensor>>>();
+           auto indices = pop(stack).toTensorVector();
            auto self = pop(stack).toTensor();
            auto result = at::index_put_(self, indices, values, accumulate);
            push(stack, std::move(result));
@@ -1021,7 +834,7 @@ RegisterOperators reg(
          [](Stack* stack) {
            auto accumulate = pop(stack).toBool();
            auto values = pop(stack).toTensor();
-           auto indices = pop(stack).to<List<c10::optional<at::Tensor>>>();
+           auto indices = pop(stack).toTensorVector();
            auto self = pop(stack).toTensor();
            auto result = at::index_put_(self, indices, values, accumulate);
            push(stack, std::move(result));
@@ -1070,14 +883,6 @@ RegisterOperators reg(
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(
-         TORCH_SELECTIVE_SCHEMA("prim::is_xpu(Tensor a) -> bool"),
-         [](Stack* stack) {
-           at::Tensor a;
-           pop(stack, a);
-           push(stack, a.is_xpu());
-         },
-         aliasAnalysisFromSchema()),
-     OperatorGenerator(
          TORCH_SELECTIVE_SCHEMA("prim::data(Tensor(a) a) -> Tensor(a)"),
          [](Stack* stack) {
            at::Tensor a;
@@ -1112,49 +917,7 @@ RegisterOperators reg(
          CREATE_COMPARATOR_LIST_OPS_SPECIALIZED("float", double)
              CREATE_COMPARATOR_LIST_OPS_SPECIALIZED("bool", bool)
 #undef CREATE_COMPARATOR_LIST_OPS_SPECIALIZED
-// python string is methods return false if empty
-#define DEFINE_STRING_IS_OP(op_name, char_op)                          \
-  OperatorGenerator(                                                   \
-      TORCH_SELECTIVE_SCHEMA(#op_name "(str self) -> bool"),           \
-      [](Stack* stack) {                                               \
-        auto string = pop(stack).toStringRef();                        \
-        push(                                                          \
-            stack,                                                     \
-            string.size() != 0 &&                                      \
-                std::all_of(string.begin(), string.end(), [](char c) { \
-                  return char_op(c);                                   \
-                }));                                                   \
-      },                                                               \
-      aliasAnalysisFromSchema())
-
-                 DEFINE_STRING_IS_OP(aten::isdigit, ::isdigit),
-     DEFINE_STRING_IS_OP(aten::isspace, ::isspace),
-     DEFINE_STRING_IS_OP(aten::isalnum, ::isalnum),
-     DEFINE_STRING_IS_OP(aten::isalpha, ::isalpha),
-     DEFINE_STRING_IS_OP(aten::isdecimal, ::isdigit),
-     DEFINE_STRING_IS_OP(aten::isnumeric, ::isdigit),
-
-#define DEFINE_STRING_CHAR_MAP_OP(op_name, char_op)         \
-  OperatorGenerator(                                        \
-      TORCH_SELECTIVE_SCHEMA(#op_name "(str self) -> str"), \
-      [](Stack* stack) {                                    \
-        auto string = pop(stack).toStringRef();             \
-        std::stringstream ss;                               \
-        for (char c : string) {                             \
-          ss << static_cast<char>(char_op(c));              \
-        }                                                   \
-        push(stack, ss.str());                              \
-      },                                                    \
-      aliasAnalysisFromSchema())
-
-     DEFINE_STRING_CHAR_MAP_OP(aten::upper, ::toupper),
-     DEFINE_STRING_CHAR_MAP_OP(aten::swapcase, ([](char c) {
-                                 if (c == static_cast<char>(::toupper(c))) {
-                                   return static_cast<char>(::tolower(c));
-                                 } else {
-                                   return static_cast<char>(::toupper(c));
-                                 }
-                               }))});
+    });
 
 void dictSetItem(Stack* stack) {
   auto value = pop(stack);
@@ -1288,7 +1051,7 @@ void dictUpdate(Stack* stack) {
   auto dict = pop(stack).toGenericDict();
 
   for (const auto& item : to_add) {
-    dict.insert_or_assign(item.key(), item.value());
+    dict.insert(item.key(), item.value());
   }
 }
 
@@ -1423,11 +1186,6 @@ void dictConstructFromList(Stack* stack) {
                                  ", tVal)[] inputs) -> Dict(" key_type         \
                                  ", tVal)"),                                   \
           dictConstructFromList,                                               \
-          aliasAnalysisFromSchema()),                                          \
-      OperatorGenerator(                                                       \
-          TORCH_SELECTIVE_SCHEMA("aten::dict.Dict_" key_type "(Dict(" key_type \
-                                 ", t)(a) self) -> Dict(" key_type ", t)"),    \
-          dictCopy,                                                            \
           aliasAnalysisFromSchema())
 
 RegisterOperators reg_dict_ops({
@@ -1435,576 +1193,777 @@ RegisterOperators reg_dict_ops({
     CREATE_DICT_OPS("int"),
     CREATE_DICT_OPS("bool"),
     CREATE_DICT_OPS("float"),
-    CREATE_DICT_OPS("complex"),
     CREATE_DICT_OPS("Tensor"),
 });
 
-c10::AliasAnalysisKind aliasAnalysisFromSchema() {
-  return c10::AliasAnalysisKind::FROM_SCHEMA;
+// As described in https://docs.python.org/3/library/functions.html#round
+// When a number is exactly halfway between two integers, python builtin round
+// function will round to even number. We use round(x/2)*2 to handle the
+// special halfway case. For positive 'x', round(x/2)*2 =
+// round((x_e + x_r)/2)*2 = x_e + round(x_r/2)*2, where x_e is an even integer,
+// x_r is either 0.5 of 1.5, round(x_r/2)*2 results a 0 or 2, so the final
+// result will always be a even number. Due to symmetricity, it also applies to
+// negative cases.
+double round_to_even(double a) {
+  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
+  return a - std::floor(a) == 0.5 ? (std::round(a * 0.5) * 2.0) : std::round(a);
 }
 
-// Convert an python index (which may be negative) into an index usable for a
-// C++ container
-int64_t normalizeIndex(int64_t idx, int64_t list_size) {
-  if (idx < 0) {
-    // Handle negative indexing
-    idx = list_size + idx;
-  }
-  return idx;
-}
+RegisterOperators reg_from_fulljit(
+    {OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA(
+             "aten::warn(str message, int stacklevel=2) -> ()"),
+         [](Stack* stack) {
+           TORCH_CHECK(
+               false, "warn is implemented directly in the interpreter");
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::AutogradAnyNonZero(...) -> bool"),
+         [](Stack* stack) {
+           auto num_inputs = pop(stack).toInt();
+           bool result = false;
+           for (const IValue& v : last(stack, num_inputs)) {
+             if (v.isTensor()) {
+               if (v.toTensor().defined()) {
+                 result = true;
+                 break;
+               }
+             } else if (v.isTensorList()) {
+               for (const at::Tensor& t : v.toTensorVector()) {
+                 if (t.defined()) {
+                   result = true;
+                 }
+               }
+               if (result) {
+                 break;
+               }
+             } else {
+               TORCH_INTERNAL_ASSERT(false);
+             }
+           }
+           drop(stack, num_inputs);
+           stack->emplace_back(result);
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::AutogradAdd(Any a, Any b) -> Any"),
+         [](Stack* stack) {
+           at::Tensor a, b;
+           pop(stack, a, b);
+           if (!a.defined() && !b.defined()) {
+             // undef + undef == undef
+             stack->emplace_back(a);
+           } else if (!a.defined()) {
+             stack->emplace_back(b);
+           } else if (!b.defined()) {
+             stack->emplace_back(a);
+           } else {
+             stack->emplace_back(a + b);
+           }
+         },
+         aliasAnalysisSpecialCase()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA(
+             "aten::_grad_sum_to_size(Tensor(a) self, int[]? size) -> Tensor(a)"),
+         [](Stack* stack) {
+           IValue self, size;
+           pop(stack, self, size);
+           if (size.isNone()) {
+             push(stack, std::move(self));
+           } else {
+             push(stack, at::sum_to(self.toTensor(), size.toIntVector()));
+           }
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA(
+             "aten::_size_if_not_equal(int[] self_size, int[] other_size) -> int[]?"),
+         [](Stack* stack) {
+           IValue self_size, other_size;
+           pop(stack, self_size, other_size);
+           auto s = self_size.toIntVector();
+           auto o = other_size.toIntVector();
+           if (s == o) {
+             push(stack, IValue());
+           } else {
+             push(stack, s);
+           }
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::rangelist(int n) -> int[]"),
+         [](Stack* stack) {
+           int64_t n;
+           pop(stack, n);
+           c10::List<int64_t> elems;
+           elems.reserve(n);
+           for (int i = 0; i < n; i++) {
+             elems.push_back(i);
+           }
+           push(stack, std::move(elems));
+         },
+         aliasAnalysisFromSchema()),
+     // note: this op needs to share a name with the Scalar -> Tensor conversion
+     // because all _to_tensor conversion have to have the same operator namet
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::NumToTensor.bool(bool a) -> Tensor"),
+         [](Stack* stack) {
+           bool b;
+           pop(stack, b);
+           push(stack, at::scalar_to_tensor(b));
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::device(str a) -> Device"),
+         [](Stack* stack) {
+           push(stack, c10::Device(pop(stack).toStringRef()));
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA(
+             "aten::to.prim_other(Tensor(a) self, bool non_blocking=False, bool copy=False) -> Tensor(a|b)"),
+         [](Stack* stack) {
+           at::Tensor self;
+           bool non_blocking;
+           bool copy;
+           pop(stack, self, non_blocking, copy);
+           c10::optional<c10::Device> device = c10::nullopt;
+           c10::optional<at::ScalarType> scalarType = c10::nullopt;
+           push(
+               stack,
+               to_dispatch(self, device, scalarType, non_blocking, copy));
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::eq.device(Device a, Device b) -> bool"),
+         [](Stack* stack) {
+           auto a = pop(stack).toDevice();
+           auto b = pop(stack).toDevice();
+           push(stack, a == b);
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::requires_grad(Tensor a) -> bool"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.requires_grad());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::grad(Tensor a) -> Tensor(*)"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.grad());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::is_sparse(Tensor a) -> bool"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.is_sparse());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::is_mkldnn(Tensor a) -> bool"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.is_mkldnn());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::is_quantized(Tensor a) -> bool"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.is_quantized());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::is_meta(Tensor a) -> bool"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.is_meta());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::name(Tensor a) -> str?"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           if (a.name() == "") {
+             push(stack, IValue());
+           } else {
+             push(stack, a.name());
+           }
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::layout(Tensor a) -> int"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.layout());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::cpu(Tensor(a) self) -> Tensor(a|b)"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.cpu());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::index(Device self) -> int?"),
+         [](Stack* stack) {
+           auto d = pop(stack).toDevice();
+           if (d.has_index()) {
+             push(stack, d.index());
+           } else {
+             push(stack, IValue());
+           }
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         // TODO return generator object when torchscript supports RNG
+         // first-class
+         TORCH_SELECTIVE_SCHEMA("aten::manual_seed(int seed) -> ()"),
+         [](Stack* stack) { at::manual_seed(pop(stack).toInt()); },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::cuda(Tensor(a) self) -> Tensor(a|b)"),
+         [](Stack* stack) {
+           at::Tensor a;
+           pop(stack, a);
+           push(stack, a.cuda());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::AutogradZero() -> Tensor"),
+         [](Stack* stack) { stack->emplace_back(at::Tensor()); },
+         aliasAnalysisSpecialCase()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("prim::BroadcastSizes(...) -> int[]"),
+         [](Stack* stack) {
+           auto num_inputs = pop(stack).toInt();
+           std::vector<int64_t> size;
+           size.reserve(8);
+           for (auto i = 0; i < num_inputs; ++i) {
+             size =
+                 at::infer_size(size, peek(stack, i, num_inputs).toIntVector());
+           }
+           drop(stack, num_inputs);
+           push(stack, IValue(std::move(size)));
+         },
+         aliasAnalysisSpecialCase()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::dict() -> Dict(str, Tensor)"),
+         [](Stack* stack) {
+           auto dict =
+               c10::impl::GenericDict(StringType::get(), TensorType::get());
+           push(stack, dict);
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA(
+             "aten::_unwrap_optional(t(a)? optional) -> t(a)"),
+         [](Stack* stack) {
+           auto val = pop(stack);
+           TORCH_CHECK(!val.isNone(), "Unwrapping null optional");
+           push(stack, std::move(val));
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::wait(Future(t) self) -> t"),
+         [](Stack* stack) {
+           TORCH_CHECK(
+               false, "wait is implemented directly in the interpreter");
+         },
+         aliasAnalysisSpecialCase())
 
-int64_t stringFindImpl(
-    std::string string,
-    const std::string& substr,
-    int64_t start,
-    int64_t end,
-    bool reverse = false) {
-  int64_t size = string.size();
-  if (start < 0) {
-    start = std::max(int64_t(0), int64_t(size + start));
-  }
-  if (end < 0) {
-    end = std::max(int64_t(0), int64_t(size + end + 1));
-  }
-  if (end > start) {
-    string = string.substr(start, end - start);
-  } else {
-    string = "";
-  }
-
-  int64_t result = -1;
-  if (string.size() >= substr.size()) {
-    auto pos = string.find(substr, 0);
-    if (reverse) {
-      auto rpos = pos;
-      do {
-        pos = rpos;
-        rpos = string.find(substr, pos + 1);
-      } while (rpos != std::string::npos);
-    }
-    if (pos != std::string::npos) {
-      result = pos + start;
-    }
-  }
-  return result;
-}
-
-// String Ops
-// Implementations located in torch/csrc/jit/runtime/register_string_ops.cpp
-TORCH_LIBRARY_IMPL(aten, CatchAll, m) {
-  m.impl(TORCH_SELECTIVE_NAME("aten::slice.str"), TORCH_FN(stringSlice));
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::strip"),
-      [](std::string string, const std::string& chars) {
-        auto rindex = string.find_last_not_of(chars);
-        if (rindex != std::string::npos) {
-          string = string.substr(0, rindex + 1);
-        } else {
-          string = "";
-        }
-        auto lindex = string.find_first_not_of(chars);
-        if (lindex != std::string::npos) {
-          string = string.substr(lindex, string.size());
-        } else {
-          string = "";
-        }
-        return string;
-      });
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::split.str"),
-      [](const std::string& string,
-         c10::optional<std::string> separator,
-         int64_t max) {
-        if (!separator.has_value()) {
-          // if separator is not specified,
-          // a different splitting algorithm is applied as Python
-          return splitNoneSeparator(string);
-          ;
-        }
-        if (separator.value().empty()) {
-          throw std::runtime_error("ValueError: empty separator");
-        }
-
-        std::string::size_type prev_pos = 0;
-        std::string::size_type pos = 0;
-        c10::List<std::string> splits;
-        auto count = 0;
-
-        while ((pos = string.find(separator.value(), pos)) !=
-               std::string::npos) {
-          count++;
-          if (max >= 0 && count > max) {
-            break;
-          } else {
-            splits.emplace_back(string.substr(prev_pos, pos - prev_pos));
-          }
-          pos += separator.value().size();
-          prev_pos = pos;
-        }
-        splits.emplace_back(string.substr(prev_pos, string.size() - prev_pos));
-        return splits;
-      });
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::splitlines"),
-      [](std::string string, bool keepends) {
-        std::string delimiters =
-            "\n\r\r\n\v\x0b\f\x0c\x1c\x1d\x1e\x85\u2028\u2029";
-        c10::List<std::string> splits;
-
-        std::string::size_type prev_pos = 0;
-        std::string::size_type pos = 0;
-        while ((pos = string.find_first_of(delimiters, pos)) !=
-               std::string::npos) {
-          splits.emplace_back(string.substr(prev_pos, pos - prev_pos));
-          if (keepends) {
-            splits.emplace_back(string.substr(pos, 1));
-          }
-          pos++;
-          prev_pos = pos;
-        }
-        if (prev_pos != string.size()) {
-          splits.emplace_back(
-              string.substr(prev_pos, string.size() - prev_pos));
-        }
-
-        return splits;
-      });
-
-  // upper and lower require there to be at least one alpha character,
-  // and ignore all other characters
-  m.impl(TORCH_SELECTIVE_NAME("aten::isupper"), [](std::string string) {
-    bool found_alpha = false;
-    bool is_upper = true;
-    for (size_t i = 0; i < string.size() && is_upper; ++i) {
-      char c = string[i];
-      found_alpha |= static_cast<bool>(::isalpha(c));
-      is_upper &= (!::isalpha(c) || ::isupper(c));
-    }
-    return found_alpha && is_upper;
-  });
-  m.impl(TORCH_SELECTIVE_NAME("aten::islower"), [](std::string string) {
-    bool found_alpha = false;
-    bool is_lower = true;
-    for (size_t i = 0; i < string.size() && is_lower; ++i) {
-      char c = string[i];
-      found_alpha |= static_cast<bool>(::isalpha(c));
-      is_lower &= (!::isalpha(c) || ::islower(c));
-    }
-    return found_alpha && is_lower;
-  });
-
-  m.impl(TORCH_SELECTIVE_NAME("aten::capitalize"), [](std::string string) {
-    std::stringstream ss;
-    auto first_char = true;
-    for (char c : string) {
-      if (first_char) {
-        ss << static_cast<char>(::toupper(c));
-        first_char = false;
-      } else {
-        ss << static_cast<char>(::tolower(c));
-      }
-    }
-    return ss.str();
-  });
-
-  m.impl(TORCH_SELECTIVE_NAME("aten::title"), [](std::string string) {
-    std::stringstream ss;
-    bool prev_is_nonalpha = true;
-    for (char c : string) {
-      if (prev_is_nonalpha) {
-        ss << static_cast<char>(::toupper(c));
-      } else {
-        ss << static_cast<char>(::tolower(c));
-      }
-      if (::isalpha(c)) {
-        prev_is_nonalpha = false;
-      } else {
-        prev_is_nonalpha = true;
-      }
-    }
-    return ss.str();
-  });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::center"),
-      [](std::string string, int64_t width, std::string fillchar) {
-        if (fillchar.size() != 1) {
-          // TODO: this should be a TypeError
-          throw std::runtime_error(
-              "TypeError: The fill character must be exactly one character long");
-        }
-        if (string.size() > static_cast<std::string::size_type>(width)) {
-          return string;
-        }
-        std::stringstream ss;
-        std::string::size_type full_padding = width - string.size();
-        std::string::size_type l_pad = full_padding / 2;
-        std::string::size_type r_pad = (full_padding + 1) / 2;
-        if (width % 2) {
-          auto tmp = r_pad;
-          r_pad = l_pad;
-          l_pad = tmp;
-        }
-        for (std::string::size_type i = 0; i < l_pad; ++i) {
-          ss << fillchar;
-        }
-        ss << string;
-        for (std::string::size_type i = 0; i < r_pad; ++i) {
-          ss << fillchar;
-        }
-        return ss.str();
-      });
-
-  // Adapted from
-  // https://stackoverflow.com/questions/22489073/counting-the-number-of-occurrences-of-a-string-within-a-string
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::count"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        int64_t size = string.size();
-        if (start > size) {
-          return int64_t(0);
-        }
-        if (start < 0) {
-          start = std::max(int64_t(0), int64_t(size + start));
-        }
-        if (end < 0) {
-          end = std::max(int64_t(0), int64_t(size + end + 1));
-        }
-
-        int64_t occurrences = 0;
-        std::string::size_type pos = start;
-        while ((pos = string.find(substr, pos)) != std::string::npos) {
-          if (pos < static_cast<std::string::size_type>(end)) {
-            ++occurrences;
-          } else {
-            break;
-          }
-          pos += substr.length();
-        }
-        return occurrences;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::endswith"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        int64_t size = string.size();
-        if (start < 0) {
-          start = std::max(int64_t(0), int64_t(size + start));
-        }
-        if (end < 0) {
-          end = std::max(int64_t(0), int64_t(size + end + 1));
-        }
-
-        string = string.substr(start, end - start);
-
-        auto result = false;
-        if (string.length() >= substr.length()) {
-          result = !string.compare(
-              string.length() - substr.length(), substr.length(), substr);
-        }
-        return result;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::startswith"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        int64_t size = string.size();
-        if (start < 0) {
-          start = std::max(int64_t(0), int64_t(size + start));
-        }
-        if (end < 0) {
-          end = std::max(int64_t(0), int64_t(size + end + 1));
-        }
-
-        string = string.substr(start, end - start);
-
-        auto result = false;
-        if (string.length() >= substr.length()) {
-          result = !string.compare(0, substr.length(), substr);
-        }
-        return result;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::expandtabs"),
-      [](std::string string, int64_t tabsize) {
-        std::stringstream ss;
-        size_t index = 0;
-        for (const auto& c : string) {
-          if (c != '\t') {
-            ss << c;
-            index++;
-          } else {
-            if (tabsize <= 0) {
-              continue;
-            }
-            do {
-              ss << ' ';
-              index++;
-            } while (index % tabsize);
-          }
-        }
-        return ss.str();
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::find"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        return stringFindImpl(string, substr, start, end);
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rfind"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        return stringFindImpl(string, substr, start, end, true);
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::index.str"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        auto result = stringFindImpl(string, substr, start, end);
-        if (result < 0) {
-          throw std::runtime_error("ValueError: substring not found");
-        }
-        return result;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rindex"),
-      [](std::string string, std::string substr, int64_t start, int64_t end) {
-        auto result = stringFindImpl(string, substr, start, end, true);
-        if (result < 0) {
-          throw std::runtime_error("ValueError: substring not found");
-        }
-        return result;
-      });
-
-  m.impl(TORCH_SELECTIVE_NAME("aten::isidentifier"), [](std::string string) {
-    LOG(WARNING)
-        << "The isidentifier() implementation being used is from Python 2\n";
-    if (string.size() < 1) {
-      return false;
-    }
-    if (::isdigit(string[0])) {
-      return false;
-    }
-    auto result = std::all_of(
-        string.begin(), string.end(), [](char c) { return ::isalnum(c); });
-    return result;
-  });
-
-  m.impl(TORCH_SELECTIVE_NAME("aten::istitle"), [](std::string string) {
-    auto result = false;
-
-    bool prev_is_alpha = false;
-    for (char c : string) {
-      if (prev_is_alpha) {
-        if (c != static_cast<char>(::tolower(c))) {
-          result = false;
-          break;
-        }
-      } else {
-        if (c != static_cast<char>(::toupper(c))) {
-          result = false;
-          break;
-        }
-        // Only true if there exists at least one alpha
-        if (::isalpha(c)) {
-          result = true;
-        }
-      }
-      if (::isalpha(c)) {
-        prev_is_alpha = true;
-      } else {
-        prev_is_alpha = false;
-      }
-    }
-    return result;
-  });
-
-  // Can't reuse DEFINE_STRING_IS_OP because "" is printable
-  m.impl(TORCH_SELECTIVE_NAME("aten::isprintable"), [](std::string string) {
-    auto result = std::all_of(string.begin(), string.end(), [](char c) {
-      return ::isalnum(c) || ::ispunct(c) || c == ' ';
     });
-    return result;
-  });
 
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::ljust"),
-      [](std::string string, int64_t width, std::string fillchar) {
-        if (fillchar.size() != 1) {
-          // TODO: this should be a TypeError
-          throw std::runtime_error(
-              "TypeError: The fill character must be exactly one character long");
-        }
-        auto to_append =
-            std::max(int64_t(0), width - static_cast<int64_t>(string.size()));
-
-        std::stringstream ss;
-        ss << string;
-        for (auto i = 0; i < to_append; ++i) {
-          ss << fillchar;
-        }
-
-        return ss.str();
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rjust"),
-      [](std::string string, int64_t width, std::string fillchar) {
-        if (fillchar.size() != 1) {
-          // TODO: this should be a TypeError
-          throw std::runtime_error(
-              "TypeError: The fill character must be exactly one character long");
-        }
-        auto to_append =
-            std::max(int64_t(0), width - static_cast<int64_t>(string.size()));
-
-        std::stringstream ss;
-        for (auto i = 0; i < to_append; ++i) {
-          ss << fillchar;
-        }
-        ss << string;
-        return ss.str();
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::zfill"),
-      [](std::string string, int64_t width) {
-        auto to_append =
-            std::max(int64_t(0), width - static_cast<int64_t>(string.size()));
-
-        std::stringstream ss;
-        for (auto i = 0; i < to_append; ++i) {
-          ss << '0';
-        }
-        ss << string;
-
-        return ss.str();
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::lstrip"),
-      [](std::string string, std::string chars) {
-        auto index = string.find_first_not_of(chars);
-        if (index != std::string::npos) {
-          string = string.substr(index, string.size());
-        } else {
-          string = "";
-        }
-        return string;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rstrip"),
-      [](std::string string, std::string chars) {
-        auto index = string.find_last_not_of(chars);
-        if (index != std::string::npos) {
-          string = string.substr(0, index + 1);
-        } else {
-          string = "";
-        }
-        return string;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::replace"),
-      [](std::string string,
-         std::string old_str,
-         std::string new_str,
-         int64_t max) {
-        int64_t occurrences = 0;
-        std::string::size_type pos = 0;
-        while ((pos = string.find(old_str, pos)) != std::string::npos) {
-          if (max >= 0 && ++occurrences > max) {
-            break;
-          }
-          string = string.replace(pos, old_str.length(), new_str);
-          pos += new_str.length();
-        }
-
-        return string;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::partition"),
-      [](std::string string, std::string separator) {
-        auto pos = string.find(separator, 0);
-        if (pos == std::string::npos) {
-          pos = string.size();
-          separator = "";
-        }
-        auto pre_partition = string.substr(0, pos);
-        auto post_partition =
-            string.substr(pos + separator.size(), string.size());
-
-        return std::make_tuple(pre_partition, separator, post_partition);
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rpartition"),
-      [](std::string string, std::string separator) {
-        auto pos = string.find(separator, 0);
-        auto rpos = pos;
-        do {
-          pos = rpos;
-          rpos = string.find(separator, pos + 1);
-        } while (rpos != std::string::npos);
-
-        if (pos == std::string::npos) {
-          pos = 0;
-          separator = "";
-        }
-
-        auto pre_partition = string.substr(0, pos);
-        auto post_partition =
-            string.substr(pos + separator.size(), string.size());
-
-        return std::make_tuple(pre_partition, separator, post_partition);
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::rsplit"),
-      [](std::string string, std::string separator, int64_t max) {
-        std::reverse(separator.begin(), separator.end());
-        std::reverse(string.begin(), string.end());
-
-        std::string::size_type prev_pos = 0;
-        std::string::size_type pos = 0;
-        c10::List<std::string> splits;
-        auto count = 0;
-        while ((pos = string.find(separator, pos)) != std::string::npos) {
-          count++;
-          if (max >= 0 && count > max) {
-            break;
-          } else {
-            auto substr = string.substr(prev_pos, pos - prev_pos);
-            std::reverse(substr.begin(), substr.end());
-            splits.emplace(splits.begin(), substr);
-          }
-          pos += separator.size();
-          prev_pos = pos;
-        }
-        auto substr = string.substr(prev_pos, string.size() - prev_pos);
-        std::reverse(substr.begin(), substr.end());
-        splits.emplace(splits.begin(), substr);
-        return splits;
-      });
-
-  m.impl(
-      TORCH_SELECTIVE_NAME("aten::join"),
-      [](const std::string& string, const c10::List<std::string>& values) {
-        std::stringstream ss;
-        for (auto it = values.begin(); it != values.end(); ++it) {
-          ss << static_cast<std::string>(*it);
-          if (it != values.end() - 1) {
-            ss << string;
-          }
-        }
-        return ss.str();
-      });
+template <typename T>
+void hashValue(Stack* stack) {
+  auto value = pop(stack);
+  auto hash = std::hash<T>()(value.to<T>());
+  push(stack, int64_t(hash));
 }
+
+RegisterOperators reg2({
+    // registered as Any[] so that heterogenous tuples can be called with len()
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::len.any(Any[] a) -> int"),
+        listLen,
+        aliasAnalysisFromSchema()),
+
+// these ops have a specialized implementation for the list element type
+#define CREATE_SPECIALIZED_LIST_OPS(decl_type, value_type) \
+  OperatorGenerator(                                       \
+      TORCH_SELECTIVE_SCHEMA(                              \
+          "aten::remove." decl_type "(" decl_type          \
+          "[](a!) self,                                                           \
+        " decl_type " el) -> ()"),                         \
+      listRemove<value_type>,                              \
+      aliasAnalysisFromSchema()),                          \
+      OperatorGenerator(                                   \
+          TORCH_SELECTIVE_SCHEMA(                          \
+              "aten::index.list_" decl_type "(" decl_type  \
+              "[] self,                                                               \
+        " decl_type " el) -> int"),                        \
+          listIndex<value_type>,                           \
+          aliasAnalysisFromSchema()),                      \
+      OperatorGenerator(                                   \
+          TORCH_SELECTIVE_SCHEMA(                          \
+              "aten::count." decl_type "(" decl_type       \
+              "[] self,                                                               \
+        " decl_type " el) -> int"),                        \
+          listCount<value_type>,                           \
+          aliasAnalysisFromSchema()),
+
+    CREATE_SPECIALIZED_LIST_OPS("int", int64_t)
+        CREATE_SPECIALIZED_LIST_OPS("float", double)
+            CREATE_SPECIALIZED_LIST_OPS("bool", bool)
+                CREATE_SPECIALIZED_LIST_OPS("Tensor", at::Tensor)
+                    CREATE_SPECIALIZED_LIST_OPS("str", std::string)
+
+#undef CREATE_GENERIC_LIST_OPS
+#undef CREATE_SPECIALIZED_LIST_OPS
+
+    // `listContains<T>` is not implemented for non-primitive types
+    // TODO: Add List[bool] once .to<c10::List<bool>> doesn't throw an error
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::__contains__.int_list(int[] l, int item) -> bool"),
+        listContains<int64_t>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::__contains__.float_list(float[] l, float item) -> bool"),
+        listContains<double>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sort.int(int[](a!) self, bool reverse=False) -> ()"),
+        listSort<int64_t>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sort.float(float[](a!) self, bool reverse=False) -> ()"),
+        listSort<double>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sort.Tensor(Tensor[](a!) self, bool reverse=False) -> ()"),
+        listSort<at::Tensor>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sort.bool(bool[](a!) self, bool reverse=False) -> ()"),
+        listSort<bool>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sort.str(str[](a!) self, bool reverse=False) -> ()"),
+        listSort<std::string>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::sorted.int(int[](a) input) -> (int[])"),
+        listCopyAndSort<int64_t>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sorted.float(float[](a) input) -> (float[])"),
+        listCopyAndSort<double>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sorted.Tensor(Tensor[](a) input) -> (Tensor[])"),
+        listCopyAndSort<at::Tensor>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::sorted.bool(bool[](a) input) -> (bool[])"),
+        listCopyAndSort<bool>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::sorted.str(str[](a) input) -> (str[])"),
+        listCopyAndSort<std::string>,
+        aliasAnalysisFromSchema()),
+
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::eq.float_list(float[] a, float[] b) -> bool"),
+        listEq<double>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::eq.Tensor_list(Tensor[] a, Tensor[] b) -> bool"),
+        listEq<at::Tensor>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::eq.bool_list(bool[] a, bool[] b) -> bool"),
+        listEq<bool>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::eq.str_list(str[] a, str[] b) -> bool"),
+        listEq<std::string>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::ne.float_list(float[] a, float[] b) -> bool"),
+        listNe<double>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::ne.Tensor_list(Tensor[] a, Tensor[] b) -> bool"),
+        listNe<at::Tensor>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::ne.bool_list(bool[] a, bool[] b) -> bool"),
+        listNe<bool>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::ne.str_list(str[] a, str[] b) -> bool"),
+        listNe<std::string>,
+        aliasAnalysisFromSchema()),
+
+#define DEFINE_CONVERT_BASE_OP(op_name, prefix, char_op) \
+  OperatorGenerator(                                     \
+      TORCH_SELECTIVE_SCHEMA(#op_name "(int i) -> str"), \
+      [](Stack* stack) {                                 \
+        auto i = pop(stack).toInt();                     \
+        std::stringstream ss;                            \
+        if (i < 0) {                                     \
+          ss << "-";                                     \
+          i = -i;                                        \
+        }                                                \
+        ss << "0" << prefix << char_op << i;             \
+        push(stack, ss.str());                           \
+      },                                                 \
+      aliasAnalysisFromSchema())
+
+    DEFINE_CONVERT_BASE_OP(aten::hex, "x", std::hex),
+    DEFINE_CONVERT_BASE_OP(aten::oct, "o", std::oct),
+
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::bin(int i) -> str"),
+        [](Stack* stack) {
+          auto i = pop(stack).toInt();
+          std::stringstream ss;
+          if (i == 0) {
+            push(stack, "0b0");
+          } else {
+            if (i < 0) {
+              ss << "-";
+              i = -i;
+            }
+            std::string str = std::bitset<8 * sizeof(i)>(i).to_string();
+            str.erase(0, std::min(str.find_first_not_of('0'), str.size() - 1));
+            ss << "0b" << str;
+            push(stack, ss.str());
+          }
+        },
+        aliasAnalysisFromSchema()),
+    // TODO: deprecate this in favor of aten::getelem
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "prim::StringIndex(str string, int index) -> str"),
+        [](Stack* stack) {
+          auto index = pop(stack).toInt();
+          auto string = pop(stack).toStringRef();
+          auto norm_index = normalizeIndex(index, string.size());
+          char c = string.at(norm_index);
+          push(stack, std::string(&c, 1));
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::chr(int i) -> str"),
+        [](Stack* stack) {
+          auto i = pop(stack).toInt();
+          std::stringstream ss;
+          TORCH_CHECK(
+              i >= 0 && i < 1114111,
+              "chr() arg not in range(0x110000), found ",
+              i);
+          char c = i;
+          ss << c;
+          push(stack, ss.str());
+        },
+        aliasAnalysisFromSchema()),
+
+    // only used in loop unrolling, not exposed to end users
+    DEFINE_INT_OP(aten::__round_to_zero_floordiv, a / b),
+
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::modf(float a) -> (float, float)"),
+        [](Stack* stack) {
+          double a;
+          pop(stack, a);
+          double b, c;
+          b = modf(a, &c);
+          push(stack, b, c);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::frexp(float a) -> (float, int)"),
+        [](Stack* stack) {
+          double a;
+          pop(stack, a);
+          double m;
+          int e;
+          m = std::frexp(a, &e);
+          push(stack, m, e);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::ldexp(float x, int i) -> float"),
+        [](Stack* stack) {
+          double a;
+          int64_t b;
+          pop(stack, a, b);
+          push(stack, std::ldexp(a, b));
+        },
+        aliasAnalysisFromSchema()),
+    DEFINE_BINARY_FLOAT_OP(aten::mathremainder, std::remainder(a, b)),
+
+    DEFINE_INT_OP(aten::__and__, a& b),
+    DEFINE_INT_OP(aten::__or__, a | b),
+    DEFINE_INT_OP(aten::__xor__, a ^ b),
+    DEFINE_INT_OP(aten::__lshift__, a << b),
+    DEFINE_INT_OP(aten::__rshift__, a >> b),
+
+    DEFINE_UNARY_OP(aten::round, round_to_even(a), float, float),
+    DEFINE_UNARY_OP(aten::log, std::log(a), float, float),
+    DEFINE_GENERIC_BINARY_OP(aten::log, std::log(a) / std::log(b), float),
+    DEFINE_INT_FLOAT_OP(aten::log, std::log(a) / std::log(b), float),
+    DEFINE_SCALAR_SCALAR_BINARY_OP(
+        aten::log,
+        std::log(a) / std::log(b),
+        std::log(a) / std::log(b),
+        float),
+    DEFINE_UNARY_OP(aten::log1p, std::log1p(a), float, float),
+    DEFINE_UNARY_OP(aten::log10, std::log10(a), float, float),
+    DEFINE_UNARY_OP(aten::sqrt, std::sqrt(a), float, float),
+    DEFINE_UNARY_OP(aten::acos, std::acos(a), float, float),
+    DEFINE_UNARY_OP(aten::asin, std::asin(a), float, float),
+    DEFINE_UNARY_OP(aten::atan, std::atan(a), float, float),
+    DEFINE_GENERIC_OP(
+        aten::atan2,
+        std::atan2(a, b),
+        std::atan2(a, b),
+        float,
+        float),
+    DEFINE_INT_FLOAT_OP(aten::atan2, std::atan2(a, b), float),
+    DEFINE_SCALAR_SCALAR_BINARY_OP(
+        aten::atan2,
+        std::atan2(a, b),
+        std::atan2(a, b),
+        float),
+    DEFINE_UNARY_OP(aten::cos, std::cos(a), float, float),
+    DEFINE_UNARY_OP(aten::sin, std::sin(a), float, float),
+    DEFINE_UNARY_OP(aten::tan, std::tan(a), float, float),
+    DEFINE_UNARY_OP(aten::asinh, std::asinh(a), float, float),
+    DEFINE_UNARY_OP(aten::atanh, std::atanh(a), float, float),
+    DEFINE_UNARY_OP(aten::acosh, std::acosh(a), float, float),
+    DEFINE_UNARY_OP(aten::sinh, std::sinh(a), float, float),
+    DEFINE_UNARY_OP(aten::cosh, std::cosh(a), float, float),
+    DEFINE_UNARY_OP(aten::tanh, std::tanh(a), float, float),
+    DEFINE_UNARY_OP(aten::degrees, degrees(a), float, float),
+    DEFINE_UNARY_OP(aten::radians, radians(a), float, float),
+    DEFINE_BINARY_FLOAT_OP(aten::fmod, std::fmod(a, b)),
+    DEFINE_UNARY_INT_OP(aten::factorial, factorial(a), int),
+    DEFINE_UNARY_FLOAT_OP(aten::isnan, std::isnan(a), bool),
+    DEFINE_UNARY_FLOAT_OP(aten::isfinite, std::isfinite(a), bool),
+    DEFINE_UNARY_FLOAT_OP(aten::isinf, std::isinf(a), bool),
+    DEFINE_UNARY_OP(aten::gamma, std::tgamma(a), float, float),
+    DEFINE_UNARY_OP(aten::erf, std::erf(a), float, float),
+    DEFINE_UNARY_OP(aten::erfc, std::erfc(a), float, float),
+    DEFINE_UNARY_OP(aten::expm1, std::expm1(a), float, float),
+    DEFINE_UNARY_OP(aten::fabs, std::fabs(a), float, float),
+    DEFINE_UNARY_OP(aten::lgamma, std::lgamma(a), float, float),
+
+    // TODO: move abs to aten namespace because it's schematized!
+    DEFINE_UNARY_OP(prim::abs, std::abs(a), int, float),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("prim::abs(Tensor x) -> Tensor"),
+        [](Stack* stack) {
+          at::Tensor x;
+          pop(stack, x);
+          push(stack, x.abs());
+        },
+        aliasAnalysisFromSchema()),
+
+    DEFINE_INT_OP(aten::gcd, gcd(a, b)),
+
+    DEFINE_GENERIC_OP(
+        aten::copysign,
+        std::copysign(a, b),
+        std::copysign(a, b),
+        float,
+        float),
+    DEFINE_INT_FLOAT_OP(aten::copysign, std::copysign(a, b), float),
+    DEFINE_SCALAR_BINARY_OP(
+        aten::copysign,
+        std::copysign(a, b),
+        std::copysign(a, b),
+        float),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::_tensor_to_list(Tensor self) -> int[]"),
+        [](Stack* stack) {
+          at::Tensor t;
+          pop(stack, t);
+          c10::List<int64_t> elems;
+          elems.reserve(t.size(0));
+          for (int i = 0; i < t.size(0); i++) {
+            elems.push_back(*t[i].data_ptr<int32_t>());
+          }
+          push(stack, std::move(elems));
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::_list_to_tensor(int[] self) -> Tensor"),
+        [](Stack* stack) {
+          c10::List<int64_t> l = pop(stack).toIntList();
+          auto t = torch::empty(
+              {static_cast<int64_t>(l.size())}, at::dtype(at::kInt));
+          for (size_t i = 0; i < l.size(); i++) {
+            t[i] = l.get(i);
+          }
+          push(stack, std::move(t));
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::all.int(int[] self) -> bool"),
+        [](Stack* stack) {
+          c10::List<int64_t> l = pop(stack).toIntList();
+          for (const auto& elem : l) {
+            if (!elem) {
+              push(stack, false);
+              return;
+            }
+          }
+          push(stack, true);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::all.float(float[] self) -> bool"),
+        [](Stack* stack) {
+          c10::List<double> l = pop(stack).toDoubleList();
+          for (const auto& elem : l) {
+            if (!elem) {
+              push(stack, false);
+              return;
+            }
+          }
+          push(stack, true);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::all.bool(bool[] self) -> bool"),
+        [](Stack* stack) {
+          c10::List<bool> l = pop(stack).toBoolList();
+          for (const auto& elem : l) {
+            if (!elem) {
+              push(stack, false);
+              return;
+            }
+          }
+          push(stack, true);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::divmod.int(int x, int y) -> (int, int)"),
+        [](Stack* stack) {
+          int64_t a, b;
+          lldiv_t divresult = {};
+          pop(stack, a, b);
+          if (b == 0) {
+            throw std::runtime_error(
+                "ZeroDivisionError: integer division or modulo by zero");
+          }
+          divresult = lldiv(a, b);
+          if (divresult.rem && (a < 0) != (b < 0)) {
+            divresult.quot -= 1;
+            divresult.rem += b;
+          }
+          push(
+              stack,
+              static_cast<int64_t>(divresult.quot),
+              static_cast<int64_t>(divresult.rem));
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA(
+            "aten::divmod.float(float x, float y) -> (float, float)"),
+        [](Stack* stack) {
+          double a, b;
+          pop(stack, a, b);
+          if (b == 0) {
+            throw std::runtime_error("ZeroDivisionError: float divmod()");
+          }
+          double rem = fmod(a, b);
+          if (rem && (a < 0) != (b < 0)) {
+            rem += b;
+          }
+          push(stack, (a - rem) / b, rem);
+        },
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("prim::id(AnyClassType? x) -> int"),
+        [](Stack* stack) {
+          IValue a;
+          pop(stack, a);
+          if (a.isNone()) {
+            push(stack, 0);
+          } else {
+            push(stack, reinterpret_cast<int64_t>(a.internalToPointer()));
+          }
+        },
+        aliasAnalysisFromSchema()),
+
+#define DEFINE_DIVMOD_MIXED_OP(type_a, type_b)                               \
+  OperatorGenerator(                                                         \
+      TORCH_SELECTIVE_SCHEMA("aten::divmod." #type_a "_" #type_b "(" #type_a \
+                             " x," #type_b " y) -> (float, float)"),         \
+      [](Stack* stack) {                                                     \
+        type_a a;                                                            \
+        type_b b;                                                            \
+        pop(stack, a, b);                                                    \
+        if (b == 0) {                                                        \
+          throw std::runtime_error("ZeroDivisionError: float divmod()");     \
+        }                                                                    \
+        double quot = floor(a / b);                                          \
+        double rem = a - (quot * b);                                         \
+        push(stack, quot, rem);                                              \
+      },                                                                     \
+      aliasAnalysisFromSchema())
+
+    DEFINE_DIVMOD_MIXED_OP(int, float),
+    DEFINE_DIVMOD_MIXED_OP(float, int),
+
+#undef DEFINE_DIVMOD_MIXED_OP
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::hash.str(str t) -> int"),
+        hashValue<std::string>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::hash.int(int t) -> int"),
+        hashValue<int>,
+        aliasAnalysisFromSchema()),
+    OperatorGenerator(
+        TORCH_SELECTIVE_SCHEMA("aten::hash.float(float t) -> int"),
+        hashValue<double>,
+        aliasAnalysisFromSchema()),
+});
 
 } // namespace
 } // namespace jit
