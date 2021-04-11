@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/passes/lower_graph.h>
-
 #include <torch/csrc/jit/api/object.h>
 #include <torch/csrc/jit/frontend/error_report.h>
 #include <torch/csrc/jit/passes/inliner.h>
@@ -35,7 +34,7 @@ std::pair<std::shared_ptr<Graph>, std::vector<Slot>> lower_graph(
     std::size_t operator()(const Slot& slot) const {
       auto obj_hash = std::hash<c10::ivalue::Object*>{}(slot.obj.get());
       auto offset_hash = std::hash<size_t>{}(slot.offset);
-      return c10::hash_combine(obj_hash, offset_hash);
+      return torch::hash_combine(obj_hash, offset_hash);
     }
   };
   std::unordered_map<Slot, size_t, SlotHash> slot_to_offset;
@@ -127,15 +126,16 @@ static std::vector<IValue> loadTensors(const std::vector<Slot>& slots) {
       // Unpack quantization packed tensor
       auto type = obj.type();
       TORCH_CHECK(
-          (type ==
-           getCustomClass(
-               "__torch__.torch.classes.quantized.Conv2dPackedParamsBase")) ||
-              (type ==
-               getCustomClass(
-                   "__torch__.torch.classes.quantized.Conv3dPackedParamsBase")) ||
-              (type ==
-               getCustomClass(
-                   "__torch__.torch.classes.quantized.LinearPackedParamsBase")),
+          (type == getCustomClass(
+              "__torch__.torch.classes.quantized.Conv2dPackedParamsBase")) ||
+          (type == getCustomClass(
+              "__torch__.torch.classes.quantized.Conv3dPackedParamsBase")) ||
+          (type == getCustomClass(
+              "__torch__.torch.classes.quantized.LegacyConv2dPackedParamsBase")) ||
+          (type == getCustomClass(
+              "__torch__.torch.classes.quantized.LegacyConv3dPackedParamsBase")) ||
+          (type == getCustomClass(
+              "__torch__.torch.classes.quantized.LinearPackedParamsBase")),
           "Unknown type ",
           type->repr_str(),
           " encountered in graph lowering. This type is not supported in ONNX export.");
