@@ -41,24 +41,13 @@ C10_HOST_DEVICE inline c10::complex<T> log2(const c10::complex<T> &x) {
 }
 
 // Power functions
-//
-#if defined(_LIBCPP_VERSION) || (defined(__GLIBCXX__) && !defined(_GLIBCXX11_USE_C99_COMPLEX))
-namespace _detail {
-TORCH_API c10::complex<float> sqrt(const c10::complex<float>& in);
-TORCH_API c10::complex<double> sqrt(const c10::complex<double>& in);
-TORCH_API c10::complex<float> acos(const c10::complex<float>& in);
-TORCH_API c10::complex<double> acos(const c10::complex<double>& in);
-};
-#endif
 
 template<typename T>
 C10_HOST_DEVICE inline c10::complex<T> sqrt(const c10::complex<T> &x) {
 #if defined(__CUDACC__) || defined(__HIPCC__)
   return static_cast<c10::complex<T>>(thrust::sqrt(c10_internal::cuda101bug_cast_c10_complex_to_thrust_complex(x)));
-#elif !(defined(_LIBCPP_VERSION) || (defined(__GLIBCXX__) && !defined(_GLIBCXX11_USE_C99_COMPLEX)))
-  return static_cast<c10::complex<T>>(std::sqrt(static_cast<std::complex<T>>(x)));
 #else
-  return _detail::sqrt(x);
+  return static_cast<c10::complex<T>>(std::sqrt(static_cast<std::complex<T>>(x)));
 #endif
 }
 
@@ -160,10 +149,8 @@ template<typename T>
 C10_HOST_DEVICE inline c10::complex<T> acos(const c10::complex<T> &x) {
 #if defined(__CUDACC__) || defined(__HIPCC__)
   return static_cast<c10::complex<T>>(thrust::acos(c10_internal::cuda101bug_cast_c10_complex_to_thrust_complex(x)));
-#elif !defined(_LIBCPP_VERSION)
-  return static_cast<c10::complex<T>>(std::acos(static_cast<std::complex<T>>(x)));
 #else
-  return _detail::acos(x);
+  return static_cast<c10::complex<T>>(std::acos(static_cast<std::complex<T>>(x)));
 #endif
 }
 
@@ -177,6 +164,15 @@ C10_HOST_DEVICE inline c10::complex<T> atan(const c10::complex<T> &x) {
 }
 
 // Hyperbolic functions
+
+template<typename T>
+C10_HOST_DEVICE inline c10::complex<T> sinc(const c10::complex<T> &x) {
+#if defined(__CUDACC__) || defined(__HIPCC__)
+  return static_cast<c10::complex<T>>(thrust::sin(c10_internal::cuda101bug_cast_c10_complex_to_thrust_complex(x)));
+#else
+  return static_cast<c10::complex<T>>(std::sin(static_cast<std::complex<T>>(x)));
+#endif
+}
 
 template<typename T>
 C10_HOST_DEVICE inline c10::complex<T> sinh(const c10::complex<T> &x) {
@@ -246,6 +242,7 @@ using c10_complex_math::tan;
 using c10_complex_math::asin;
 using c10_complex_math::acos;
 using c10_complex_math::atan;
+using c10_complex_math::sinc;
 using c10_complex_math::sinh;
 using c10_complex_math::cosh;
 using c10_complex_math::tanh;
@@ -267,6 +264,7 @@ using c10_complex_math::tan;
 using c10_complex_math::asin;
 using c10_complex_math::acos;
 using c10_complex_math::atan;
+using c10_complex_math::sinc;
 using c10_complex_math::sinh;
 using c10_complex_math::cosh;
 using c10_complex_math::tanh;
