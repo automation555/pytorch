@@ -1,8 +1,13 @@
+from __future__ import division
+
+import re
 import math
 import warnings
+import contextlib
+from typing import Tuple, Union
 
-from torch import Tensor
 import torch
+from torch import Tensor
 
 
 # These no_grad_* functions are necessary as wrappers around the parts of these
@@ -77,16 +82,7 @@ def calculate_gain(nonlinearity, param=None):
     Tanh              :math:`\frac{5}{3}`
     ReLU              :math:`\sqrt{2}`
     Leaky Relu        :math:`\sqrt{\frac{2}{1 + \text{negative\_slope}^2}}`
-    SELU              :math:`\frac{3}{4}`
     ================= ====================================================
-
-    .. warning::
-        In order to implement `Self-Normalizing Neural Networks`_ ,
-        you should use ``nonlinearity='linear'`` instead of ``nonlinearity='selu'``.
-        This gives the initial weights a variance of ``1 / N``,
-        which is necessary to induce a stable fixed point in the forward pass.
-        In contrast, the default gain for ``SELU`` sacrifices the normalisation
-        effect for more stable gradient flow in rectangular layers.
 
     Args:
         nonlinearity: the non-linear function (`nn.functional` name)
@@ -94,8 +90,6 @@ def calculate_gain(nonlinearity, param=None):
 
     Examples:
         >>> gain = nn.init.calculate_gain('leaky_relu', 0.2)  # leaky_relu with negative_slope=0.2
-
-    .. _Self-Normalizing Neural Networks: https://papers.nips.cc/paper/2017/hash/5d44ee6f2c3f71b73125876103c8f6c4-Abstract.html
     """
     linear_fns = ['linear', 'conv1d', 'conv2d', 'conv3d', 'conv_transpose1d', 'conv_transpose2d', 'conv_transpose3d']
     if nonlinearity in linear_fns or nonlinearity == 'sigmoid':
@@ -113,13 +107,12 @@ def calculate_gain(nonlinearity, param=None):
         else:
             raise ValueError("negative_slope {} not a valid number".format(param))
         return math.sqrt(2.0 / (1 + negative_slope ** 2))
-    elif nonlinearity == 'selu':
-        return 3.0 / 4  # Value found empirically (https://github.com/pytorch/pytorch/pull/50664)
     else:
         raise ValueError("Unsupported nonlinearity {}".format(nonlinearity))
 
 
-def uniform_(tensor: Tensor, a: float = 0., b: float = 1.) -> Tensor:
+def uniform_(tensor, a=0., b=1.):
+    # type: (Tensor, float, float) -> Tensor
     r"""Fills the input Tensor with values drawn from the uniform
     distribution :math:`\mathcal{U}(a, b)`.
 
@@ -135,7 +128,8 @@ def uniform_(tensor: Tensor, a: float = 0., b: float = 1.) -> Tensor:
     return _no_grad_uniform_(tensor, a, b)
 
 
-def normal_(tensor: Tensor, mean: float = 0., std: float = 1.) -> Tensor:
+def normal_(tensor, mean=0., std=1.):
+    # type: (Tensor, float, float) -> Tensor
     r"""Fills the input Tensor with values drawn from the normal
     distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`.
 
@@ -150,7 +144,8 @@ def normal_(tensor: Tensor, mean: float = 0., std: float = 1.) -> Tensor:
     """
     return _no_grad_normal_(tensor, mean, std)
 
-def trunc_normal_(tensor: Tensor, mean: float = 0., std: float = 1., a: float = -2., b: float = 2.) -> Tensor:
+def trunc_normal_(tensor, mean=0., std=1., a=-2., b=2.):
+    # type: (Tensor, float, float, float, float) -> Tensor
     r"""Fills the input Tensor with values drawn from a truncated
     normal distribution. The values are effectively drawn from the
     normal distribution :math:`\mathcal{N}(\text{mean}, \text{std}^2)`
@@ -172,7 +167,8 @@ def trunc_normal_(tensor: Tensor, mean: float = 0., std: float = 1., a: float = 
     return _no_grad_trunc_normal_(tensor, mean, std, a, b)
 
 
-def constant_(tensor: Tensor, val: float) -> Tensor:
+def constant_(tensor, val):
+    # type: (Tensor, float) -> Tensor
     r"""Fills the input Tensor with the value :math:`\text{val}`.
 
     Args:
@@ -186,7 +182,8 @@ def constant_(tensor: Tensor, val: float) -> Tensor:
     return _no_grad_fill_(tensor, val)
 
 
-def ones_(tensor: Tensor) -> Tensor:
+def ones_(tensor):
+    # type: (Tensor) -> Tensor
     r"""Fills the input Tensor with the scalar value `1`.
 
     Args:
@@ -199,7 +196,8 @@ def ones_(tensor: Tensor) -> Tensor:
     return _no_grad_fill_(tensor, 1.)
 
 
-def zeros_(tensor: Tensor) -> Tensor:
+def zeros_(tensor):
+    # type: (Tensor) -> Tensor
     r"""Fills the input Tensor with the scalar value `0`.
 
     Args:
@@ -284,17 +282,15 @@ def _calculate_fan_in_and_fan_out(tensor):
     num_output_fmaps = tensor.size(0)
     receptive_field_size = 1
     if tensor.dim() > 2:
-        # math.prod is not always available, accumulate the product manually
-        # we could use functools.reduce but that is not supported by TorchScript
-        for s in tensor.shape[2:]:
-            receptive_field_size *= s
+        receptive_field_size = tensor[0][0].numel()
     fan_in = num_input_fmaps * receptive_field_size
     fan_out = num_output_fmaps * receptive_field_size
 
     return fan_in, fan_out
 
 
-def xavier_uniform_(tensor: Tensor, gain: float = 1.) -> Tensor:
+def xavier_uniform_(tensor, gain=1.):
+    # type: (Tensor, float) -> Tensor
     r"""Fills the input `Tensor` with values according to the method
     described in `Understanding the difficulty of training deep feedforward
     neural networks` - Glorot, X. & Bengio, Y. (2010), using a uniform
@@ -321,7 +317,8 @@ def xavier_uniform_(tensor: Tensor, gain: float = 1.) -> Tensor:
     return _no_grad_uniform_(tensor, -a, a)
 
 
-def xavier_normal_(tensor: Tensor, gain: float = 1.) -> Tensor:
+def xavier_normal_(tensor, gain=1.):
+    # type: (Tensor, float) -> Tensor
     r"""Fills the input `Tensor` with values according to the method
     described in `Understanding the difficulty of training deep feedforward
     neural networks` - Glorot, X. & Bengio, Y. (2010), using a normal
@@ -531,3 +528,80 @@ kaiming_uniform = _make_deprecate(kaiming_uniform_)
 kaiming_normal = _make_deprecate(kaiming_normal_)
 orthogonal = _make_deprecate(orthogonal_)
 sparse = _make_deprecate(sparse_)
+
+
+GET_SEMANTIC_VERSION = re.compile(r'\d+\.\d+\.\d+')
+
+def _get_version_as_tuple_from_string(version: str) -> Tuple[int, int, int]:
+    """version: should be 'major.minor.patch'"""
+    v = GET_SEMANTIC_VERSION.match(version)
+
+    if v is None:
+        raise TypeError("Invalid version, not a valid semantic version (e.g. of correct input, 1.7.1)")
+
+    v = v.group(0).split('.')
+    return (int(v[0]), int(v[1]), int(v[2]))
+
+_torch_version = _get_version_as_tuple_from_string(torch.__version__)
+
+# If you want to set the default initialization change the value of 'init_version', e.g. if
+# you want to set the pytorch default to latest initialization, set this value to _torch_version.
+# or any other version that you want like (1,8,1).
+init_version = (1, 6, 1)
+
+def _parse_version(version: Union[Tuple[int, int, int], str, None] = None) -> Tuple[int, int, int]:
+    if version is None:
+        return init_version
+
+    if isinstance(version, tuple):
+        for x in version:
+            if not isinstance(x, int):
+                raise ValueError("Invalid version, it should be a tuple of integers (e.g. (1, 7, 0))")
+    elif isinstance(version, str):
+        version = _get_version_as_tuple_from_string(version)
+    else:
+        raise TypeError("Invalid version, must be a version string (e.g. '1.7.0') or tuple of integers")
+
+    # version, should be less than torch.__version__
+    if version > _torch_version:
+        raise ValueError(f"version {version} should be less than torch version {_torch_version}")
+    return version
+
+
+@contextlib.contextmanager
+def use_init_version(version=None):
+    r"""Context manager to use a specific version of initialization for `nn.modules`.
+    By default (will change in the future), the pytorch initialization used till version 1.6.1 is used.
+
+    Args:
+        version (Union[Tuple[int, int, int], str, None]): which pytorch version to use for initializing nn.modules.
+            The format should be a version string `major.minor.patch` or a tuple of integers. Examples of valid
+            version are (1,7,0), '1.7.1'.
+
+    Yields:
+        Tuple[int, int, int]: version converted as a tuple of integers
+
+    Note:
+        It is recommended to provide `version`, as the default behaviour of handling `version=None` will change in
+        the future.
+
+    Examples:
+        >>> with nn.init.use_init_version(version='1.7.1') as version:
+        >>>     model = nn.Sequential(...)
+        >>>
+        >>> # You can also set `init_version` as a global variable, as shown
+        >>> # NOTE:- Pass the version as Tuple[int, int, int]
+        >>> nn.init.init_version = (1, 7, 0)
+    """
+    global init_version
+
+    version = _parse_version(version)
+
+    old_init_version = init_version
+    init_version = version
+
+    yield version
+
+    if init_version != version:
+        raise Exception('version was modified before resetting it back to original value.')
+    init_version = old_init_version
