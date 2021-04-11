@@ -201,3 +201,28 @@ def log_softmax(input: Tensor, dim: int, dtype: Optional[DType] = None) -> Tenso
           overflows. Default: None
     """
     return torch._sparse_log_softmax(input, dim, dtype=dtype)
+
+
+def hardshrink(input: Tensor, lambd: float = 0.5) -> Tensor:
+    r"""  Applies the hard shrinkage function element-wise over a SparseTensor :attr:`input`.
+
+    See :class:`~torch.nn.Hardshrink` for more details.
+
+    Hardshrink is defined as:
+
+    .. math::
+        \text{HardShrink}(x) =
+        \begin{cases}
+        x, & \text{ if } x > \lambda \\
+        x, & \text{ if } x < -\lambda \\
+        0, & \text{ otherwise }
+        \end{cases}
+
+    Arguments:
+        lambd: the :math:`\lambda` value for the Hardshrink formulation. Default: 0.5
+
+    Shape:
+        - Input (SparseTensor): A sparse Tensor
+        - Output: A sparse Tensor with the same shape as the input
+    """
+    return torch.hardshrink(input, lambd)
