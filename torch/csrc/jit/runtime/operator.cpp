@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/runtime/operator.h>
-
 #include <ATen/ATen.h>
 #include <ATen/core/alias_info.h>
 #include <torch/csrc/jit/frontend/edit_distance.h>
@@ -7,6 +6,7 @@
 #include <queue>
 #include <utility>
 #include <vector>
+#include "ATen/core/interned_strings.h"
 
 namespace torch {
 namespace jit {
@@ -213,8 +213,8 @@ bool printerHasSpecialCaseFor(Symbol sym) {
       prim::TupleIndex,    prim::TupleSlice,    prim::TupleUnpack,
       prim::CreateObject,  prim::GetAttr,       prim::SetAttr,
       prim::CallFunction,  prim::isinstance,    prim::unchecked_cast,
-      prim::tolist,        prim::rpc_async,     prim::rpc_sync,
-      prim::rpc_remote};
+      prim::tolist,        prim::rpc_async,
+  };
 
   // WARNING: by adding a value to this set, you are asserting that your
   // primitive is only ever added during optimization and does not need
@@ -225,34 +225,22 @@ bool printerHasSpecialCaseFor(Symbol sym) {
       c10::onnx::Shape, // only used in onnx
       prim::AutogradZero, // temporarily inserted by autograd
       prim::AutogradAnyNonZero, // temporarily inserted by autograd
-      prim::AutogradAllNonZero, // temporarily inserted by autograd
-      prim::AutogradAllZero, // temporarily inserted by autograd
       prim::AutogradAdd, // temporarily inserted by autograd
       prim::ConstantChunk, // optimization pass adds it
       prim::DifferentiableGraph, // optimization pass adds it,
       prim::FunctionalGraph, // optimization pass adds it,
-      prim::ReductionSizes, // optimization pass (fuser) adds it
       prim::BroadcastSizes, // optimization pass (fuser) adds it
       prim::ChunkSizes, // optimization pass (fuser) adds it
       prim::Drop, // used in interpreter only
       prim::FusedConcat, // optimization pass adds it
       prim::FusionGroup, // optimization pass adds it
       prim::CudaFusionGroup, // optimization pass adds it
-      prim::CudaFusionGuard, // optimization pass adds it
-      prim::TensorExprGroup, // optimization pass adds it
-      prim::StaticSubgraph, // optimization pass adds it
-      prim::ConstantMKLDNNTensor, // optimization pass adds it
-      prim::BroadcastMKLDNNTensors, // optimization pass adds it
       prim::Load, // used in interpreter only
       prim::MMTreeReduce, // used as an optimization
       prim::MMBatchSide, // used as an optimization
       prim::Store, // used in interpreter only
       prim::profile, // used in interpreter only
-      prim::profile_ivalue, // used in interpreter only
-      prim::TypeCheck, // used in interpreter only
-      prim::RequiresGradCheck, // used in interpreter only
-      prim::FallbackGraph, // converted into prim::CallFunction
-
+      prim::FallbackGraph, // temporarily inserted by an optimization
   };
 
   // These namespaces are required to have Python printers unless
@@ -279,8 +267,6 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::FusionGroup,
       prim::CudaFusionGroup,
       prim::DifferentiableGraph,
-      prim::TensorExprGroup,
-      prim::StaticSubgraph,
       prim::FunctionalGraph,
       prim::Constant,
       prim::Uninitialized,
@@ -294,7 +280,7 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::MMBatchSide,
       prim::BroadcastSizes,
       prim::ChunkSizes,
-      prim::Closure,
+      prim::Function,
       prim::TupleUnpack,
       prim::TupleIndex,
       prim::TupleSlice,
@@ -302,18 +288,12 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::PythonOp,
       prim::ConstantChunk,
       prim::BroadcastingChunk,
-      prim::MKLDNNGroup,
-      prim::ConstantMKLDNNTensor,
-      prim::BroadcastMKLDNNTensors,
       prim::fork,
       prim::CreateObject,
       prim::AutogradAdd,
       prim::GetAttr,
       prim::SetAttr,
       prim::profile,
-      prim::profile_ivalue,
-      prim::TypeCheck,
-      prim::RequiresGradCheck,
       prim::Print,
       prim::CallFunction,
       prim::CallMethod,
@@ -322,8 +302,6 @@ bool aliasAnalysisHasSpecialCaseFor(Symbol symbol) {
       prim::unchecked_cast,
       prim::tolist,
       prim::rpc_async,
-      prim::rpc_sync,
-      prim::rpc_remote,
       prim::Enter,
       prim::Exit,
       prim::FallbackGraph,
@@ -402,38 +380,36 @@ std::shared_ptr<Operator> getOperatorForLiteral(const char* signature) {
 }
 
 std::string canonicalSchemaString(const FunctionSchema& schema) {
-  std::string out = schema.name();
-  out.push_back('(');
+  std::ostringstream out;
+
+  out << schema.name();
+  out << "(";
 
   bool seen_kwarg_only = false;
   for (size_t i = 0; i < schema.arguments().size(); ++i) {
-    if (i > 0) {
-      out += ", ";
-    }
+    if (i > 0)
+      out << ", ";
     if (schema.arguments()[i].kwarg_only() && !seen_kwarg_only) {
-      out += "*, ";
+      out << "*, ";
       seen_kwarg_only = true;
     }
     const auto& arg = schema.arguments()[i];
-    out += arg.type()->str();
-    out.push_back(' ');
-    out += arg.name();
+    out << arg.type()->str() << " " << arg.name();
   }
 
-  out += ") -> ";
+  out << ") -> ";
   if (schema.returns().size() == 1) {
-    out += schema.returns().at(0).type()->str();
+    out << schema.returns().at(0).type()->str();
   } else if (schema.returns().size() > 1) {
-    out.push_back('(');
+    out << "(";
     for (size_t i = 0; i < schema.returns().size(); ++i) {
-      if (i > 0) {
-        out += ", ";
-      }
-      out += schema.returns()[i].type()->str();
+      if (i > 0)
+        out << ", ";
+      out << schema.returns()[i].type()->str();
     }
-    out.push_back(')');
+    out << ")";
   }
-  return out;
+  return out.str();
 }
 
 } // namespace jit
