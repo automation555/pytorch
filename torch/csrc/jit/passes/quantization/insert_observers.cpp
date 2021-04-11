@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/passes/quantization/insert_observers.h>
-
 #include <torch/csrc/jit/frontend/schema_matching.h>
 #include <torch/csrc/jit/ir/subgraph_matcher.h>
 #include <torch/csrc/jit/jit_log.h>
@@ -164,14 +163,6 @@ class ModuleCloneHelper {
       // Clone methods remapping the types to the cloned ones.
       for (auto& fn : type->methods()) {
         clone_method(module, r, *fn, module_qconfig_map, type_remap);
-      }
-      // Execute __setstate__(__getstate__()) to initialize custom class
-      // members.
-      if (auto setstate_method = r.find_method("__setstate__")) {
-        auto getstate_method = r.find_method("__getstate__");
-        TORCH_INTERNAL_ASSERT(getstate_method, "expect __getstate__");
-        auto state = (*getstate_method)(Stack{});
-        (*setstate_method)(Stack{state});
       }
     }
     return r;
@@ -395,17 +386,7 @@ class InsertObserversHelper {
   // are observed
   bool shouldObserve(
       Node* n,
-      const std::unordered_set<Value*>& block_observed_values,
-      QuantType quant_type) {
-    // Check whether node output uses can be quantized, eg cat followed by
-    // linear op
-    for (Value* v : n->outputs()) {
-      for (const auto& use : v->uses()) {
-        if (useQuantizable(use, quant_type)) {
-          return true;
-        }
-      }
-    }
+      const std::unordered_set<Value*>& block_observed_values) {
     if (isPropagateQuantSingleInputOp(n)) {
       return isObserved(n->input(0), block_observed_values);
     } else if (isPropagateQuantBinaryOp(n)) {
@@ -771,6 +752,38 @@ graph(%self, %a, %b, %alpha):
      %second_output = aten::relu_(%first_output)
      return (%second_output) )");
 
+  const PatternInfo nn_bn1d_nn_relu = PatternInfo::parse_from_str(
+      R"(
+graph(%self, %input, %batchnorm, %relu):
+    %first_output = prim::CallMethod[name="forward"](%batchnorm, %input)
+    %second_output = prim::CallMethod[name="forward\\d*"](%relu, %first_output)
+    return (%second_output) )",
+      {is_batchnorm1d_module, is_relu_module});
+
+  const PatternInfo nn_bn1d_f_relu = PatternInfo::parse_from_str(
+      R"(
+graph(%self, %input, %batchnorm, %relu, %inplace):
+    %first_output = prim::CallMethod[name="forward"](%batchnorm, %input)
+    %second_output = prim::CallFunction(%relu, %first_output, %inplace)
+    return (%second_output) )",
+      {is_batchnorm1d_module, is_functional_relu});
+
+  const PatternInfo nn_bn1d_aten_relu = PatternInfo::parse_from_str(
+      R"(
+graph(%self, %input, %batchnorm):
+    %first_output = prim::CallMethod[name="forward"](%batchnorm, %input)
+    %second_output = aten::relu(%first_output)
+    return (%second_output) )",
+      {is_batchnorm1d_module});
+
+  const PatternInfo nn_bn1d_aten_relu_ = PatternInfo::parse_from_str(
+      R"(
+graph(%self, %input, %batchnorm):
+    %first_output = prim::CallMethod[name="forward"](%batchnorm, %input)
+    %second_output = aten::relu_(%first_output)
+    return (%second_output) )",
+      {is_batchnorm1d_module});
+
   const PatternInfo nn_bn2d_nn_relu = PatternInfo::parse_from_str(
       R"(
 graph(%self, %input, %batchnorm, %relu):
@@ -912,6 +925,8 @@ graph(%self, %a, %b):
           add_aten_relu,         add_aten_relu_,
           inplace_add_aten_relu, inplace_add_aten_relu_,
 
+          nn_bn1d_nn_relu,       nn_bn1d_f_relu,
+          nn_bn1d_aten_relu,     nn_bn1d_aten_relu_,
           nn_bn2d_nn_relu,       nn_bn2d_f_relu,
           nn_bn2d_aten_relu,     nn_bn2d_aten_relu_,
           nn_bn3d_nn_relu,       nn_bn3d_f_relu,
@@ -1539,8 +1554,7 @@ InsertObserversHelper::insertObserversFor(
           // If the node is one of the propagate quant node, e.g.
           // aten::cat, we should observe its output only
           // if the input of the node is observed
-          if (observer_opt &&
-              shouldObserve(n, block_observed_values, quant_type_)) {
+          if (observer_opt && shouldObserve(n, block_observed_values)) {
             recordObserved(
                 v, *observer_opt, values_to_observe, block_observed_values);
           }
