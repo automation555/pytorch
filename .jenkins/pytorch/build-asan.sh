@@ -7,7 +7,6 @@
 # shellcheck disable=SC2034
 COMPACT_JOB_NAME="${BUILD_ENVIRONMENT}"
 
-# shellcheck source=./common.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 
 echo "Clang version:"
@@ -33,17 +32,8 @@ export ASAN_OPTIONS=detect_leaks=0:symbolize=1:detect_odr_violation=0
 # TODO: Make the ASAN flags a centralized env var and unify with USE_ASAN option
 CC="clang" CXX="clang++" LDSHARED="clang --shared" \
   CFLAGS="-fsanitize=address -fsanitize=undefined -fno-sanitize-recover=all -shared-libasan -pthread" \
-  CXX_FLAGS="-pthread" \
+  CXXFLAGS="-fsanitize=address -fsanitize=undefined -fno-sanitize-recover=all -shared-libasan -pthread" \
   USE_ASAN=1 USE_CUDA=0 USE_MKLDNN=0 \
   python setup.py install
-
-# Test building via the sdist source tarball
-python setup.py sdist
-mkdir -p /tmp/tmp
-pushd /tmp/tmp
-tar zxf "$(dirname "${BASH_SOURCE[0]}")/../../dist/"*.tar.gz
-cd torch-*
-python setup.py build --cmake-only
-popd
 
 assert_git_not_dirty
