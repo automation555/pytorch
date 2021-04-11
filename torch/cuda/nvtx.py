@@ -1,5 +1,3 @@
-from contextlib import contextmanager
-
 try:
     from torch._C import _nvtx
 except ImportError:
@@ -11,21 +9,40 @@ except ImportError:
         rangePushA = _fail
         rangePop = _fail
         markA = _fail
+        rangePushEx = _fail
+        markEx = _fail
+        version = None
+        size = None
+
 
     _nvtx = _NVTXStub()  # type: ignore[assignment]
 
-__all__ = ['range_push', 'range_pop', 'mark', 'range']
+__all__ = ['range_push', 'range_pop', 'mark']
 
+#TODO: Should these be pulled in from nvToolsExt.h directly?
+colors = {
+        'blue':        0x003498db,
+        'green':       0x002ecc71,
+        'yellow':      0x00f1c40f,
+        'orange':      0x00e67e22,
+        'red':         0x00e74c3c,
+        'purple':      0x009b59b6,
+        'navy':        0x0034495e,
+        'gray':        0x0095a5a6,
+        'silver':      0x00bdc3c7,
+        'darkgray':    0x007f8c8d,
+        }
 
-def range_push(msg):
+def range_push(msg,color='silver'):
     """
     Pushes a range onto a stack of nested range span.  Returns zero-based
     depth of the range that is started.
 
-    Args:
+    Arguments:
         msg (string): ASCII message to associate with range
     """
-    return _nvtx.rangePushA(msg)
+    attrib = EventAttributes(msg=msg,color=colors[color])
+    return _nvtx.rangePushEx(attrib)
 
 
 def range_pop():
@@ -36,26 +53,33 @@ def range_pop():
     return _nvtx.rangePop()
 
 
-def mark(msg):
+def mark(msg,color='silver'):
     """
     Describe an instantaneous event that occurred at some point.
 
-    Args:
+    Arguments:
         msg (string): ASCII message to associate with the event.
     """
-    return _nvtx.markA(msg)
+    attrib = EventAttributes(msg=msg,color=colors[color])
+    return _nvtx.markEx(attrib)
 
 
-@contextmanager
-def range(msg, *args, **kwargs):
+def EventAttributes(version=_nvtx.version, 
+                    size=_nvtx.size, 
+                    colorType=int(_nvtx.NVTX_COLOR_ARGB),
+                    color=colors['yellow'],
+                    msgType=int(_nvtx.NVTX_MESSAGE_TYPE_ASCII),
+                    msg=''):
     """
-    Context manager / decorator that pushes an NVTX range at the beginning
-    of its scope, and pops it at the end. If extra arguments are given,
-    they are passed as arguments to msg.format().
-
-    Args:
-        msg (string): message to associate with the range
+    This uses instead the pybind included class, to ease the message usage
     """
-    range_push(msg.format(*args, **kwargs))
-    yield
-    range_pop()
+    attrib = _nvtx.nvtxEventAttributes_t()
+    attrib.version=version
+    attrib.size=size
+    attrib.colorType=colorType
+    attrib.color=color
+    attrib.messageType=msgType
+    attrib.message=_nvtx.nvtxMessageValue_t() #use pybind11 instead of ctypes for this
+    attrib.message.ascii=msg.encode("utf-8")
+    return attrib
+
