@@ -63,7 +63,7 @@ net models. In particular, TorchScript supports:
    :header: "Type", "Description"
 
    "``Tensor``", "A PyTorch tensor of any dtype, dimension, or backend"
-   "``Tuple[T0, T1, ..., TN]``", "A tuple containing subtypes ``T0``, ``T1``, etc. (e.g. ``Tuple[Tensor, Tensor]``)"
+   "``Tuple[T0, T1, ...]``", "A tuple containing subtypes ``T0``, ``T1``, etc. (e.g. ``Tuple[Tensor, Tensor]``)"
    "``bool``", "A boolean value"
    "``int``", "A scalar integer"
    "``float``", "A scalar floating point number"
@@ -72,7 +72,6 @@ net models. In particular, TorchScript supports:
    "``Optional[T]``", "A value which is either None or type ``T``"
    "``Dict[K, V]``", "A dict with key type ``K`` and value type ``V``. Only ``str``, ``int``, and ``float`` are allowed as key types."
    "``T``", "A `TorchScript Class`_"
-   "``E``", "A `TorchScript Enum`_"
    "``NamedTuple[T0, T1, ...]``", "A :func:`collections.namedtuple <collections.namedtuple>` tuple type"
 
 Unlike Python, each variable in TorchScript function must have a single static type.
@@ -103,19 +102,16 @@ Example (a type mismatch)
      @torch.jit.script
      def an_error(x):
          if x:
-         ~~~~~
+         ~~~~~...  <--- HERE
              r = torch.rand(1)
-             ~~~~~~~~~~~~~~~~~
          else:
-         ~~~~~
-             r = 4
-             ~~~~~ <--- HERE
-         return r
      and was used here:
          else:
              r = 4
          return r
-                ~ <--- HERE...
+                ~ <--- HERE
+     ...
+
 
 Unsupported Typing Constructs
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -123,7 +119,7 @@ TorchScript does not support all features and types of the :mod:`typing` module.
 are more fundamental things that are unlikely to be added in the future while others
 may be added if there is enough user demand to make it a priority.
 
-These types and features from the :mod:`typing` module are unavailble in TorchScript.
+These types and features from the :mod:`typing` module are unavailable in TorchScript.
 
 .. csv-table::
    :header: "Item", "Description"
@@ -131,7 +127,6 @@ These types and features from the :mod:`typing` module are unavailble in TorchSc
    ":any:`typing.Any`", ":any:`typing.Any` is currently in development but not yet released"
    ":any:`typing.NoReturn`", "Not implemented"
    ":any:`typing.Union`", "Unlikely to be implemented (however :any:`typing.Optional` is supported)"
-   ":any:`typing.Sequence`", "Not implemented"
    ":any:`typing.Callable`", "Not implemented"
    ":any:`typing.Literal`", "Not implemented"
    ":any:`typing.ClassVar`", "Not implemented"
@@ -143,7 +138,7 @@ These types and features from the :mod:`typing` module are unavailble in TorchSc
    "NewType", "Unlikely to be implemented"
    "Generics", "Unlikely to be implemented"
 
-Any other functionality from the :any:`typing` module not explitily listed in this documentation is unsupported.
+Any other functionality from the :any:`typing` module not explicitly listed in this documentation is unsupported.
 
 Default Types
 ^^^^^^^^^^^^^
@@ -273,7 +268,6 @@ Example (refining types on parameters and locals):
     module = torch.jit.script(M(2))
     module = torch.jit.script(M(None))
 
-
 .. _TorchScript Class:
 .. _TorchScript Classes:
 .. _torchscript-classes:
@@ -347,37 +341,6 @@ like any other TorchScript type:
 
     p = Pair(torch.rand(2, 3), torch.rand(2, 3))
     print(sum_pair(p))
-
-
-.. _TorchScript Enum:
-.. _TorchScript Enums:
-.. _torchscript-enums:
-
-TorchScript Enums
-^^^^^^^^^^^^^^^^^^^
-
-Python enums can be used in TorchScript without any extra annotation or code:
-
-::
-
-    from enum import Enum
-
-
-    class Color(Enum):
-        RED = 1
-        GREEN = 2
-
-    @torch.jit.script
-    def enum_fn(x: Color, y: Color) -> bool:
-        if x == Color.RED:
-            return True
-
-        return x == y
-
-After an enum is defined, it can be used in both TorchScript and Python interchangeably
-like any other TorchScript type. The type of the values of an enum must be ``int``,
-``float``, or ``str``. All values must be of the same type; heterogenous types for enum
-values are not supported.
 
 
 Named Tuples
@@ -775,15 +738,10 @@ Example:
      @torch.jit.script...
      def foo(x):
          if x < 0:
-         ~~~~~~~~~
-             y = 4
-             ~~~~~ <--- HERE
-         print(y)
-     and was used here:
-         if x < 0:
+         ~~~~~~~~~...  <--- HERE
              y = 4
          print(y)
-               ~ <--- HERE...
+     ...
 
 Non-local variables are resolved to Python values at compile time when the
 function is defined. These values are then converted into TorchScript values using
@@ -885,7 +843,7 @@ available in TorchScript can be used as module attributes. Tensor attributes are
 semantically the same as buffers. The type of empty lists and dictionaries and ``None``
 values cannot be inferred and must be specified via
 `PEP 526-style <https://www.python.org/dev/peps/pep-0526/#class-and-instance-variable-annotations>`_ class annotations.
-If a type cannot be inferred and is not explicilty annotated, it will not be added as an attribute
+If a type cannot be inferred and is not explicitly annotated, it will not be added as an attribute
 to the resulting :class:`ScriptModule`.
 
 Example:
