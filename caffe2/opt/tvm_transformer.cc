@@ -194,11 +194,9 @@ const std::unordered_set<std::string>& TvmTransformer::getSupportedOps() {
       "DotProduct",
       "EnsureCPUOutput",
       "ExpandDims",
-      "FbFCPacked",
       "FC",
       "FCTransposed",
       "Flatten",
-      "Fused8BitRowwiseQuantizedToFloat",
       "Logit",
       "MatMul",
       "Mul",
@@ -206,7 +204,6 @@ const std::unordered_set<std::string>& TvmTransformer::getSupportedOps() {
       "Reshape",
       "ReplaceNaN",
       "Sigmoid",
-      "Slice",
       "Softmax",
       "Split",
       "Sum",
@@ -245,7 +242,7 @@ NetDef TvmTransformer::applyTvmTransform(
       int pos =
           ArgumentHelper::GetSingleArgument<OperatorDef, int>(op, kNetPos, -1);
       if (blocklisted_ops.count(pos)) {
-        LOG(INFO) << "op is being blocklisted, " << op.type() << " at position " << pos;
+        LOG(INFO) << "Blocklisting op" << op.type() << " at position " << pos;
         return false;
       }
 
