@@ -33,7 +33,7 @@ ARG KATEX
 ADD ./common/install_katex.sh install_katex.sh
 RUN bash ./install_katex.sh && rm install_katex.sh
 
-# Install conda and other packages (e.g., numpy, coverage, pytest)
+# Install conda
 ENV PATH /opt/conda/bin:$PATH
 ARG ANACONDA_PYTHON_VERSION
 ADD ./common/install_conda.sh install_conda.sh
@@ -44,9 +44,12 @@ ARG GCC_VERSION
 ADD ./common/install_gcc.sh install_gcc.sh
 RUN bash ./install_gcc.sh && rm install_gcc.sh
 
-# Install lcov for C++ code coverage
-ADD ./common/install_lcov.sh install_lcov.sh
-RUN  bash ./install_lcov.sh && rm install_lcov.sh
+# Install non-standard Python versions (via Travis binaries)
+ARG TRAVIS_PYTHON_VERSION
+ARG TRAVIS_DL_URL_PREFIX
+ENV PATH /opt/python/$TRAVIS_PYTHON_VERSION/bin:$PATH
+ADD ./common/install_travis_python.sh install_travis_python.sh
+RUN bash ./install_travis_python.sh && rm install_travis_python.sh
 
 # (optional) Install protobuf for ONNX
 ARG PROTOBUF
@@ -83,12 +86,12 @@ RUN rm build.gradle
 ENV INSTALLED_ANDROID ${ANDROID}
 
 # (optional) Install Vulkan SDK
-ARG VULKAN_SDK_VERSION
+ARG VULKAN_SDK
 ADD ./common/install_vulkan_sdk.sh install_vulkan_sdk.sh
-RUN if [ -n "${VULKAN_SDK_VERSION}" ]; then bash ./install_vulkan_sdk.sh; fi
+RUN if [ -n "${VULKAN_SDK}" ]; then bash ./install_vulkan_sdk.sh; fi
 RUN rm install_vulkan_sdk.sh
 
-# (optional) Install swiftshader
+# (optional) Install Vulkan SDK
 ARG SWIFTSHADER
 ADD ./common/install_swiftshader.sh install_swiftshader.sh
 RUN if [ -n "${SWIFTSHADER}" ]; then bash ./install_swiftshader.sh; fi
@@ -120,8 +123,9 @@ RUN bash ./install_jni.sh && rm install_jni.sh
 ARG BUILD_ENVIRONMENT
 ENV BUILD_ENVIRONMENT ${BUILD_ENVIRONMENT}
 
-# Install LLVM dev version (Defined in the pytorch/builder github repository)
-COPY --from=pytorch/llvm:9.0.1 /opt/llvm /opt/llvm
+# Install LLVM dev version
+ADD ./common/install_llvm.sh install_llvm.sh
+RUN bash ./install_llvm.sh
 
 USER jenkins
 CMD ["bash"]
