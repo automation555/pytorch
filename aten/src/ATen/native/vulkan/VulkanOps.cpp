@@ -1,6 +1,7 @@
-#include <ATen/InferSize.h>
-#include <ATen/Utils.h>
-#include <c10/util/accumulate.h>
+#include <iostream>
+#include <limits>
+#include <vector>
+
 #include <c10/util/Exception.h>
 #include <c10/util/Optional.h>
 
@@ -8,10 +9,6 @@
 #include <ATen/native/vulkan/VulkanCommon.h>
 #include <ATen/native/vulkan/VulkanConvolution.h>
 #include <ATen/native/vulkan/VulkanOps.h>
-
-#include <iostream>
-#include <limits>
-#include <vector>
 
 namespace at {
 namespace native {
@@ -30,12 +27,21 @@ void upsample_nearest2d(
     float scaleH,
     float scaleW) {
   auto device = context().device();
+  auto physicalDevice = context().physicalDevice();
   int64_t C = IN * IC;
   struct ConstBlock {
+    int32_t IW;
+    int32_t IH;
+    int32_t OW;
+    int32_t OH;
     float scaleX;
     float scaleY;
   };
-  ConstBlock cb{scaleW,
+  ConstBlock cb{safe_downcast<int32_t>(IW),
+                safe_downcast<int32_t>(IH),
+                safe_downcast<int32_t>(OW),
+                safe_downcast<int32_t>(OH),
+                scaleW,
                 scaleH};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
@@ -59,7 +65,7 @@ void upsample_nearest2d(
 
   WorkGroupSize workGroupSize{8, 8, 1};
   auto& computeUnit = context().computeUnitFactory().get(
-      GLSL_SPV(upsample_nearest2d), descriptorSetLayout, workGroupSize);
+      GLSL_SPV(upsampleNearest2d), descriptorSetLayout, workGroupSize);
   computeUnit.createCommandBuffer(descriptorSet);
   input.image()->addImageMemoryBarrierToShaderRead(computeUnit.commandBuffer());
   computeUnit.dispatchCommandBuffer(OW, OH, C, workGroupSize);
@@ -72,8 +78,15 @@ void upsample_nearest2d(
 VulkanTensor reshape_copy(
     const VulkanTensor& input,
     std::vector<int64_t> shape) {
+  const auto shapeNumel = std::accumulate(
+      std::begin(shape), std::end(shape), 1, std::multiplies<int64_t>());
+  TORCH_INTERNAL_ASSERT(
+      shapeNumel == input.numel(),
+      "reshape_copy expects shape with equal number of elements with input Vulkan tensor");
+
   input.sync_image_to_buffer();
-  VulkanTensor output{infer_size(shape, input.numel())};
+
+  VulkanTensor output{shape};
   copy_buffer_to_buffer(
       *(input.buffer()), *(output.buffer()), input.buffer()->sizeBytes());
   return output;
@@ -105,6 +118,17 @@ void adaptive_avg_pool2d(
     const int64_t IC) {
   auto device = context().device();
   int64_t C = IN * IC;
+  struct ConstBlock {
+    int32_t IW;
+    int32_t IH;
+    int32_t OW;
+    int32_t OH;
+  };
+  ConstBlock cb{safe_downcast<int32_t>(IW),
+                safe_downcast<int32_t>(IH),
+                safe_downcast<int32_t>(OW),
+                safe_downcast<int32_t>(OH)};
+  VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
   VkDescriptorPool descriptorPool{};
@@ -122,6 +146,7 @@ void adaptive_avg_pool2d(
 
   output.image()->bindStorageImage(descriptorSet, 0);
   input.image()->bindShaderRead(descriptorSet, 1);
+  constBuffer.bind(descriptorSet, 2);
 
   WorkGroupSize workGroupSize{8, 8, 1};
   auto& computeUnit = context().computeUnitFactory().get(
@@ -220,14 +245,20 @@ void avg_pool2d(
   auto device = context().device();
   const auto c = _n * _c;
   struct ConstBlock {
+    int32_t inputSize[4];
+    int32_t outputSize[4];
     int32_t kernelSize[2];
     int32_t stride[2];
     int32_t padding[2];
+    int32_t dilate[2];
   };
   ConstBlock cb{
+      {iW, iH, c, 0},
+      {oW, oH, c, 0},
       {kW, kH},
       {dW, dH},
       {padW, padH},
+      {1, 1},
   };
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
@@ -477,10 +508,17 @@ void add(
   auto W = os4[3];
 
   auto device = context().device();
+  auto physicalDevice = context().physicalDevice();
   struct ConstBlock {
+    int32_t W;
+    int32_t H;
+    int32_t C;
     float alpha;
   };
-  ConstBlock cb{alpha};
+  ConstBlock cb{safe_downcast<int32_t>(W),
+                safe_downcast<int32_t>(H),
+                safe_downcast<int32_t>(C),
+                alpha};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -521,16 +559,18 @@ void add(
 void add(VulkanTensor& output, const VulkanTensor& input, const float s) {
   const auto sizes = input.sizes();
 
-  const auto C = c10::multiply_integers(sizes.cbegin(), sizes.cend() - 2);
+  const auto C = std::accumulate(
+      sizes.cbegin(), sizes.cend() - 2, 1, std::multiplies<int64_t>());
   const auto C_4 = UP_DIV(C, 4);
   const auto H = sizes[2];
   const auto W = sizes[3];
 
   auto device = context().device();
   struct ConstBlock {
+    int32_t inputSize[4];
     float s;
   };
-  ConstBlock cb{s};
+  ConstBlock cb{{W, H, C_4, 0}, s};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -568,16 +608,18 @@ void add(VulkanTensor& output, const VulkanTensor& input, const float s) {
 void mul(VulkanTensor& output, const VulkanTensor& input, const float s) {
   const auto sizes = input.sizes();
 
-  const auto C = c10::multiply_integers(sizes.cbegin(), sizes.cend() - 2);
+  const auto C = std::accumulate(
+      sizes.cbegin(), sizes.cend() - 2, 1, std::multiplies<int64_t>());
   const auto C_4 = UP_DIV(C, 4);
   const auto H = sizes[2];
   const auto W = sizes[3];
 
   auto device = context().device();
   struct ConstBlock {
+    int32_t inputSize[4];
     float s;
   };
-  ConstBlock cb{s};
+  ConstBlock cb{{W, H, C_4, 0}, s};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -803,12 +845,12 @@ void conv2d_depthwise(
 }
 
 ImageSizes conv2d_prepack_weights_image_sizes(
-    int64_t argOC,
-    int64_t argC,
+    int64_t _OC,
+    int64_t _C,
     int64_t KH,
     int64_t KW) {
-  const int32_t C = safe_downcast<int32_t>(argC);
-  const int32_t OC = safe_downcast<int32_t>(argOC);
+  const int32_t C = safe_downcast<int32_t>(_C);
+  const int32_t OC = safe_downcast<int32_t>(_OC);
   const int32_t Cup4 = ALIGN_UP4(C);
   const int32_t OC_4 = UP_DIV(OC, 4);
   const int32_t Z = safe_downcast<int32_t>(KH) * safe_downcast<int32_t>(KW);
@@ -1114,13 +1156,24 @@ void clamp(
   auto C = sizes[0] * sizes[1];
   auto H = sizes[2];
   auto W = sizes[3];
+  auto C_4 = UP_DIV(C, 4);
 
   auto device = context().device();
+  auto physicalDevice = context().physicalDevice();
   struct ConstBlock {
+    int32_t W;
+    int32_t H;
+    int32_t C_4;
+    int32_t C;
     float min;
     float max;
   };
-  ConstBlock cb{min, max};
+  ConstBlock cb{safe_downcast<int32_t>(W),
+                safe_downcast<int32_t>(H),
+                safe_downcast<int32_t>(C_4),
+                safe_downcast<int32_t>(C),
+                min,
+                max};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -1167,10 +1220,14 @@ void addmm(
   const auto m2Sizes = m2.sizes();
   TORCH_INTERNAL_ASSERT(m1Sizes.size() == 2);
   TORCH_INTERNAL_ASSERT(m2Sizes.size() == 2);
+  const auto m1H = m1Sizes[0];
   const auto m1W = m1Sizes[1];
   const auto m1C = 1;
+  const auto m1C_4 = UP_DIV(m1C, 4);
   const auto m2H = m2Sizes[0];
+  const auto m2W = m2Sizes[1];
   const auto m2C = 1;
+  const auto m2C_4 = UP_DIV(m2C, 4);
   const auto OH = m1Sizes[0];
   const auto OW = m2Sizes[1];
 
@@ -1179,14 +1236,26 @@ void addmm(
 
   const auto C = m1C;
   const auto C_4 = UP_DIV(C, 4);
+  const auto K = m1W;
 
   auto device = context().device();
 
   struct ConstBlock {
-    float alpha;
+    int32_t OW;
+    int32_t OH;
+    int32_t C_4;
+    int32_t C;
     float beta;
+    float alpha;
+    int32_t K;
   };
-  ConstBlock cb{alpha, beta};
+  ConstBlock cb{safe_downcast<int32_t>(OW),
+                safe_downcast<int32_t>(OH),
+                safe_downcast<int32_t>(C_4),
+                safe_downcast<int32_t>(C),
+                beta,
+                alpha,
+                safe_downcast<int32_t>(K)};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -1198,14 +1267,15 @@ void addmm(
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
     };
   } else {
     descriptorTypes = {
         VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
     };
   }
 
@@ -1219,9 +1289,9 @@ void addmm(
   output.image()->bindStorageImage(descriptorSet, 0);
   m1.image()->bindShaderRead(descriptorSet, 1);
   m2.image()->bindShaderRead(descriptorSet, 2);
+  constBuffer.bind(descriptorSet, 3);
   if (hasT) {
-    (*t).image()->bindShaderRead(descriptorSet, 3);
-    constBuffer.bind(descriptorSet, 4);
+    (*t).image()->bindShaderRead(descriptorSet, 4);
   }
 
   WorkGroupSize workGroupSize{8, 8, 1};
@@ -1259,13 +1329,17 @@ void mean(VulkanTensor& output, const VulkanTensor& input) {
   int32_t C = safe_downcast<int32_t>(isizes[1]);
   int32_t H = safe_downcast<int32_t>(isizes[2]);
   int32_t W = safe_downcast<int32_t>(isizes[3]);
+  int32_t C_4 = UP_DIV(N * C, 4);
 
   auto device = context().device();
+  auto physicalDevice = context().physicalDevice();
   struct ConstBlock {
     int32_t W;
     int32_t H;
+    int32_t OW;
+    int32_t OH;
   };
-  ConstBlock cb{W, H};
+  ConstBlock cb{W, H, C, N};
   VBuffer constBuffer = makeUniformConstBuffer((void*)&cb, sizeof(cb));
 
   VkDescriptorSetLayout descriptorSetLayout{};
@@ -1288,12 +1362,12 @@ void mean(VulkanTensor& output, const VulkanTensor& input) {
 
   WorkGroupSize workGroupSize{1, 1, 1};
   auto& computeUnit = context().computeUnitFactory().get(
-      GLSL_SPV(mean2d), descriptorSetLayout, workGroupSize);
+      GLSL_SPV(mean), descriptorSetLayout, workGroupSize);
   computeUnit.createCommandBuffer(descriptorSet);
   auto commandBuffer = computeUnit.commandBuffer();
   output.image()->addImageMemoryBarrierToGeneral(commandBuffer);
   input.image()->addImageMemoryBarrierToShaderRead(commandBuffer);
-  computeUnit.dispatchCommandBuffer(C, N, 1, workGroupSize);
+  computeUnit.dispatchCommandBuffer(1, 1, C_4, workGroupSize);
   computeUnit.endCommandBuffer();
   computeUnit.submitAndWaitCommandBuffer();
   vkDestroyDescriptorPool(device, descriptorPool, nullptr);
