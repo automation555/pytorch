@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/ir/constants.h>
-
 #include <ATen/core/functional.h>
 #include <torch/csrc/autograd/variable.h>
 #include <torch/csrc/jit/ir/ir.h>
@@ -9,14 +8,20 @@
 namespace torch {
 namespace jit {
 
+namespace {
+c10::AliasAnalysisKind aliasAnalysisInternalSpecialCase() {
+  return AliasAnalysisKind::INTERNAL_SPECIAL_CASE;
+}
+} // namespace
+
 bool insertableTensor(const at::Tensor& ten) {
   return !ten.requires_grad();
 }
 
 bool insertableIValue(const IValue& ivalue) {
   if (ivalue.isInt() || ivalue.isNone() || ivalue.isBool() ||
-      ivalue.isDouble() || ivalue.isComplexDouble() || ivalue.isString() ||
-      ivalue.isDevice() || ivalue.isEnum()) {
+      ivalue.isDouble() || ivalue.isString() || ivalue.isDevice() ||
+      ivalue.isEnum()) {
     return true;
   }
   if (ivalue.isTensor()) {
@@ -48,7 +53,7 @@ Value* insertConstant(
     const IValue& val,
     c10::optional<SourceRange> loc,
     c10::optional<ScopePtr> scope) {
-  auto value = tryInsertConstant(g, val, std::move(loc), std::move(scope));
+  auto value = tryInsertConstant(g, val, loc, scope);
   if (value) {
     return *value;
   }
@@ -84,9 +89,6 @@ c10::optional<Value*> tryInsertConstant(
   } else if (val.isDouble()) {
     n->f_(attr::value, val.toDouble());
     n->output()->setType(FloatType::get());
-  } else if (val.isComplexDouble()) {
-    n->c_(attr::value, val.toComplexDouble());
-    n->output()->setType(ComplexType::get());
   } else if (val.isBool()) {
     n->i_(attr::value, val.toBool());
     n->output()->setType(BoolType::get());
@@ -112,6 +114,9 @@ c10::optional<Value*> tryInsertConstant(
     auto stream = val.toStream();
     n->i_(attr::value, stream.pack());
     n->output()->setType(StreamObjType::get());
+  } else if (val.isGenerator()) {
+    n->ival_(attr::value, val);
+    n->output()->setType(GeneratorType::get());
   } else if (val.isNone()) {
     n->output()->setType(NoneType::get());
   } else if (val.isTuple()) {
@@ -157,10 +162,6 @@ c10::optional<IValue> toIValue(const Value* v) {
       node->kindOf(attr::value) == AttributeKind::f) {
     return node->f(attr::value);
   } else if (
-      type->isSubtypeOf(NumberType::get()) &&
-      node->kindOf(attr::value) == AttributeKind::c) {
-    return node->c(attr::value);
-  } else if (
       type->cast<ListType>() &&
       node->kindOf(attr::value) == AttributeKind::ival) {
     const auto& list = node->ival(attr::value);
@@ -187,6 +188,9 @@ c10::optional<IValue> toIValue(const Value* v) {
   } else if (type == StreamObjType::get()) {
     auto s = c10::Stream::unpack(node->i(attr::value));
     return s;
+  } else if (type == GeneratorType::get()) {
+    const auto& g = node->ival(attr::value);
+    return g;
   } else if (node->mustBeNone()) {
     return IValue();
   } else if (type->cast<EnumType>()) {
