@@ -1,7 +1,6 @@
 #include <torch/csrc/jit/codegen/cuda/parser.h>
 
 #include <torch/csrc/jit/codegen/cuda/arith.h>
-#include <torch/csrc/jit/codegen/cuda/instrumentation.h>
 #include <torch/csrc/jit/codegen/cuda/ir_all_nodes.h>
 #include <torch/csrc/jit/codegen/cuda/ir_iostream.h>
 
@@ -32,6 +31,37 @@ typedef Expr* CgOp;
 
 typedef void (*ParseFuncPtr)(const Node*, std::unordered_map<size_t, CgValue>&);
 typedef bool (*MergeQueryFuncPtr)(const Node*);
+
+std::vector<int> reductionAxes(TensorView* tv) {
+  size_t n_dims = tv->nDims();
+  std::vector<int> reduction_axes;
+  for (size_t i = 0; i < n_dims; i++) {
+    if (tv->axis(i)->isReduction()) {
+      reduction_axes.emplace_back(i);
+    }
+  }
+  return reduction_axes;
+}
+
+// coalesces all reduction to the right side and returns total number of
+// reduction axes
+size_t coalescReduction(TensorView* tv) {
+  auto reduction_axes = reductionAxes(tv);
+  size_t n_dims = tv->nDims();
+  std::unordered_map<int, int> coalesc_permute;
+  for (size_t i = 0; i < reduction_axes.size(); i++) {
+    size_t new_pos = i + n_dims - reduction_axes.size();
+    if (new_pos == size_t(reduction_axes[i])) {
+      break;
+    } else {
+      coalesc_permute[reduction_axes[i]] = new_pos;
+    }
+  }
+  if (!coalesc_permute.empty()) {
+    tv->reorder(coalesc_permute);
+  }
+  return reduction_axes.size();
+}
 
 // TODO: add a mutex to make it thread safe.
 class IrParser {
@@ -453,7 +483,7 @@ class IrParser {
 
     {
       auto ptr_op = getOperatorForLiteral(
-          "aten::sum.dim_IntList(Tensor self, int[1] dim, bool keepdim=False, *, int? dtype=None) -> (Tensor)");
+          "aten::sum.dim_IntList(Tensor self, int[1]? dim=None, bool keepdim=False, *, int? dtype=None) -> (Tensor)");
       registerParseRule(
           ptr_op,
           [](const Node* node,
@@ -474,17 +504,9 @@ class IrParser {
             value_map.emplace(node->output()->unique(), out);
           },
           [](const Node* node) -> bool {
-            // TODO: support cast of output types yet;
+            // we don't support cast of output types yet;
             if (!node->inputs()[3]->type()->isSubtypeOf(
                     static_cast<c10::TypePtr>(NoneType::get()))) {
-              // We can only handle output as half and float;
-              if (const auto opt_ivalue = toIValue(node->input(3))) {
-                const auto scalar_type = opt_ivalue->toScalarType();
-                if (scalar_type == at::ScalarType::Float ||
-                    scalar_type == at::ScalarType::Half) {
-                  return true;
-                }
-              }
               return false;
             }
             // we don't support dynamic reduction axes;
@@ -638,9 +660,7 @@ bool isNodeParsible(const Node* node) {
   return IrParser::canParseNode(node);
 }
 
-std::unique_ptr<Fusion> parseJitIR(const std::shared_ptr<Graph>& graph) {
-  FUSER_PERF_SCOPE("parseJitIR");
-
+std::unique_ptr<Fusion> parseJitIR(std::shared_ptr<Graph>& graph) {
   IrParser parser(graph);
   return parser.parse();
 }

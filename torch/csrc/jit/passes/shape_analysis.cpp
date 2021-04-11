@@ -67,9 +67,8 @@ bool containsTensorType(const TypePtr& t) {
 
 class ShapePropagator {
  public:
-  explicit ShapePropagator(const std::shared_ptr<Graph>& graph)
-      : aliasDb_(graph) {
-    collectResizeSet(graph->block());
+  explicit ShapePropagator(std::shared_ptr<Graph> graph) : aliasDb_(graph) {
+    collectResizeSet(std::move(graph)->block());
   }
 
   void PropagateShapeOnBlock(Block* block, bool insert_expands = true) {
@@ -883,7 +882,7 @@ class ShapePropagator {
             "aten::trunc(Tensor self) -> Tensor",
             "aten::rot90(Tensor self, int k, int[] dims) -> Tensor",
             "aten::narrow(Tensor self, int dim, int start, int length) -> Tensor",
-            "aten::slice(Tensor self, int dim, int? start=0, int? end=9223372036854775807, int step=1) -> Tensor",
+            "aten::slice(Tensor self, int dim, int start, int end, int step) -> Tensor",
             "aten::alias(Tensor self) -> Tensor",
         },
         [](Node* node) -> type_vec_t {
@@ -1161,8 +1160,7 @@ class ShapePropagator {
             "aten::conv_transpose2d(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] output_padding, int groups, int[] dilation) -> Tensor",
             "aten::conv_transpose3d(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] output_padding, int groups, int[] dilation) -> Tensor",
             "aten::convolution(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, bool transposed, int[] output_padding, int groups) -> Tensor",
-            "aten::_convolution(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, bool transposed, int[] output_padding, int groups, bool benchmark, bool deterministic, bool cudnn_enabled) -> Tensor", // deprecated _convolution
-            "aten::_convolution(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, bool transposed, int[] output_padding, int groups, bool benchmark, bool deterministic, bool cudnn_enabled, bool allow_tf32) -> Tensor",
+            "aten::_convolution(Tensor input, Tensor weight, Tensor? bias, int[] stride, int[] padding, int[] dilation, bool transposed, int[] output_padding, int groups, bool benchmark, bool deterministic, bool cudnn_enabled) -> Tensor",
             "aten::adaptive_avg_pool1d(Tensor self, int[] output_size) -> Tensor",
             "aten::adaptive_avg_pool2d(Tensor self, int[] output_size) -> Tensor",
             "aten::adaptive_avg_pool3d(Tensor self, int[] output_size) -> Tensor",
@@ -1209,7 +1207,6 @@ class ShapePropagator {
             "aten::max(Tensor self) -> Tensor",
             "aten::min(Tensor self) -> Tensor",
             "aten::median(Tensor self) -> Tensor",
-            "aten::nanmedian(Tensor self) -> Tensor",
             "aten::norm(Tensor self, Scalar p) -> Tensor",
             "aten::std(Tensor self, bool unbiased) -> Tensor",
             "aten::trace(Tensor self) -> Tensor",
@@ -1257,7 +1254,7 @@ class ShapePropagator {
     static const register_formula_for
         all_reduce_ops_with_integer_upcast_and_dtype{
             {
-                "aten::sum(Tensor self, *, int? dtype) -> Tensor",
+                // "aten::sum(Tensor self, *, int? dtype) -> Tensor",
                 "aten::prod(Tensor self, *, int? dtype) -> Tensor",
             },
             [](Node* node) -> type_vec_t {
@@ -1270,10 +1267,9 @@ class ShapePropagator {
                       type->withScalarType(maybe_dtype_option->toScalarType())};
                 }
                 if (type->scalarType()) {
-                  return {
-                      at::isFloatingType(*type->scalarType())
-                          ? type
-                          : type->withScalarType(at::kLong)};
+                  return {at::isFloatingType(*type->scalarType())
+                              ? type
+                              : type->withScalarType(at::kLong)};
                 } else {
                   return {type};
                 }
@@ -1357,7 +1353,6 @@ class ShapePropagator {
             "aten::max(Tensor self, int dim, bool keepdim) -> (Tensor, Tensor)",
             "aten::min(Tensor self, int dim, bool keepdim) -> (Tensor, Tensor)",
             "aten::median(Tensor self, int dim, bool keepdim) -> (Tensor, Tensor)",
-            "aten::nanmedian(Tensor self, int dim, bool keepdim) -> (Tensor, Tensor)",
             "aten::mode(Tensor self, int dim, bool keepdim) -> (Tensor, Tensor)",
         },
         [](Node* node) -> type_vec_t {
@@ -2012,13 +2007,9 @@ class ShapePropagator {
       node->output()->setType(
           tp->withSizesStrides(sizes, tp->strides().concrete_sizes().value()));
       return true;
-    } else if (node->matches(
-                   "aten::sum(Tensor self, *, int? dtype) -> Tensor")) {
-      node->output()->setType(tensor_types.at(0)->withSizes({}));
-      return true;
     } else if (
         node->matches(
-            "aten::sum(Tensor self, int[] dim, bool keepdim, *, int? dtype) -> Tensor",
+            "aten::sum(Tensor self, int[1]? dim, bool keepdim, *, int? dtype) -> Tensor",
             /*const_inputs=*/{attr::dim, attr::keepdim})) {
       auto& tp = tensor_types.at(0);
       auto sizes = tp->sizes().concrete_sizes().value();
