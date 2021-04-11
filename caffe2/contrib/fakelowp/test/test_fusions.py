@@ -1,6 +1,9 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
+
+import unittest
+
 # Must happen before importing caffe2.python.*
 import caffe2.python.fakelowp.init_shared_libs  # noqa
-import datetime
 import numpy as np
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -20,22 +23,15 @@ workspace.GlobalInit(
 )
 
 class Fusions(serial.SerializedTestCase):
-    @given(
-        scale=st.floats(1e-4, 1e2),
-        zp=st.integers(-128, 128),
-        size=st.integers(1, 100000),
-        rand_seed=st.integers(0, 65534),
-    )
-    @settings(deadline=datetime.timedelta(seconds=10))
-    def test_tanhquantize(self, scale, zp, size, rand_seed):
-        np.random.seed(rand_seed)
-
+    @given(scale=st.floats(1e-4, 20), zp=st.integers(-20, 20))
+    @settings(deadline=None, max_examples=1000)
+    def test_quantize(self, scale, zp):
         workspace.ResetWorkspace()
-
         pred_net = caffe2_pb2.NetDef()
-        pred_net.name = "ref"
+        pred_net.name = "pred"
         pred_net.external_input.append("X")
         pred_net.external_output.append("Y_q")
+        x_scale = scale # 0.5
 
         pred_net.op.add().CopyFrom(
             core.CreateOperator(
@@ -45,12 +41,11 @@ class Fusions(serial.SerializedTestCase):
 
         pred_net.op.add().CopyFrom(
             core.CreateOperator(
-                "Int8Quantize", ["Y"], ["Y_q"], Y_scale=scale, Y_zero_point=zp
+                "Int8Quantize", ["Y"], ["Y_q"], Y_scale=x_scale, Y_zero_point=zp
             )
         )
 
-        X = np.linspace(-1, 1, size).astype(np.float16).astype(np.float32)
-
+        X = np.linspace(-20, 20, 100000, dtype=np.float32)
         pred_net_onnxified = onnxifi_caffe2_net(
             pred_net,
             {"X": X.shape},
@@ -67,33 +62,17 @@ class Fusions(serial.SerializedTestCase):
         workspace.RunNet(pred_net_onnxified.name)
         Y_glow = workspace.FetchInt8Blob("Y_q")
 
-        ref_net = caffe2_pb2.NetDef()
-        ref_net.name = "ref"
-        ref_net.external_input.append("X")
-        ref_net.external_output.append("Y_q")
-
-        ref_net.op.add().CopyFrom(
-            core.CreateOperator(
-                "TanhQuantFakeFp16NNPI", ["X"], ["Y_q"], Y_scale=scale, Y_zero_point=zp
-            )
-        )
-
-        workspace.CreateNet(ref_net)
-        workspace.RunNet(ref_net.name)
+        pred_net.op[0].type = "TanhFakeFp16NNPI"
+        pred_net.op[1].type = "Int8QuantizeNNPI"
+        workspace.RunNetOnce(pred_net)
         Y_ref = workspace.FetchInt8Blob("Y_q")
 
-        if not np.array_equal(Y_ref.data, Y_glow.data) or \
-           not Y_ref.scale == Y_glow.scale or \
-           not Y_ref.zero_point == Y_glow.zero_point:
-            print_test_debug_info(
-                "tanhfusion",
-                {
-                    "scale": scale,
-                    "zp": zp,
-                    "input": X,
-                    "ideal nonquant": np.tanh(X),
-                    "Y_glow": Y_glow,
-                    "Y_c2": Y_ref,
-                }
-            )
-            assert(0)
+        print(Y_glow)
+        print(Y_ref)
+
+        diff = {}
+        for i in range(Y_ref.data.shape[0]):
+            if Y_ref.data[i] != Y_glow.data[i]:
+                diff[i] = [X[i], Y_ref.data[i], Y_glow.data[i]]
+        print(diff)
+        np.testing.assert_equal(Y_ref.data, Y_glow.data)
