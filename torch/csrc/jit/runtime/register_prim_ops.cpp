@@ -1,5 +1,4 @@
 #include <c10/util/Optional.h>
-#include <c10/util/irange.h>
 #include <torch/csrc/jit/runtime/custom_operator.h>
 #include <torch/csrc/jit/runtime/operator.h>
 #include <torch/csrc/jit/runtime/register_ops_utils.h>
@@ -43,8 +42,7 @@ std::string stringSlice(
 
   int64_t i = start_val;
   std::string result = "";
-  for (const auto j : c10::irange(num_vals)) {
-    (void)j; // Suppress unused variable warning
+  for (int64_t j = 0; j < num_vals; j++) {
     result += string[i];
     i += step;
   }
@@ -549,6 +547,13 @@ RegisterOperators reg(
          [](Stack* stack) {
            at::Tensor arg = pop(stack).toTensor();
            push(stack, arg.numel());
+         },
+         aliasAnalysisFromSchema()),
+     OperatorGenerator(
+         TORCH_SELECTIVE_SCHEMA("aten::is_conj(Tensor self) -> bool"),
+         [](Stack* stack) {
+           at::Tensor arg = pop(stack).toTensor();
+           push(stack, arg.is_conj());
          },
          aliasAnalysisFromSchema()),
      OperatorGenerator(

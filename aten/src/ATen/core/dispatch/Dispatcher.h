@@ -138,9 +138,6 @@ public:
   // Like findSchema, but also returns OperatorHandle even if there is no schema
   c10::optional<OperatorHandle> findOp(const OperatorName& operator_name);
 
-  // Returns a list of all operator names present in the operatorLookupTable_
-  const std::vector<OperatorName> getAllOpNames();
-
   // ------------------------------------------------------------------------
   //
   // Invoking operators
@@ -163,6 +160,8 @@ public:
 
   // Invoke an operator via the boxed calling convention using an IValue stack
   void callBoxed(const OperatorHandle& op, Stack* stack) const;
+  void callBoxedWithDispatchKey(const OperatorHandle& op, DispatchKey dispatchKey, Stack* stack) const;
+  void redispatchBoxed(const OperatorHandle& op, DispatchKey currentDispatchKey, Stack* stack) const;
 
   // TODO: This will only be useful if we write a backend fallback that plumbs dispatch keys (currently there are none)
   // See Note [Plumbing Keys Through The Dispatcher]
@@ -344,8 +343,13 @@ public:
     c10::Dispatcher::singleton().callBoxed(*this, stack);
   }
 
+<<<<<<< HEAD
   void redispatchBoxed(DispatchKeySet ks, Stack* stack) const {
     c10::Dispatcher::singleton().redispatchBoxed(*this, ks, stack);
+=======
+  void redispatchBoxed(DispatchKey currentDispatchKey, Stack* stack) const {
+    c10::Dispatcher::singleton().redispatchBoxed(*this, currentDispatchKey, stack);
+>>>>>>> 2a10c35bd8 (Conjugate view tensor)
   }
 
 private:
@@ -405,71 +409,8 @@ private:
 };
 
 namespace detail {
-template <class... Args> inline void unused_arg_(const Args&...) {}
-
-// CaptureKernelCall is intended to capture return values from Dispatcher
-// unboxed kernel calls. A record function may request to get outputs from the
-// kernel calls. For boxed kernels, it's straightforward, the returned values
-// are in the stack object. The stack can be passed to record functions. For
-// unboxed kernels, we need to handle different kinds of return values, cache
-// them temporarily, then release the values for the actual function call
-// return.
-template <typename ReturnType>
-struct CaptureKernelCall {
-  template <typename F, typename... Args>
-  CaptureKernelCall(
-      const F& kernel,
-      const TypedOperatorHandle<ReturnType(Args...)>& op,
-      const DispatchKeySet& dispatchKeySet,
-      Args&&... args)
-      // Calls the kernel and capture the result in output_.
-      : output_{kernel.template call<ReturnType, Args...>(
-            op,
-            dispatchKeySet,
-            std::forward<Args>(args)...)} {}
-  // Wraps the return values in a Stack.
-  Stack getOutputs() {
-    Stack stack;
-    impl::push_outputs<ReturnType, false>::copy(output_, &stack);
-    return stack;
-  }
-  // Since we are returning the output_, we don't expect the output_ to be used
-  // afterward. Copy elision and RVO do not apply to class data members. Using
-  // move semantic to avoid copies when possible.
-  ReturnType release() && {
-    return std::move(output_);
-  }
-
- private:
-  ReturnType output_;
-};
-
-// Handle the lvalue reference differently since it should not be moved.
-template <>
-inline at::Tensor& CaptureKernelCall<at::Tensor&>::release() && {
-  return output_;
+template<class... Args> inline void unused_arg_(const Args&...) {}
 }
-
-// Handle case where the kernel returns void.
-template <>
-struct CaptureKernelCall<void> {
-  template <typename F, typename... Args>
-  CaptureKernelCall(
-      const F& kernel,
-      const TypedOperatorHandle<void(Args...)>& op,
-      const DispatchKeySet& dispatchKeySet,
-      Args&&... args) {
-    // Calling the kernel and no need to capture void.
-    kernel.template call<void, Args...>(
-        op, dispatchKeySet, std::forward<Args>(args)...);
-  }
-  Stack getOutputs() {
-    return Stack();
-  }
-  void release() && {}
-};
-
-} // namespace detail
 
 // See [Note: Argument forwarding in the dispatcher] for why Args doesn't use &&
 template<class Return, class... Args>
@@ -488,15 +429,6 @@ inline Return Dispatcher::callWithDispatchKeySlowPath(const TypedOperatorHandle<
         runRecordFunction(guard, op, dispatchKey, impl::boxArgs(args...));
       } else {
         runRecordFunction(guard, op, dispatchKey);
-      }
-      if (C10_UNLIKELY(guard.needsOutputs())) {
-        // Calls the kernel and capture the output temporarily to pass to
-        // RecordFunction.
-        detail::CaptureKernelCall<Return> captureKernelCall(
-            kernel, op, dispatchKeySet, std::forward<Args>(args)...);
-        guard.setOutputs(captureKernelCall.getOutputs());
-        // Releases the captured output to return to caller.
-        return std::move(captureKernelCall).release();
       }
     }
   }
@@ -539,11 +471,17 @@ inline Return Dispatcher::redispatch(const TypedOperatorHandle<Return (Args...)>
   return kernel.template call<Return, Args...>(op, currentDispatchKeySet, std::forward<Args>(args)...);
 }
 
+<<<<<<< HEAD
 inline void Dispatcher::callBoxed(const OperatorHandle& op, Stack* stack) const {
   // note: this doesn't need the mutex because write operations on the list keep iterators intact.
   const auto& entry = op.operatorDef_->op;
   auto dispatchKeySet = entry.dispatchKeyExtractor().getDispatchKeySetBoxed(stack);
   const auto& kernel = entry.lookup(dispatchKeySet.highestPriorityTypeId());
+=======
+inline void Dispatcher::callBoxedWithDispatchKey(const OperatorHandle& op, DispatchKey dispatchKey, Stack* stack) const {
+  const auto& entry = op.operatorIterator_->op;
+  const auto& kernel = entry.lookup(dispatchKey);
+>>>>>>> 2a10c35bd8 (Conjugate view tensor)
 #ifndef PYTORCH_DISABLE_PER_OP_PROFILING
   bool pre_sampled = false;
   if (C10_UNLIKELY(at::shouldRunRecordFunction(&pre_sampled))) {
@@ -561,11 +499,6 @@ inline void Dispatcher::callBoxed(const OperatorHandle& op, Stack* stack) const 
     }
     // keeping the guard alive while executing the kernel
     kernel.callBoxed(op, dispatchKeySet, stack);
-    // track outputs
-    if (C10_UNLIKELY(
-            guard.isActive() && entry.isObserved() && guard.needsOutputs())) {
-      guard.setOutputs(*stack);
-    }
     return;
   }
 #endif  // PYTORCH_DISABLE_PER_OP_PROFILING
@@ -577,6 +510,20 @@ inline void Dispatcher::redispatchBoxed(const OperatorHandle& op, DispatchKeySet
   const auto& entry = op.operatorDef_->op;
   const auto& kernel = entry.lookup(dispatchKeySet.highestPriorityTypeId());
   return kernel.callBoxed(op, dispatchKeySet, stack);
+}
+
+inline void Dispatcher::redispatchBoxed(const OperatorHandle& op, DispatchKey currentDispatchKey, Stack* stack) const {
+  auto dispatchKey = op.operatorIterator_->op.dispatchKeyExtractor().getDispatchKeyBoxed(
+      DispatchKeySet(DispatchKeySet::FULL_AFTER, currentDispatchKey), stack
+  );
+  return callBoxedWithDispatchKey(op, dispatchKey, stack);
+}
+
+inline void Dispatcher::callBoxed(const OperatorHandle& op, Stack* stack) const {
+  // note: this doesn't need the mutex because write operations on the list keep iterators intact.
+  auto dispatchKey = op.operatorIterator_->op.dispatchKeyExtractor().getDispatchKeyBoxed(
+      DispatchKeySet::FULL, stack);
+  return callBoxedWithDispatchKey(op, dispatchKey, stack);
 }
 
 } // namespace c10
