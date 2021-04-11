@@ -17,18 +17,12 @@
 
 namespace py = pybind11;
 
-// This makes intrusive_ptr to be available as a custom pybind11 holder type,
-// see
-// https://pybind11.readthedocs.io/en/stable/advanced/smart_ptrs.html#custom-smart-pointers
-PYBIND11_DECLARE_HOLDER_TYPE(T, c10::intrusive_ptr<T>, true);
-
 namespace pybind11 { namespace detail {
 
 // torch.autograd.Variable <-> at::Tensor conversions (without unwrapping)
 template <>
 struct type_caster<at::Tensor> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Tensor, _("at::Tensor"));
 
   bool load(handle src, bool) {
@@ -49,7 +43,6 @@ struct type_caster<at::Tensor> {
 template <>
 struct type_caster<at::Generator> {
  public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::Generator, _("at::Generator"));
 
   bool load(handle src, bool) {
@@ -69,14 +62,12 @@ struct type_caster<at::Generator> {
 
 template<> struct type_caster<at::IntArrayRef> {
 public:
-  // NOLINTNEXTLINE(cppcoreguidelines-non-private-member-variables-in-classes)
   PYBIND11_TYPE_CASTER(at::IntArrayRef, _("at::IntArrayRef"));
 
   bool load(handle src, bool) {
     PyObject *source = src.ptr();
     auto tuple = PyTuple_Check(source);
     if (tuple || PyList_Check(source)) {
-      // NOLINTNEXTLINE(bugprone-branch-clone)
       auto size = tuple ? PyTuple_GET_SIZE(source) : PyList_GET_SIZE(source);
       v_value.resize(size);
       for (int idx = 0; idx < size; idx++) {
@@ -101,6 +92,10 @@ public:
 private:
   std::vector<int64_t> v_value;
 };
+
+template <typename CharT>
+struct type_caster<c10::basic_string_view<CharT>, enable_if_t<is_std_char_type<CharT>::value>>
+    : string_caster<c10::basic_string_view<CharT>, true> {};
 
 // Pybind11 bindings for our optional type.
 // http://pybind11.readthedocs.io/en/stable/advanced/cast/stl.html#c-17-library-containers
