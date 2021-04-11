@@ -97,7 +97,7 @@ class RemoteEM(nn.Module):
         self.em = nn.EmbeddingBag(
             num_embeddings,
             embedding_dim,
-            _weight=torch.tensor([init_em] * num_embeddings),
+            _weight=torch.Tensor([init_em] * num_embeddings),
         )
 
     def forward(self, input: torch.Tensor):
@@ -278,10 +278,10 @@ def get_training_examples():
     # Every example has another one that has exactly the same features but an
     # opposite value. Therefore, their grads cancel each other in all-reduce.
     for value in (-1, 1):
-        for x in (-1.0 * value, 1.0 * value):
-            for y in (1.0 * value, -1.0 * value):
+        for x in (-1 * value, 1 * value):
+            for y in (1 * value, -1 * value):
                 for z in (0, 1):
-                    training_examples.dense_features[idx, :] = torch.tensor((x, y))
+                    training_examples.dense_features[idx, :] = torch.Tensor((x, y))
                     training_examples.sparse_features[idx] = z
                     training_examples.values[idx] = value
                     idx += 1
@@ -653,17 +653,26 @@ class DdpComparisonTest(RpcAgentTestFixture):
                 )
 
     @skip_if_lt_x_gpu(NUM_TRAINERS)
+    @requires_gloo()
+    @dist_init
+    def test_ddp_dist_autograd_local_vs_remote_gpu_gloo(self):
+        self._test_ddp_dist_autograd_local_vs_remote_gpu("gloo")
+
+    @skip_if_lt_x_gpu(NUM_TRAINERS)
     @requires_nccl()
     @dist_init
     @skip_if_rocm
-    def test_ddp_dist_autograd_local_vs_remote_gpu(self):
+    def test_ddp_dist_autograd_local_vs_remote_gpu_nccl(self):
+        self._test_ddp_dist_autograd_local_vs_remote_gpu("nccl")
+
+    def _test_ddp_dist_autograd_local_vs_remote_gpu(self, backend):
         # Each trainer uses a different random seed. Otherwise, they are going
         # to have exactly the same initial model parameters, input, and
         # therefore grads. That means the grads will be the same before and
         # after DDP's all-reduce.
         torch.manual_seed(self.rank)
         dist.init_process_group(
-            backend="gloo",
+            backend=backend,
             init_method=INIT_METHOD_TEMPLATE.format(file_name=self.file_name),
             world_size=self.world_size,
             rank=self.rank,
