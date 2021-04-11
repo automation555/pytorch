@@ -1,6 +1,8 @@
 #include "test/cpp/tensorexpr/test_train.h"
 #include "test/cpp/tensorexpr/test_utils.h"
+#include "torch/csrc/jit/tensorexpr/buffer.h"
 #include "torch/csrc/jit/tensorexpr/eval.h"
+#include "torch/csrc/jit/tensorexpr/function.h"
 #include "torch/csrc/jit/tensorexpr/ir.h"
 #include "torch/csrc/jit/tensorexpr/ir_printer.h"
 #include "torch/csrc/jit/tensorexpr/loopnest.h"
@@ -169,7 +171,7 @@ VTensor* grad(VTensor* y, VTensor* x, VTensor* j) {
           TORCH_CHECK(g, ss.str());
         }
         auto g_outs = g(op->inputs, grad_inputs);
-        for (auto i = 0U; i < g_outs.size(); ++i) {
+        for (auto i = 0; i < g_outs.size(); ++i) {
           auto input = op->inputs[i];
           if (need_grad.find(input) != need_grad.end()) {
             if (grad_map.find(input) != grad_map.end()) {
@@ -198,7 +200,7 @@ VOp::VOp(
     VGraph* graph_)
     : inputs(inputs_), graph(graph_) {
   method = &VMethod::get(name);
-  for (auto i = 0U; i < num_outputs; ++i) {
+  for (auto i = 0; i < num_outputs; ++i) {
     outputs.emplace_back(graph->create_tensor({}));
     outputs.back()->op = this;
   }
@@ -303,9 +305,8 @@ REGISTER_METHOD(
     },
     [](const std::vector<VTensor*>& inputs,
        const std::vector<VTensor*>& ginputs) -> std::vector<VTensor*> {
-      return {
-          call("mul", {ginputs[0], inputs[1]})[0],
-          call("mul", {ginputs[0], inputs[0]})[0]};
+      return {call("mul", {ginputs[0], inputs[1]})[0],
+              call("mul", {ginputs[0], inputs[0]})[0]};
     },
     [](const std::vector<VTensor*>& inputs)
         -> std::vector<std::vector<std::string>> {
@@ -330,9 +331,8 @@ REGISTER_METHOD(
        const std::vector<VTensor*>& ginputs) -> std::vector<VTensor*> {
       auto b_2 = call("mul", {inputs[1], inputs[1]})[0];
       auto a_div_b_2 = call("div", {inputs[0], b_2})[0];
-      return {
-          call("div", {ginputs[0], inputs[1]})[0],
-          call("mul", {ginputs[0], call("neg", {a_div_b_2})[0]})[0]};
+      return {call("div", {ginputs[0], inputs[1]})[0],
+              call("mul", {ginputs[0], call("neg", {a_div_b_2})[0]})[0]};
     },
     [](const std::vector<VTensor*>& inputs)
         -> std::vector<std::vector<std::string>> {
@@ -388,6 +388,157 @@ REGISTER_METHOD(
       return {inputs[1]->shape};
     });
 
+REGISTER_METHOD(
+    exp,
+    [](const std::vector<Tensor*>& inputs,
+       const std::vector<VTensor*>& vinputs,
+       const std::map<std::string, torch::jit::tensorexpr::VarHandle>&
+           vbindings) -> std::vector<Tensor*> {
+      TORCH_CHECK(inputs.size() == 1);
+      auto vars = get_vars(vinputs.at(0)->shape, vbindings);
+      Tensor* o = Compute("o", vars, [&](const VarHandle& i) {
+        return exp(inputs.at(0)->call(i));
+      });
+
+      return {o};
+    },
+    [](const std::vector<VTensor*>& inputs,
+       const std::vector<VTensor*>& ginputs) -> std::vector<VTensor*> {
+      return call("mul", {call("exp", {inputs[0]})[0], ginputs[0]});
+    },
+    [](const std::vector<VTensor*>& inputs)
+        -> std::vector<std::vector<std::string>> {
+      return {inputs[0]->shape};
+    });
+
+REGISTER_METHOD(
+    matmul,
+    [](const std::vector<Tensor*>& inputs,
+       const std::vector<VTensor*>& vinputs,
+       const std::map<std::string, torch::jit::tensorexpr::VarHandle>&
+           vbindings) -> std::vector<Tensor*> {
+      TORCH_CHECK(inputs.size() == 2);
+      auto A_vars = get_vars(vinputs.at(0)->shape, vbindings);
+      auto B_vars = get_vars(vinputs.at(1)->shape, vbindings);
+      TORCH_CHECK(A_vars.size() == 2);
+      TORCH_CHECK(B_vars.size() == 2);
+
+      Tensor* o;
+      // standard matmul
+      if (vinputs.at(0)->shape[1] == vinputs.at(1)->shape[0]) {
+        std::vector<DimArg> C_vars = {A_vars[0], B_vars[1]};
+        o = Reduce(
+            "mm",
+            C_vars,
+            Sum(),
+            [&](const VarHandle& m, const VarHandle& n, const VarHandle& k) {
+              return inputs.at(0)->call(m, k) * inputs.at(1)->call(k, n);
+            },
+            {A_vars[1]});
+        // B transposed
+      } else if (vinputs.at(0)->shape[1] == vinputs.at(1)->shape[1]) {
+        std::vector<DimArg> C_vars = {A_vars[0], B_vars[0]};
+        o = Reduce(
+            "mm",
+            C_vars,
+            Sum(),
+            [&](const VarHandle& m, const VarHandle& n, const VarHandle& k) {
+              return inputs.at(0)->call(m, k) * inputs.at(1)->call(n, k);
+            },
+            {A_vars[1]});
+        // A transposed
+      } else if (vinputs.at(0)->shape[0] == vinputs.at(1)->shape[0]) {
+        std::vector<DimArg> C_vars = {A_vars[1], B_vars[1]};
+        o = Reduce(
+            "mm",
+            C_vars,
+            Sum(),
+            [&](const VarHandle& m, const VarHandle& n, const VarHandle& k) {
+              return inputs.at(0)->call(k, m) * inputs.at(1)->call(k, n);
+            },
+            {A_vars[0]});
+        // both transposed
+      } else if (vinputs.at(0)->shape[0] == vinputs.at(1)->shape[1]) {
+        std::vector<DimArg> C_vars = {A_vars[1], B_vars[0]};
+        o = Reduce(
+            "mm",
+            C_vars,
+            Sum(),
+            [&](const VarHandle& m, const VarHandle& n, const VarHandle& k) {
+              return inputs.at(0)->call(k, m) * inputs.at(1)->call(n, k);
+            },
+            {A_vars[0]});
+      }
+      TORCH_CHECK(o, "Cannot handle shapes for this matmul");
+      return {o};
+    },
+    [](const std::vector<VTensor*>& inputs,
+       const std::vector<VTensor*>& ginputs) -> std::vector<VTensor*> {
+      return {call("matmul", {ginputs[0], inputs[1]})[0],
+              call("matmul", {ginputs[0], inputs[0]})[0]};
+    },
+    [](const std::vector<VTensor*>& inputs)
+        -> std::vector<std::vector<std::string>> {
+      // standard matmul
+      if (inputs.at(0)->shape[1] == inputs.at(1)->shape[0]) {
+        return {{inputs.at(0)->shape[0], inputs.at(1)->shape[1]}};
+        // B transposed
+      } else if (inputs.at(0)->shape[1] == inputs.at(1)->shape[1]) {
+        return {{inputs.at(0)->shape[0], inputs.at(1)->shape[0]}};
+        // A transposed
+      } else if (inputs.at(0)->shape[0] == inputs.at(1)->shape[0]) {
+        return {{inputs.at(0)->shape[1], inputs.at(1)->shape[1]}};
+      }
+      // both transposed
+      TORCH_CHECK(inputs.at(0)->shape[0] == inputs.at(1)->shape[1]);
+      return {{inputs.at(0)->shape[1], inputs.at(1)->shape[0]}};
+    });
+
+std::string expr_help(const VTensor* t, std::map<const VTensor*, int>& names) {
+  std::stringstream ss;
+  if (!names.count(t)) {
+    names[t] = names.size();
+  }
+  if (t->op) {
+    if (t->op->method->name == "mul") {
+      ss << "(" << expr_help(t->op->inputs.at(0), names);
+      ss << " * " << expr_help(t->op->inputs.at(1), names);
+      ss << ")";
+    } else if (t->op->method->name == "neg") {
+      ss << "-" << expr_help(t->op->inputs.at(0), names);
+    } else if (t->op->method->name == "sub") {
+      ss << "(" << expr_help(t->op->inputs.at(0), names);
+      ss << " - " << expr_help(t->op->inputs.at(1), names);
+      ss << ")";
+    } else if (t->op->method->name == "div") {
+      ss << "(" << expr_help(t->op->inputs.at(0), names);
+      ss << " / " << expr_help(t->op->inputs.at(1), names);
+      ss << ")";
+    } else if (t->op->method->name == "add") {
+      ss << "(" << expr_help(t->op->inputs.at(0), names);
+      ss << " + " << expr_help(t->op->inputs.at(1), names);
+      ss << ")";
+    } else {
+      ss << t->op->method->name << "(";
+      for (auto& inp : t->op->inputs) {
+        ss << expr_help(inp, names);
+        if (&inp != &t->op->inputs.back()) {
+          ss << ", ";
+        }
+      }
+      ss << ")";
+    }
+  } else {
+    ss << "%" << names.at(t);
+  }
+  return ss.str();
+}
+
+std::string expr(const VTensor* t) {
+  std::map<const VTensor*, int> tensor_names;
+  return expr_help(t, tensor_names);
+}
+
 std::string dot(const VGraph& g) {
   std::stringstream ss;
   ss << "digraph {\n";
@@ -408,7 +559,7 @@ std::string dot(const VGraph& g) {
 
 std::tuple<
     Stmt*,
-    std::map<const VTensor*, Placeholder>,
+    std::map<const VTensor*, Buffer>,
     std::map<const VTensor*, Tensor*>,
     std::map<std::string, VarHandle>>
 to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs) {
@@ -458,7 +609,7 @@ to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs) {
     return order;
   };
 
-  std::map<const VTensor*, Placeholder> inputs;
+  std::map<const VTensor*, Buffer> inputs;
   std::map<const VTensor*, Tensor*> bindings;
   std::map<std::string, torch::jit::tensorexpr::VarHandle> vbindings;
 
@@ -481,10 +632,16 @@ to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs) {
       if (vars.size() == 0) {
         vars.emplace_back(IntImm::make(1));
       }
-      Placeholder inpB(BufHandle(get_name(id), exprs, kFloat));
-      auto inpT =
-          Compute("input" + get_name(id), vars, [&](const VarHandle& i) {
-            return Load::make(BufHandle(inpB.data()), {i}, 1);
+      Buffer inpB(BufHandle(get_name(id), exprs, kFloat));
+      auto inpT = Compute(
+          "input" + get_name(id),
+          vars,
+          [&](const std::vector<VarHandle>& axes) {
+            std::vector<ExprHandle> expr_axes;
+            for (auto a : axes) {
+              expr_axes.emplace_back(a);
+            }
+            return Load::make(inpB, expr_axes, 1);
           });
       inputs.emplace(&t, inpB);
       bindings.emplace(&t, inpT);
@@ -499,16 +656,12 @@ to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs) {
     }
     auto outs = vop->method->lower(inps, vop->inputs, vbindings);
     TORCH_CHECK(outs.size() == vop->outputs.size());
-    for (auto i = 0U; i < outs.size(); ++i) {
+    for (auto i = 0; i < outs.size(); ++i) {
       bindings[vop->outputs[i]] = outs[i];
     }
   }
 
   std::vector<Tensor*> toutputs;
-  std::vector<Tensor*> t_all;
-  for (auto& vtensor : graph.vtensors) {
-    t_all.emplace_back(bindings.at(&vtensor));
-  }
   if (outputs.size() == 0) {
     for (auto& vtensor : graph.vtensors) {
       if (vtensor.consumers.size() == 0) {
@@ -521,7 +674,7 @@ to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs) {
     }
   }
 
-  LoopNest l(toutputs, t_all);
+  LoopNest l(toutputs);
   l.prepareForCodegen();
   Stmt* s = l.root_stmt();
   return std::make_tuple(s, inputs, bindings, vbindings);

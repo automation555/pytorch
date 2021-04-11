@@ -34,10 +34,11 @@ std::vector<VTensor*> call(
 // Utility for graph construction by differentiation
 VTensor* grad(VTensor* y, VTensor* x, VTensor* j);
 
+std::string expr(const VTensor* t);
 std::string dot(const VGraph& g);
 std::tuple<
     torch::jit::tensorexpr::Stmt*,
-    std::map<const VTensor*, torch::jit::tensorexpr::Placeholder>,
+    std::map<const VTensor*, torch::jit::tensorexpr::Buffer>,
     std::map<const VTensor*, torch::jit::tensorexpr::Tensor*>,
     std::map<std::string, torch::jit::tensorexpr::VarHandle>>
 to_tensorexpr(const VGraph& graph, std::vector<VTensor*> outputs = {});
