@@ -1,9 +1,9 @@
 ## @package bpr_loss
 # Module caffe2.python.layers.bpr_loss
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
@@ -19,7 +19,7 @@ import numpy as np
 class BPRLoss(ModelLayer):
 
     def __init__(self, model, input_record, name='bpr_loss', **kwargs):
-        super(BPRLoss, self).__init__(model, name, input_record, **kwargs)
+        super(BPRLoss, self).__init__(model, input_record,name, **kwargs)
         assert schema.is_schema_subset(
             schema.Struct(
                 ('pos_prediction', schema.Scalar()),

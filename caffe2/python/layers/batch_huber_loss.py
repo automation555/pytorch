@@ -1,9 +1,9 @@
 # @package batch_huber_loss
 # Module caffe2.python.layers.batch_huber_loss
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import (
@@ -18,7 +18,7 @@ import numpy as np
 class BatchHuberLoss(ModelLayer):
 
     def __init__(self, model, input_record, name='batch_huber_loss', delta=1.0, **kwargs):
-        super(BatchHuberLoss, self).__init__(model, name, input_record, **kwargs)
+        super(BatchHuberLoss, self).__init__(model, input_record,name, **kwargs)
 
         assert delta > 0
 

@@ -1,9 +1,9 @@
 ## @package gather_record
 # Module caffe2.python.layers.gather_record
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import ModelLayer
@@ -30,7 +30,7 @@ class GatherRecord(ModelLayer):
     """
 
     def __init__(self, model, input_record, name='gather_record', **kwargs):
-        super(GatherRecord, self).__init__(model, name, input_record, **kwargs)
+        super(GatherRecord, self).__init__(model, input_record, name, **kwargs)
 
         assert 'indices' in input_record
         assert 'record' in input_record

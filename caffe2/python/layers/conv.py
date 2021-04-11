@@ -1,9 +1,9 @@
 ## @package conv
 # Module caffe2.python.layers.conv
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
@@ -31,7 +31,7 @@ class Conv(ModelLayer):
                  kernel_optim=None, bias_optim=None,
                  name='conv', **kwargs):
 
-        super(Conv, self).__init__(model, name, input_record, **kwargs)
+        super(Conv, self).__init__(model, input_record, name, **kwargs)
         assert isinstance(input_record, schema.Scalar), "Incorrect input type"
         # input num_channels (C) is needed
         input_dims = input_record.field_type().shape

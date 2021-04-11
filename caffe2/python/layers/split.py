@@ -1,9 +1,9 @@
 ## @package split
 # Module caffe2.python.layers.split
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
@@ -15,7 +15,7 @@ class Split(ModelLayer):
 
     def __init__(self, model, input_record, num_splits=1, axis=1,
                  name='split', split=None, **kwargs):
-        super(Split, self).__init__(model, name, input_record, **kwargs)
+        super(Split, self).__init__(model, input_record, name, **kwargs)
         self.axis = axis
         # Assume that first dimension is batch, so actual axis in shape is
         # axis - 1

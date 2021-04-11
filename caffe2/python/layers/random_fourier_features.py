@@ -1,7 +1,7 @@
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import ModelLayer
@@ -38,7 +38,7 @@ class RandomFourierFeatures(ModelLayer):
             name='random_fourier_features',
             **kwargs):
 
-        super(RandomFourierFeatures, self).__init__(model, name, input_record,
+        super(RandomFourierFeatures, self).__init__(model, input_record, name,
                                                     **kwargs)
         assert isinstance(input_record, schema.Scalar), "Incorrect input type"
 

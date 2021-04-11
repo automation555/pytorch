@@ -1,6 +1,6 @@
 ## @package fc_with_bootstrap
 # Module caffe2.python.layers.fc_with_bootstrap
-
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import math
 
@@ -37,7 +37,7 @@ class FCWithBootstrap(SamplingTrainableMixin, ModelLayer):
         axis=1,
         **kwargs
     ):
-        super(FCWithBootstrap, self).__init__(model, name, input_record, **kwargs)
+        super(FCWithBootstrap, self).__init__(model, input_record, name, **kwargs)
         assert isinstance(
             input_record, schema.Scalar
         ), "Incorrect input type {}".format(input_record)

@@ -1,9 +1,9 @@
 ## @package bucket_weighted
 # Module caffe2.python.layers.bucket_weighted
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import logging
 import numpy as np
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class BucketWeighted(ModelLayer):
     def __init__(self, model, input_record, max_score=0, bucket_boundaries=None,
                  hash_buckets=True, weight_optim=None, name="bucket_weighted"):
-        super(BucketWeighted, self).__init__(model, name, input_record)
+        super(BucketWeighted, self).__init__(model,input_record,name)
 
         assert isinstance(input_record, schema.List), "Incorrect input type"
         self.bucket_boundaries = bucket_boundaries

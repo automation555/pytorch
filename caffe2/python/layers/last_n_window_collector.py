@@ -1,5 +1,9 @@
 ## @package last_n_window_collector
 # Module caffe2.python.layers.last_n_window_collector
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import ModelLayer
@@ -16,7 +20,7 @@ class LastNWindowCollector(ModelLayer):
     def __init__(self, model, input_record, num_to_collect,
                  name='last_n_window_collector', **kwargs):
         super(LastNWindowCollector, self).__init__(
-            model, name, input_record, **kwargs)
+            model, input_record, name, **kwargs)
         assert num_to_collect > 0
         self.num_to_collect = num_to_collect
         assert isinstance(input_record, schema.Scalar), \
@@ -37,7 +41,7 @@ class LastNWindowCollector(ModelLayer):
 
         self.mutex = self.create_param(
             param_name='mutex',
-            shape=[],
+            shape=None,
             initializer=('CreateMutex',),
             optimizer=model.NoOptim,
         )

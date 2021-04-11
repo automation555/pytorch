@@ -1,9 +1,9 @@
 # @package functional
 # Module caffe2.python.layers.functional
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema, scope, workspace
 from caffe2.python.layers.layers import (
@@ -11,6 +11,7 @@ from caffe2.python.layers.layers import (
 )
 import caffe2.proto.caffe2_pb2 as caffe2_pb2
 import numpy as np
+import six
 import logging
 
 logger = logging.getLogger(__name__)
@@ -25,12 +26,12 @@ class Functional(ModelLayer):
         # allow coercion
         input_record = schema.as_record(input_record)
 
-        super(Functional, self).__init__(model, name, input_record, tags=tags, **kwargs)
+        super(Functional, self).__init__(model, input_record, name, tags=tags, **kwargs)
         self._function = function
         self._kwargs = kwargs
         return_struct = (
             isinstance(output_names_or_num, list) or
-            (isinstance(output_names_or_num, int) and
+            (isinstance(output_names_or_num, six.integer_types) and
              output_names_or_num != 1)
         )
 

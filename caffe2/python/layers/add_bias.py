@@ -1,9 +1,9 @@
 ## @package add_bias
 # Module caffe2.python.layers.add_bias
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import ModelLayer
@@ -14,7 +14,7 @@ class AddBias(ModelLayer):
 
     def __init__(self, model, input_record, bias_init=None,
                  bias_optim=None, name='add_bias'):
-        super(AddBias, self).__init__(model, name, input_record)
+        super(AddBias, self).__init__(model,  input_record, name)
         assert isinstance(input_record, schema.Scalar), "Incorrect input type"
         assert len(input_record.field_type().shape) > 0, (
             "AddBias expects limited dimensions of the input tensor")

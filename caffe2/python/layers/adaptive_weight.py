@@ -1,6 +1,6 @@
 # @package adaptive_weight
 # Module caffe2.fb.python.layers.adaptive_weight
-
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import numpy as np
 from caffe2.python import core, schema
@@ -27,7 +27,7 @@ class AdaptiveWeight(ModelLayer):
         reg_lambda=0.1,
         **kwargs
     ):
-        super(AdaptiveWeight, self).__init__(model, name, input_record, **kwargs)
+        super(AdaptiveWeight, self).__init__(model,  input_record,name, **kwargs)
         self.output_schema = schema.Scalar(
             np.float32, self.get_next_blob_reference("adaptive_weight")
         )

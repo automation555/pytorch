@@ -1,9 +1,9 @@
 ## @package fc
 # Module caffe2.python.layers.fc
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python.helpers.arg_scope import get_current_scope
 from caffe2.python import schema
@@ -29,7 +29,7 @@ class FC(SamplingTrainableMixin, ModelLayer):
                  max_fc_size=None, axis=1, transposed=False,
                  uniform_weight_init_scale_numerator=1.0,
                  **kwargs):
-        super(FC, self).__init__(model, name, input_record, **kwargs)
+        super(FC, self).__init__(model, input_record, name, **kwargs)
         assert isinstance(input_record, schema.Scalar), (
             "Incorrect input type {}".format(input_record))
         assert len(input_record.field_types()[0].shape) > 0, (
