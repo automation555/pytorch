@@ -48,7 +48,7 @@ class MobileJob:
         if self.is_master_only:
             props_dict["filters"] = cimodel.data.simple.util.branch_filters.gen_filter_dict()
 
-        return [{"pytorch_linux_build": props_dict}]
+        return [{"pytorch_mobile_build": props_dict}]
 
 
 WORKFLOW_DATA = [
@@ -57,18 +57,17 @@ WORKFLOW_DATA = [
         [DOCKER_REQUIREMENT_ASAN],
         ["build"]
     ),
+    MobileJob(
+        DOCKER_IMAGE_ASAN,
+        [DOCKER_REQUIREMENT_ASAN],
+        ["custom", "build", "static"]
+    ),
 
     # Use LLVM-DEV toolchain in android-ndk-r19c docker image
     MobileJob(
         DOCKER_IMAGE_NDK,
         [DOCKER_REQUIREMENT_NDK],
         ["custom", "build", "dynamic"]
-    ),
-
-    MobileJob(
-        DOCKER_IMAGE_NDK,
-        [DOCKER_REQUIREMENT_NDK],
-        ["custom", "build", "static"]
     ),
 
     # Use LLVM-DEV toolchain in android-ndk-r19c docker image
