@@ -87,45 +87,6 @@ class C10_API Scalar {
   }
 
   Scalar operator-() const;
-  Scalar conj() const;
-  Scalar log() const;
-
-  template<typename T, typename std::enable_if<!c10::is_complex<T>::value, int>::type = 0>
-  bool equal(T num) const {
-    if (isComplex()) {
-      auto val = v.z;
-      return (val.real() == num) && (val.imag() == T());
-    } else if (isFloatingPoint()) {
-      return v.d == num;
-    } else if (isIntegral(/*includeBool=*/false)) {
-      return v.i == num;
-    } else {
-      // boolean scalar does not equal to a non boolean value
-      return false;
-    }
-  }
-
-  template<typename T, typename std::enable_if<c10::is_complex<T>::value, int>::type = 0>
-  bool equal(T num) const {
-    if (isComplex()) {
-      return v.z == num;
-    } else if (isFloatingPoint()) {
-      return (v.d == num.real()) && (num.imag() == T());
-    } else if (isIntegral(/*includeBool=*/false)) {
-      return (v.i == num.real()) && (num.imag() == T());
-    } else {
-      // boolean scalar does not equal to a non boolean value
-      return false;
-    }
-  }
-
-  bool equal(bool num) const {
-    if (isBoolean()) {
-      return static_cast<bool>(v.i) == num;
-    } else {
-      return false;
-    }
-  }
 
   ScalarType type() const {
     if (isComplex()) {
@@ -150,14 +111,14 @@ class C10_API Scalar {
     }
 
     template<typename T,
-             typename std::enable_if<!std::is_integral<T>::value && !c10::is_complex<T>::value, bool>::type* =
+             typename std::enable_if<!std::is_integral<T>::value && !c10::is_complex_t<T>::value, bool>::type* =
                  nullptr>
     Scalar(T vv, bool) : tag(Tag::HAS_d) {
       v.d = convert<decltype(v.d), T>(vv);
     }
 
     template<typename T,
-             typename std::enable_if<c10::is_complex<T>::value, bool>::type* =
+             typename std::enable_if<c10::is_complex_t<T>::value, bool>::type* =
                  nullptr>
     Scalar(T vv, bool) : tag(Tag::HAS_z) {
       v.z = convert<decltype(v.z), T>(vv);
