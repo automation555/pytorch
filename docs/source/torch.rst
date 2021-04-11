@@ -1,7 +1,7 @@
 torch
 =====
 The torch package contains data structures for multi-dimensional
-tensors and defines mathematical operations over these tensors.
+tensors and mathematical operations over these are defined.
 Additionally, it provides many utilities for efficient serializing of
 Tensors and arbitrary types, and other useful utilities.
 
@@ -31,7 +31,7 @@ Tensors
 .. _tensor-creation-ops:
 
 Creation Ops
-~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
     Random sampling creation ops are listed under :ref:`random-sampling` and
@@ -77,8 +77,6 @@ Creation Ops
     polar
     heaviside
 
-.. _indexing-slicing-joining:
-
 Indexing, Slicing, Joining, Mutating Ops
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. autosummary::
@@ -87,33 +85,27 @@ Indexing, Slicing, Joining, Mutating Ops
 
     cat
     chunk
-    column_stack
+    dsplit
     dstack
     gather
+    hsplit
     hstack
     index_select
     masked_select
     movedim
-    moveaxis
     narrow
     nonzero
     reshape
-    row_stack
-    scatter
-    scatter_add
     split
     squeeze
     stack
-    swapaxes
-    swapdims
     t
     take
-    take_along_dim
     tensor_split
-    tile
     transpose
     unbind
     unsqueeze
+    vsplit
     vstack
     where
 
@@ -288,7 +280,6 @@ Pointwise Ops
     clamp
     clip
     conj
-    copysign
     cos
     cosh
     deg2rad
@@ -301,17 +292,12 @@ Pointwise Ops
     exp
     exp2
     expm1
-    fake_quantize_per_channel_affine
-    fake_quantize_per_tensor_affine
     fix
-    float_power
     floor
     floor_divide
     fmod
     frac
-    frexp
     imag
-    ldexp
     lerp
     lgamma
     log
@@ -327,8 +313,6 @@ Pointwise Ops
     logit
     hypot
     i0
-    igamma
-    igammac
     mul
     multiply
     mvlgamma
@@ -346,10 +330,8 @@ Pointwise Ops
     rsqrt
     sigmoid
     sign
-    sgn
     signbit
     sin
-    sinc
     sinh
     sqrt
     square
@@ -359,7 +341,6 @@ Pointwise Ops
     tanh
     true_divide
     trunc
-    xlogy
 
 Reduction Ops
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -371,8 +352,6 @@ Reduction Ops
     argmin
     amax
     amin
-    all
-    any
     max
     min
     dist
@@ -423,13 +402,10 @@ Comparison Ops
     less
     maximum
     minimum
-    fmax
-    fmin
     ne
     not_equal
     sort
     topk
-    msort
 
 
 Spectral Ops
@@ -438,6 +414,10 @@ Spectral Ops
     :toctree: generated
     :nosignatures:
 
+    fft
+    ifft
+    rfft
+    irfft
     stft
     istft
     bartlett_window
@@ -460,8 +440,6 @@ Other Operations
     bincount
     block_diag
     broadcast_tensors
-    broadcast_to
-    broadcast_shapes
     bucketize
     cartesian_prod
     cdist
@@ -476,13 +454,11 @@ Other Operations
     diag_embed
     diagflat
     diagonal
-    diff
     einsum
     flatten
     flip
     fliplr
     flipud
-    kron
     rot90
     gcd
     histc
@@ -525,7 +501,6 @@ BLAS and LAPACK Operations
     eig
     geqrf
     ger
-    inner
     inverse
     det
     logdet
@@ -565,9 +540,7 @@ Utilities
     result_type
     can_cast
     promote_types
-    use_deterministic_algorithms
-    are_deterministic_algorithms_enabled
-    set_warn_always
-    is_warn_always_enabled
+    set_deterministic
+    is_deterministic
     vmap
-    _assert
+    Assert
