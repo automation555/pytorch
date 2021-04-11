@@ -6,6 +6,7 @@ def gen_docker_image(container_type):
         f"docker-{container_type}",
     )
 
+
 def gen_docker_image_requires(image_name):
     return [f"docker-{image_name}"]
 

@@ -6,7 +6,7 @@ import cimodel.data.dimensions as dimensions
 import cimodel.lib.conf_tree as conf_tree
 import cimodel.lib.miniutils as miniutils
 from cimodel.data.pytorch_build_data import CONFIG_TREE_DATA, TopLevelNode
-from cimodel.data.simple.util.branch_filters import gen_filter_dict, RC_PATTERN
+from cimodel.data.simple.util.branch_filters import gen_filter_dict
 from cimodel.data.simple.util.docker_constants import gen_docker_image
 
 
@@ -22,8 +22,7 @@ class Conf:
     #  tesnrorrt, leveldb, lmdb, redis, opencv, mkldnn, ideep, etc.
     # (from https://github.com/pytorch/pytorch/pull/17323#discussion_r259453608)
     is_xla: bool = False
-    is_vulkan: bool = False
-    is_pure_torch: bool = False
+    vulkan: bool = False
     restrict_phases: Optional[List[str]] = None
     gpu_resource: Optional[str] = None
     dependent_tests: List = field(default_factory=list)
@@ -34,7 +33,7 @@ class Conf:
 
     @staticmethod
     def is_test_phase(phase):
-        return "test" in phase
+        return phase in ["test", "test1", "test2"]
 
     # TODO: Eliminate the special casing for docker paths
     # In the short term, we *will* need to support special casing as docker images are merged for caffe2 and pytorch
@@ -47,12 +46,8 @@ class Conf:
         leading.append("pytorch")
         if self.is_xla and not for_docker:
             leading.append("xla")
-        if self.is_vulkan and not for_docker:
-            leading.append("vulkan")
         if self.is_libtorch and not for_docker:
             leading.append("libtorch")
-        if self.is_pure_torch and not for_docker:
-            leading.append("pure_torch")
         if self.parallel_backend is not None and not for_docker:
             leading.append(self.parallel_backend)
 
@@ -110,8 +105,6 @@ class Conf:
             parameters["resource_class"] = resource_class
         if phase == "build" and self.rocm_version is not None:
             parameters["resource_class"] = "xlarge"
-        if hasattr(self, 'filters'):
-            parameters['filters'] = self.filters
         return parameters
 
     def gen_workflow_job(self, phase):
@@ -141,16 +134,14 @@ class Conf:
 
 # TODO This is a hack to special case some configs just for the workflow list
 class HiddenConf(object):
-    def __init__(self, name, parent_build=None, filters=None):
+    def __init__(self, name, parent_build=None):
         self.name = name
         self.parent_build = parent_build
-        self.filters = filters
 
     def gen_workflow_job(self, phase):
         return {
             self.gen_build_name(phase): {
-                "requires": [self.parent_build.gen_build_name("build")],
-                "filters": self.filters,
+                "requires": [self.parent_build.gen_build_name("build")]
             }
         }
 
@@ -158,20 +149,17 @@ class HiddenConf(object):
         return self.name
 
 class DocPushConf(object):
-    def __init__(self, name, parent_build=None, branch="master"):
+    def __init__(self, name, parent_build=None):
         self.name = name
         self.parent_build = parent_build
-        self.branch = branch
 
     def gen_workflow_job(self, phase):
         return {
             "pytorch_doc_push": {
                 "name": self.name,
-                "branch": self.branch,
                 "requires": [self.parent_build],
                 "context": "org-member",
-                "filters": gen_filter_dict(branches_list=["nightly"],
-                                           tags_list=RC_PATTERN)
+                "filters": gen_filter_dict(branches_list=["nightly"])
             }
         }
 
@@ -191,12 +179,12 @@ def gen_dependent_configs(xenial_parent_config):
         c = Conf(
             xenial_parent_config.distro,
             ["py3"] + parms,
-            pyver=xenial_parent_config.pyver,
+            pyver="3.6",
             cuda_version=xenial_parent_config.cuda_version,
             restrict_phases=["test"],
             gpu_resource=gpu,
             parent_build=xenial_parent_config,
-            is_important=False,
+            is_important=xenial_parent_config.is_important,
         )
 
         configs.append(c)
@@ -207,44 +195,12 @@ def gen_dependent_configs(xenial_parent_config):
 def gen_docs_configs(xenial_parent_config):
     configs = []
 
-    configs.append(
-        HiddenConf(
-            "pytorch_python_doc_build",
-            parent_build=xenial_parent_config,
-            filters=gen_filter_dict(branches_list=r"/.*/",
-                                    tags_list=RC_PATTERN),
-        )
-    )
-    configs.append(
-        DocPushConf(
-            "pytorch_python_doc_push",
-            parent_build="pytorch_python_doc_build",
-            branch="site",
-        )
-    )
+    for x in ["pytorch_python_doc_build", "pytorch_cpp_doc_build"]:
+        conf = HiddenConf(x, parent_build=xenial_parent_config)
+        configs.append(conf)
+        configs.append(DocPushConf(x.replace("build", "push"), x))
 
-    configs.append(
-        HiddenConf(
-            "pytorch_cpp_doc_build",
-            parent_build=xenial_parent_config,
-            filters=gen_filter_dict(branches_list=r"/.*/",
-                                    tags_list=RC_PATTERN),
-        )
-    )
-    configs.append(
-        DocPushConf(
-            "pytorch_cpp_doc_push",
-            parent_build="pytorch_cpp_doc_build",
-            branch="master",
-        )
-    )
-
-    configs.append(
-        HiddenConf(
-            "pytorch_doc_test",
-            parent_build=xenial_parent_config
-        )
-    )
+    configs.append(HiddenConf("pytorch_doc_test", parent_build=xenial_parent_config))
     return configs
 
 
@@ -271,13 +227,11 @@ def instantiate_configs():
         compiler_name = fc.find_prop("compiler_name")
         compiler_version = fc.find_prop("compiler_version")
         is_xla = fc.find_prop("is_xla") or False
-        is_asan = fc.find_prop("is_asan") or False
-        is_coverage = fc.find_prop("is_coverage") or False
-        is_noarch = fc.find_prop("is_noarch") or False
-        is_onnx = fc.find_prop("is_onnx") or False
-        is_pure_torch = fc.find_prop("is_pure_torch") or False
-        is_vulkan = fc.find_prop("is_vulkan") or False
         parms_list_ignored_for_docker_image = []
+
+        vulkan = fc.find_prop("vulkan") or False
+        if vulkan:
+            parms_list_ignored_for_docker_image.append("vulkan")
 
         python_version = None
         if compiler_name == "cuda" or compiler_name == "android":
@@ -293,7 +247,7 @@ def instantiate_configs():
 
         elif compiler_name == "rocm":
             rocm_version = fc.find_prop("compiler_version")
-            restrict_phases = ["build", "test1", "test2", "caffe2_test"]
+            restrict_phases = ["build", "test1", "test2"]
 
         elif compiler_name == "android":
             android_ndk_version = fc.find_prop("compiler_version")
@@ -308,23 +262,12 @@ def instantiate_configs():
             gcc_version = compiler_name + (fc.find_prop("compiler_version") or "")
             parms_list.append(gcc_version)
 
-        if is_asan:
-            parms_list.append("asan")
-            python_version = fc.find_prop("pyver")
-            parms_list[0] = fc.find_prop("abbreviated_pyver")
-
-        if is_coverage:
-            parms_list_ignored_for_docker_image.append("coverage")
-            python_version = fc.find_prop("pyver")
-
-        if is_noarch:
-            parms_list_ignored_for_docker_image.append("noarch")
-
-        if is_onnx:
-            parms_list.append("onnx")
-            python_version = fc.find_prop("pyver")
-            parms_list[0] = fc.find_prop("abbreviated_pyver")
-            restrict_phases = ["build", "ort_test1", "ort_test2"]
+            # TODO: This is a nasty special case
+            if gcc_version == "clang5" and not is_xla:
+                parms_list.append("asan")
+                python_version = fc.find_prop("pyver")
+                parms_list[0] = fc.find_prop("abbreviated_pyver")
+                restrict_phases = ["build", "test1", "test2"]
 
         if cuda_version:
             cuda_gcc_version = fc.find_prop("cuda_gcc_override") or "gcc7"
@@ -334,12 +277,7 @@ def instantiate_configs():
         is_important = fc.find_prop("is_important") or False
         parallel_backend = fc.find_prop("parallel_backend") or None
         build_only = fc.find_prop("build_only") or False
-        shard_test = fc.find_prop("shard_test") or False
-        # TODO: fix pure_torch python test packaging issue.
-        if shard_test:
-            restrict_phases = ["build"] if restrict_phases is None else restrict_phases
-            restrict_phases.extend(["test1", "test2"])
-        if build_only or is_pure_torch:
+        if build_only and restrict_phases is None:
             restrict_phases = ["build"]
 
         gpu_resource = None
@@ -354,8 +292,7 @@ def instantiate_configs():
             cuda_version,
             rocm_version,
             is_xla,
-            is_vulkan,
-            is_pure_torch,
+            vulkan,
             restrict_phases,
             gpu_resource,
             is_libtorch=is_libtorch,
@@ -365,31 +302,23 @@ def instantiate_configs():
 
         # run docs builds on "pytorch-linux-xenial-py3.6-gcc5.4". Docs builds
         # should run on a CPU-only build that runs on all PRs.
-        # XXX should this be updated to a more modern build? Projects are
-        #     beginning to drop python3.6
         if (
             distro_name == "xenial"
             and fc.find_prop("pyver") == "3.6"
             and cuda_version is None
             and parallel_backend is None
-            and not is_vulkan
-            and not is_pure_torch
             and compiler_name == "gcc"
             and fc.find_prop("compiler_version") == "5.4"
         ):
-            c.filters = gen_filter_dict(branches_list=r"/.*/",
-                                        tags_list=RC_PATTERN)
             c.dependent_tests = gen_docs_configs(c)
 
-        if cuda_version == "10.2" and python_version == "3.6" and not is_libtorch:
+        if cuda_version == "10.1" and python_version == "3.6" and not is_libtorch:
             c.dependent_tests = gen_dependent_configs(c)
 
         if (
             compiler_name == "gcc"
             and compiler_version == "5.4"
             and not is_libtorch
-            and not is_vulkan
-            and not is_pure_torch
             and parallel_backend is None
         ):
             bc_breaking_check = Conf(
