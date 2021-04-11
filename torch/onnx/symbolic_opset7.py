@@ -1,5 +1,4 @@
-from torch.onnx.symbolic_helper import _block_list_in_opset, parse_args
-import torch.onnx.symbolic_helper as sym_help
+from torch.onnx.symbolic_helper import _block_list_in_opset
 
 import torch.onnx.symbolic_opset9 as sym_opset9
 
@@ -16,7 +15,7 @@ import warnings
 #   MaxPool: added optional indices output.
 #   Scan
 
-block_listed_operators = [
+black_listed_operators = [
     "scan", "expand", "expand_as", "meshgrid",
     "adaptive_max_pool1d", "adaptive_max_pool2d", "adaptive_max_pool3d",
     "max_pool1d_with_indices", "max_pool2d_with_indices", "max_pool3d_with_indices"
@@ -44,28 +43,5 @@ def min(g, self, dim_or_y=None, keepdim=None):
     return sym_opset9.min(g, self, dim_or_y, keepdim)
 
 
-def div(g, self, other, *args):
-    if len(args) == 0:
-        return sym_opset9.true_divide(g, self, other)
-    else:
-        return _div_rounding_mode(g, self, other, *args)
-
-
-@parse_args('v', 'v', 's')
-def _div_rounding_mode(g, self, other, rounding_mode):
-    if rounding_mode == 'floor':
-        return _floor_divide(g, self, other)
-    else:
-        return sym_opset9._div_rounding_mode(g, self, other, rounding_mode)
-
-
-def _floor_divide(g, self, other):
-    if sym_help._is_fp(self) or sym_help._is_fp(other):
-        out = sym_opset9.true_divide(g, self, other)
-        return g.op('Floor', out)
-    else:
-        raise RuntimeError('Integer floor division requires ONNX opset 9 or greater')
-
-
-for block_listed_op in block_listed_operators:
-    vars()[block_listed_op] = _block_list_in_opset(block_listed_op)
+for black_listed_op in black_listed_operators:
+    vars()[black_listed_op] = _block_list_in_opset(black_listed_op)
