@@ -7,14 +7,15 @@
 #include <unistd.h>
 
 #include <c10d/ProcessGroupMPI.hpp>
+#include <gtest/gtest.h>
 
 #define STR_HELPER(x) #x
 #define STR(x) STR_HELPER(x)
 
 // Wait for work to complete
 void waitWork(
-    c10::intrusive_ptr<::c10d::ProcessGroupMPI> pg,
-    std::vector<c10::intrusive_ptr<c10d::ProcessGroup::Work>> works) {
+    std::shared_ptr<c10d::ProcessGroupMPI> pg,
+    std::vector<std::shared_ptr<c10d::ProcessGroup::Work>> works) {
   for (auto& work : works) {
     try {
       work->wait();
@@ -34,11 +35,10 @@ void testAllreduce(int iter = 1000) {
     allTensors[i] = std::vector<at::Tensor>({tensor});
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (auto& tensors : allTensors) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
-        pg->allreduce(tensors);
+    std::shared_ptr<::c10d::ProcessGroup::Work> work = pg->allreduce(tensors);
     works.push_back(std::move(work));
   }
 
@@ -50,10 +50,11 @@ void testAllreduce(int iter = 1000) {
   // Verify outputs
   for (int i = 0; i < iter; ++i) {
     const auto expected = worldSize * i;
-    auto data = allTensors[i][0].data_ptr<float>();
+    auto data = allTensors[i][0].data<float>();
     for (auto j = 0; j < allTensors[i][0].numel(); ++j) {
       if (data[j] != expected) {
-        throw std::runtime_error("BOOM!");
+        EXPECT_EQ(data[j], expected)
+            << "Allreduce ouputs do not match expected outputs";
       }
     }
   }
@@ -74,11 +75,10 @@ void testBroadcast(int iter = 10000) {
     }
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (auto& tensors : allTensors) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
-        pg->broadcast(tensors);
+    std::shared_ptr<::c10d::ProcessGroup::Work> work = pg->broadcast(tensors);
     works.push_back(std::move(work));
   }
 
@@ -87,10 +87,11 @@ void testBroadcast(int iter = 10000) {
   // Verify outputs
   for (int i = 0; i < iter; ++i) {
     const auto expected = i;
-    auto data = allTensors[i][0].data_ptr<float>();
+    auto data = allTensors[i][0].data<float>();
     for (auto j = 0; j < allTensors[i][0].numel(); ++j) {
       if (data[j] != expected) {
-        throw std::runtime_error("BOOM!");
+        EXPECT_EQ(data[j], expected)
+            << "Broadcast ouputs do not match expected outputs";
       }
     }
   }
@@ -106,10 +107,10 @@ void testReduce(int iter = 10000) {
     allTensors[i] = std::vector<at::Tensor>({tensor});
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (auto& tensors : allTensors) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work = pg->reduce(tensors);
+    std::shared_ptr<::c10d::ProcessGroup::Work> work = pg->reduce(tensors);
     works.push_back(std::move(work));
   }
 
@@ -122,10 +123,11 @@ void testReduce(int iter = 10000) {
     // Verify outputs
     for (int i = 0; i < iter; ++i) {
       const auto expected = worldSize * i;
-      auto data = allTensors[i][0].data_ptr<float>();
+      auto data = allTensors[i][0].data<float>();
       for (auto j = 0; j < allTensors[i][0].numel(); ++j) {
         if (data[j] != expected) {
-          throw std::runtime_error("BOOM!");
+          EXPECT_EQ(data[j], expected)
+              << "Reduce ouputs do not match expected outputs";
         }
       }
     }
@@ -152,10 +154,10 @@ void testAllgather(int iter = 10000) {
     }
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (size_t i = 0; i < allTensors.size(); ++i) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+    std::shared_ptr<::c10d::ProcessGroup::Work> work =
         pg->allgather(allOutputTensors[i], allTensors[i]);
     works.push_back(std::move(work));
   }
@@ -166,10 +168,11 @@ void testAllgather(int iter = 10000) {
   for (int i = 0; i < iter; ++i) {
     for (int j = 0; j < worldSize; ++j) {
       const auto expected = i * j;
-      auto data = allOutputTensors[i][0][j].data_ptr<float>();
+      auto data = allOutputTensors[i][0][j].data<float>();
       for (auto k = 0; k < allOutputTensors[i][0][j].numel(); ++k) {
         if (data[k] != expected) {
-          throw std::runtime_error("BOOM!");
+          EXPECT_EQ(data[k], expected)
+              << "Allgather ouputs do not match expected outputs";
         }
       }
     }
@@ -200,10 +203,10 @@ void testGather(int iter = 10000) {
     }
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (size_t i = 0; i < allTensors.size(); ++i) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+    std::shared_ptr<::c10d::ProcessGroup::Work> work =
         pg->gather(allOutputTensors[i], allTensors[i]);
     works.push_back(std::move(work));
   }
@@ -215,10 +218,11 @@ void testGather(int iter = 10000) {
     for (int i = 0; i < iter; ++i) {
       for (int j = 0; j < worldSize; ++j) {
         const auto expected = i * j;
-        auto data = allOutputTensors[i][0][j].data_ptr<float>();
+        auto data = allOutputTensors[i][0][j].data<float>();
         for (auto k = 0; k < allOutputTensors[i][0][j].numel(); ++k) {
           if (data[k] != expected) {
-            throw std::runtime_error("BOOM!");
+            EXPECT_EQ(data[k], expected)
+                << "Gather ouputs do not match expected outputs";
           }
         }
       }
@@ -251,10 +255,10 @@ void testScatter(int iter = 1) {
     }
   }
 
-  std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+  std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
   for (size_t i = 0; i < allTensors.size(); ++i) {
     // Kick off work
-    c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+    std::shared_ptr<::c10d::ProcessGroup::Work> work =
         pg->scatter(allTensors[i], allInputTensors[i]);
     works.push_back(std::move(work));
   }
@@ -265,10 +269,11 @@ void testScatter(int iter = 1) {
   for (int i = 0; i < iter; ++i) {
     for (int j = 0; j < worldSize; ++j) {
       const auto expected = i * j;
-      auto data = allTensors[i][0].data_ptr<float>();
+      auto data = allTensors[i][0].data<float>();
       for (auto k = 0; k < allTensors[i][0].numel(); ++k) {
         if (data[k] != expected) {
-          throw std::runtime_error("BOOM!");
+          EXPECT_EQ(data[k], expected)
+              << "Scatter ouputs do not match expected outputs";
         }
       }
     }
@@ -291,27 +296,27 @@ void testSendRecv(bool recvAnysource, int iter = 10000) {
   }
 
   if (rank == 0) {
-    std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+    std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
     for (auto& tensors : allTensors) {
       // Kick off work
-      c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+      std::shared_ptr<::c10d::ProcessGroup::Work> work =
           pg->send(tensors, 1, 0);
       works.push_back(std::move(work));
     }
     waitWork(pg, works);
   }
   if (rank == 1) {
-    std::vector<c10::intrusive_ptr<::c10d::ProcessGroup::Work>> works;
+    std::vector<std::shared_ptr<::c10d::ProcessGroup::Work>> works;
     std::vector<int> srcRanks(allTensors.size(), -1);
     size_t i = 0;
     for (auto& tensors : allTensors) {
       // Kick off work
       if (!recvAnysource) {
-        c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+        std::shared_ptr<::c10d::ProcessGroup::Work> work =
             pg->recv(tensors, 0, 0);
         works.push_back(std::move(work));
       } else {
-        c10::intrusive_ptr<::c10d::ProcessGroup::Work> work =
+        std::shared_ptr<::c10d::ProcessGroup::Work> work =
             pg->recvAnysource(tensors, 0);
         works.push_back(std::move(work));
       }
@@ -324,44 +329,91 @@ void testSendRecv(bool recvAnysource, int iter = 10000) {
         throw std::runtime_error("src rank is wrong for recvAnysource");
       }
       const auto expected = i;
-      auto data = allTensors[i][0].data_ptr<float>();
+      auto data = allTensors[i][0].data<float>();
       for (auto j = 0; j < allTensors[i][0].numel(); ++j) {
         if (data[j] != expected) {
-          throw std::runtime_error("BOOM!");
+          EXPECT_EQ(data[j], expected)
+              << "SendRecv ouputs do not match expected outputs";
         }
       }
     }
   }
 }
 
-void testBackendName() {
-  auto pg = c10d::ProcessGroupMPI::createProcessGroupMPI();
-  if (pg->getBackendName() != std::string(c10d::MPI_BACKEND_NAME)) {
-    throw std::runtime_error("BOOM!");
+class ProcessGroupMPITest : public ::testing::Test {
+ protected:
+  void SetUp() override {
+#ifdef MPIEXEC
+    // If we are within an openmpi mpirun, then skip the exec
+    if (!std::getenv("OMPI_COMM_WORLD_SIZE")) {
+      LOG(INFO) << "Execute mpiexec from: " << STR(MPIEXEC);
+      execl(STR(MPIEXEC), "-np 2", argv[0], (char*)nullptr);
+    }
+#endif
   }
+
+  bool skipTest() {
+#ifdef MPIEXEC
+    return false;
+#else
+    LOG(INFO) << "MPI executable not found, skipping test";
+    return true;
+#endif
+  }
+};
+
+TEST_F(ProcessGroupMPITest, testAllreduce) {
+  if (skipTest()) {
+    return;
+  }
+  testAllreduce();
 }
 
-int main(int argc, char** argv) {
-#ifdef MPIEXEC
-  // If we are within an openmpi mpirun, then skip the exec
-  if (!std::getenv("OMPI_COMM_WORLD_SIZE")) {
-    std::cout << "Execute mpiexec from: " << STR(MPIEXEC) << std::endl;
-    execl(STR(MPIEXEC), "-np 2", argv[0], (char*)nullptr);
+TEST_F(ProcessGroupMPITest, testBroadcast) {
+  if (skipTest()) {
+    return;
   }
-
-  testAllreduce();
   testBroadcast();
-  testReduce();
-  testAllgather();
-  testGather();
-  testScatter();
-  testSendRecv(false);
-  testSendRecv(true);
-  testBackendName();
+}
 
-  std::cout << "Test successful" << std::endl;
-#else
-  std::cout << "MPI executable not found, skipping test" << std::endl;
-#endif
-  return EXIT_SUCCESS;
+TEST_F(ProcessGroupMPITest, testReduce) {
+  if (skipTest()) {
+    return;
+  }
+  testReduce();
+}
+
+TEST_F(ProcessGroupMPITest, testAllgather) {
+  if (skipTest()) {
+    return;
+  }
+  testAllgather();
+}
+
+TEST_F(ProcessGroupMPITest, testGather) {
+  if (skipTest()) {
+    return;
+  }
+  testGather();
+}
+
+TEST_F(ProcessGroupMPITest, testScatter) {
+  if (skipTest()) {
+    return;
+  }
+  testScatter();
+}
+
+TEST_F(ProcessGroupMPITest, testSendRecv) {
+  if (skipTest()) {
+    return;
+  }
+  testSendRecv(false);
+}
+
+TEST_F(ProcessGroupMPITest, testSendRecvAnySrc) {
+  if (skipTest()) {
+    return;
+  }
+  testSendRecv(true);
 }
