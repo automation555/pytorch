@@ -1,5 +1,4 @@
 import torch
-from . import _functional as F
 from .optimizer import Optimizer
 
 
@@ -9,7 +8,7 @@ class Adagrad(Optimizer):
     It has been proposed in `Adaptive Subgradient Methods for Online Learning
     and Stochastic Optimization`_.
 
-    Args:
+    Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
         lr (float, optional): learning rate (default: 1e-2)
@@ -50,43 +49,36 @@ class Adagrad(Optimizer):
                 state = self.state[p]
                 state['sum'].share_memory_()
 
-    @torch.no_grad()
-    def step(self, closure=None):
-        """Performs a single optimization step.
+    def get_update(self, p, state, group):
+        grad = p.grad
 
-        Args:
-            closure (callable, optional): A closure that reevaluates the model
-                and returns the loss.
-        """
-        loss = None
-        if closure is not None:
-            with torch.enable_grad():
-                loss = closure()
+        if group['weight_decay'] != 0:
+            grad = grad.add(p, alpha=group['weight_decay'])
 
-        for group in self.param_groups:
-            params_with_grad = []
-            grads = []
-            state_sums = []
-            state_steps = []
+        c = 1 + state['step'] * group['lr_decay']
+        state['step'] += 1
+        state['sum'].addcmul_(grad, grad, value=1)
+        std = state['sum'].sqrt().add_(group['eps'])
+        return grad.div_(std) / c
 
-            for p in group['params']:
-                if p.grad is not None:
-                    params_with_grad.append(p)
-                    grads.append(p.grad)
-                    state = self.state[p]
-                    state_sums.append(state['sum'])
-                    # update the steps for each param group update
-                    state['step'] += 1
-                    # record the step after step update
-                    state_steps.append(state['step'])
+    def get_sparse_update(self, p, state, group):
+        if group['weight_decay'] != 0:
+            raise RuntimeError("weight_decay option is not compatible with sparse gradients")
 
-            F.adagrad(params_with_grad,
-                      grads,
-                      state_sums,
-                      state_steps,
-                      group['lr'],
-                      group['weight_decay'],
-                      group['lr_decay'],
-                      group['eps'])
+        grad = p.grad.coalesce()  # the update is non-linear so indices must be unique
+        grad_indices = grad._indices()
+        grad_values = grad._values()
+        size = grad.size()
 
-        return loss
+        def make_sparse(values):
+            constructor = grad.new
+            if grad_indices.dim() == 0 or values.dim() == 0:
+                return constructor().resize_as_(grad)
+            return constructor(grad_indices, values, size)
+
+        c = 1 + state['step'] * group['lr_decay']
+        state['step'] += 1
+        state['sum'].add_(make_sparse(grad_values.pow(2)))
+        std = state['sum'].sparse_mask(grad)
+        std_values = std._values().sqrt_().add_(group['eps'])
+        return make_sparse(grad_values / std_values) / c
