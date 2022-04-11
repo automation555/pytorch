@@ -1,3 +1,8 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 import numpy as np
 import caffe2.python.fakelowp.init_shared_libs  # noqa
 from caffe2.proto import caffe2_pb2
@@ -8,7 +13,6 @@ from caffe2.python.fakelowp.test_utils import print_test_debug_info
 from hypothesis import given, settings
 from hypothesis import strategies as st
 import caffe2.python.serialized_test.serialized_test_util as serial
-import datetime
 
 core.GlobalInit(["caffe2",
                  "--glow_global_fp16=1",
@@ -26,7 +30,7 @@ class LayerNorm(serial.SerializedTestCase):
            size=st.integers(min_value=2, max_value=128),
            epsilon=st.floats(min_value=1e-4, max_value=1e-3),
            elementwise_affine=st.booleans())
-    @settings(deadline=datetime.timedelta(seconds=10))
+    @settings(max_examples=100, deadline=None)
     def test_layernorm(self, seed, batch_size, size, epsilon, elementwise_affine):
         np.random.seed(seed)
         # Reset the workspace
@@ -140,11 +144,9 @@ class LayerNorm(serial.SerializedTestCase):
            size=st.integers(min_value=2, max_value=128),
            epsilon=st.floats(min_value=1e-4, max_value=1e-3),
            elementwise_affine=st.booleans())
-    @settings(deadline=datetime.timedelta(seconds=10))
-    # re-enable when T74553975 gets fixed
+    @settings(max_examples=100, deadline=None)
     def test_fused_ln_quantize(self, seed, batch_size, size, epsilon, elementwise_affine):
         np.random.seed(seed)
-
         # Reset the workspace
         workspace.ResetWorkspace()
         axis = 1
@@ -153,7 +155,6 @@ class LayerNorm(serial.SerializedTestCase):
         X = np.random.uniform(size=dims).astype(np.float32) - 0.5
         gamma = np.random.randn(*X.shape[axis:]).astype(np.float32)
         beta = np.random.randn(*X.shape[axis:]).astype(np.float32)
-
         Y = self._layernorm_transform(X)
         scale, zp = self._get_scale_zp(Y)
 
@@ -176,21 +177,23 @@ class LayerNorm(serial.SerializedTestCase):
                 "Int8Quantize", ["Y"], ["Y_q"], Y_scale=scale, Y_zero_point=zp
             )
         )
-
-        print(pred_net)
         pred_net_ref = caffe2_pb2.NetDef()
         pred_net_ref.name = "pred_ref"
         pred_net_ref.external_input.extend(["X", "gamma", "beta"])
-        pred_net_ref.external_output.extend(["Y_q"])
+        pred_net_ref.external_output.extend(["Y", "mean", "rstd"])
         pred_net_ref.op.add().CopyFrom(
             core.CreateOperator(
-                "LayerNormInt8QuantizeFakeNNPI",
+                "LayerNormFakeFP16NNPI",
                 ["X", "gamma", "beta"] if elementwise_affine else ["X"],
-                ["Y_q", "mean", "rstd"],
+                ["Y", "mean", "rstd"],
                 axis=axis,
                 epsilon=epsilon,
-                elementwise_affine=elementwise_affine,
-                Y_scale=scale, Y_zero_point=zp
+                elementwise_affine=elementwise_affine
+            )
+        )
+        pred_net_ref.op.add().CopyFrom(
+            core.CreateOperator(
+                "Int8QuantizeNNPI", ["Y"], ["Y_q"], Y_scale=scale, Y_zero_point=zp
             )
         )
         shape_hits = {"X": X.shape, "gamma": gamma.shape, "beta": beta.shape}
@@ -215,12 +218,15 @@ class LayerNorm(serial.SerializedTestCase):
         workspace.RunNet(pred_net_ref.name)
         Y_c2 = workspace.FetchInt8Blob("Y_q")
 
+        dims1 = np.array(([1, *dims]))
+        X_glow = X.reshape(dims1)
+        workspace.FeedBlob("X", X_glow)
+
         workspace.RunNet(pred_net_onnxified.name)
         Y_glow = workspace.FetchInt8Blob("Y_q")
 
-        if not np.allclose(Y_glow.data, Y_c2.data) or \
-           Y_glow.scale != Y_c2.scale or Y_glow.zero_point != Y_c2.zero_point:
-            diff_Y = np.abs(Y_glow.data.astype(np.float32) - Y_c2.data.astype(np.float32))
+        if not np.allclose(Y_glow, Y_c2):
+            diff_Y = np.abs(Y_glow - Y_c2)
             print_test_debug_info(
                 "layernorm",
                 {
