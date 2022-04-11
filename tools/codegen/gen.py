@@ -124,8 +124,8 @@ def static_dispatch_extra_headers(backend: Optional[DispatchKey]) -> str:
         return ''
     return f"""
 #include <ATen/{backend}Functions.h>
-#include <ATen/CompositeExplicitAutogradFunctions.h>
-#include <ATen/CompositeImplicitAutogradFunctions.h>
+#include <ATen/DefaultBackendFunctions.h>
+#include <ATen/MathFunctions.h>
 """
 
 def static_dispatch(
@@ -147,7 +147,7 @@ def static_dispatch(
         # migrate math/default_backend ops to use structured delegate.
         return f'return at::{backend.lower()}::{name}({exprs_str});'
 
-    for dispatch_key in (backend, DispatchKey.CompositeExplicitAutograd, DispatchKey.CompositeImplicitAutograd):
+    for dispatch_key in (backend, DispatchKey.DefaultBackend, DispatchKey.Math):
         if dispatch_key in f.dispatch:
             return f'return at::{dispatch_key.lower()}::{name}({exprs_str});'
 
@@ -319,10 +319,65 @@ class ComputeTensorMethod:
 def compute_aten_op(f: NativeFunction) -> str:
     return f'{{"aten::{f.func.name.name}", "{f.func.name.overload_name}"}},'
 
+# Generates NativeFunctions.h, a list of forward declarations of all
+# actual kernel definitions we keep in aten/src/ATen/native/
+@with_native_function
+def compute_native_function_declaration(g: Union[StructuredNativeFunctions, NativeFunction]) -> List[str]:
+    if isinstance(g, StructuredNativeFunctions):
+        # only out has dispatch
+        meta_name = meta.name(g)
+        rs = []
+        seen: Set[Any] = set()
+        out_args = structured.impl_arguments(g)
+        for k, n in g.out.dispatch.items():
+            if n in seen:
+                continue
+            if not is_structured_dispatch_key(k):
+                continue
+            seen.add(n)
+            rs.append(f"""\
+struct TORCH_API structured_{n} : public at::meta::{meta_name} {{
+    void impl({', '.join(a.decl() for a in out_args)});
+}};
+""")
+
+        seen = set()
+        for f in g.functions():
+            returns_type = native.returns_type(f.func.returns)
+            args = native.arguments(f.func)
+            for k, n in f.dispatch.items():
+                if n in seen:
+                    continue
+                if is_structured_dispatch_key(k):
+                    continue
+                seen.add(n)
+                args_str = ', '.join(a.decl() for a in args)
+                rs.append(f"TORCH_API {returns_type} {n}({args_str});")
+
+        return rs
+
+    else:
+        f = g
+        ns = list(f.dispatch.values())
+
+        rs = []
+        # Sometimes a function name shows up multiple times; only generate
+        # it once!
+        seen = set()
+        for n in ns:
+            if n in seen:
+                continue
+            if "legacy::" in n:
+                continue
+            seen.add(n)
+            returns_type = native.returns_type(f.func.returns)
+            args = native.arguments(f.func)
+            rs.append(f"TORCH_API {returns_type} {n}({', '.join(a.decl() for a in args)});")
+
+        return rs
+
 # Generates MetaFunctions.h
-def compute_meta_function_declaration(g: NativeFunctionsGroup) -> Optional[str]:
-    if not g.structured:
-        return None
+def compute_meta_function_declaration(g: StructuredNativeFunctions) -> str:
     with native_function_manager(g.out):
         name = meta.name(g)
         args = structured.meta_arguments(g)
@@ -335,6 +390,147 @@ struct TORCH_API {name} : public {parent_class} {{
     void meta({args_str});
 }};
 """
+
+refactor_count = 0
+
+@with_native_function
+def compute_out_convention_refactor(g: Union[StructuredNativeFunctions, NativeFunction]) -> List[str]:
+    if isinstance(g, StructuredNativeFunctions) or local.use_c10_dispatcher() is UseC10Dispatcher.full:
+        return []
+
+    returns_type = native.returns_type(g.func.returns)
+    args = native.arguments(g.func)
+
+    has_tensor_option = False
+    for arg in args:
+        # TensorOptions
+        if isinstance(arg.argument, TensorOptionsArguments):
+            has_tensor_option = True
+            break
+
+    if not has_tensor_option:
+        return []
+
+    if g.func.is_out_fn():
+        # don't want to handle out case
+        print('quit because of out_fn')
+        return []
+
+    for arg in args:
+        # Alternative way would be to see if a.argument.type is an OptionalType and under the hood is a Tensor type??
+        # String matching seems to be easier
+        if isinstance(arg.argument, Argument) and 'Tensor?' in str(arg.argument.type):
+            print('quit because of ', arg.argument)
+            return []
+
+    global refactor_count
+    refactor_count += 1
+    if refactor_count > 10000:
+        return []
+
+    f = g
+    ns = list(f.dispatch.values())
+
+    rs = []
+    # Sometimes a function name shows up multiple times; only generate
+    # it once!
+    seen = set()
+    for n in ns:
+        if n in seen:
+            continue
+
+        if "legacy::" in n:
+            continue
+
+        seen.add(n)
+
+        opt_tensor_index = []
+
+        method_match = "[\s&\*]+"        # avoid wilden match (e.g. 'add' may match 'mul_add')
+        method_match += re.escape(n)     # do we really need to escape method name??
+        method_match += '\\s*\\('        # match spaces/enter, until seeing (
+        # create capture group
+        method_match = '(' + method_match + ')'     
+
+        params_match = ''
+
+        output_header_pattern = '${1}'       # append method name in output
+        tensor_option_gid = None
+
+        for i in range(len(args)):
+            arg = args[i]
+
+            # pre_name: spaces/enter + type + spaces/enter
+            pre_name_match = re.escape(arg.type) 
+            if pre_name_match in ['bool', 'int64_t', 'c10::optional<int64_t>', 'c10::optional<bool>']:
+                pre_name_match = '(?:const\\s*)?' + pre_name_match
+            pre_name_match = pre_name_match.replace("\\&", "&")                              # Don't need to escape &  
+            pre_name_match = pre_name_match.replace("\\ ", "\\s*")                           # match any whitespaces                             
+            pre_name_match = pre_name_match.replace('Tensor', '(?:Tensor|SparseTensor)')
+            pre_name_match = pre_name_match.replace('c10::optional', '(?:c10::)?optional')
+            pre_name_match = pre_name_match.replace('MemoryFormat', '(?:c10::)?MemoryFormat')
+            pre_name_match = pre_name_match.replace('std::array<bool,', 'std::array<bool\\s*,\\s*')
+            pre_name_match = '(' + '\\s*' + pre_name_match + '\\s*)'
+
+            # name
+            name_match = '(\\w*)'
+
+            # post_name: space/enter, followed by either , or )
+            if i == len(args) - 1:
+                post_name_match = '[^,)]*'   # excluding ',' in this case as well in case the method contains more parameters...
+                post_name_match += '\\)\\s*\\{'    # since in this use case we don't need to reorder parameters, just match the ) and { for conveneience
+                post_name_match = '(' + post_name_match + ')' # construct capture group
+            else:
+                post_name_match = '([^,]*,)'  
+            
+            # Construct everything together for this argument
+            params_match += pre_name_match + name_match + post_name_match
+
+            if isinstance(arg.argument, TensorOptionsArguments):
+                tensor_option_gid = 3 * i + 3
+                # in output, append variable name with '_opt'
+                output_header_pattern += f"""
+    c10::optional<ScalarType> dtype,
+    c10::optional<Layout> layout,
+    c10::optional<Device> device,
+    c10::optional<bool> pin_memory${{{3 * i + 4}}}"""
+#                output_header_pattern += ' %s ${%d}_opt${%d}' % ("const c10::optional<Tensor>&", 3 * i + 3, 3 * i + 4)
+#                output_body_pattern += '  const Tensor& ${%d} = c10::value_or_else(${%d}_opt, [] {return Tensor();});\n' % (3 * i + 3, 3 * i + 3)
+            else:
+                output_header_pattern += '${%d}${%d}${%d}' % (3 * i + 2, 3 * i + 3, 3 * i + 4)
+
+
+        if tensor_option_gid is None:
+            print('Error!!!!!!!!!!')
+        output_body = f"""
+  // See [Note: hacky wrapper removal for TensorOptions]
+  TensorOptions ${{{tensor_option_gid}}} = TensorOptions()
+      .dtype(dtype)
+      .layout(layout)
+      .device(device)
+      .pinned_memory(pin_memory);
+"""
+
+        rs.append(f"""\
+    
+    {g.loc}
+    fastmod '{method_match}{params_match}' '{output_header_pattern}{output_body}' aten/src/ATen/native
+""")
+
+
+    return rs
+
+
+
+"""
+        current_signature = "([\s&\*]+{}\\s*\\()([^T(){{}}]*Tensor\s*&[^,]*),\\s*({}[^,)]*)\\)(\\s*\\{{)".format(
+#                re.escape(returns_type).replace("\\&", "&").replace("\\ ", "\\s*"),
+            re.escape(n),
+            "[^,]*,\\s*".join(re.escape(a.type).replace("\\&", "&").replace("\\ ", "\\s*") for a in args[1:])
+#                "\\s*,\\s*".join(re.escape(a.no_default().decl()).replace("\\ ", "\\s*") for a in args)
+        )
+"""
+
 
 # Generates RegisterBackendSelect.cpp, a series of kernels which provide
 # specialized computation of dispatch key for operator signatures which cannot
@@ -634,7 +830,7 @@ def compute_declaration_yaml(f: NativeFunction) -> object:
         ('device_guard', f.device_guard),
         ('with_gil', False),
         ('deprecated', False),
-        ('has_math_kernel', DispatchKey.CompositeImplicitAutograd in f.dispatch),
+        ('has_math_kernel', DispatchKey.Math in f.dispatch),
     ])
 
 @with_native_function
@@ -646,7 +842,7 @@ def compute_registration_declarations(f: NativeFunction) -> str:
     comment_data : Dict[str, str] = {
         'schema': f'aten::{f.func}',
         # TODO: What exactly is the semantics of the 'dispatch' field?
-        'dispatch': str(f.dispatch.keys() != {DispatchKey.CompositeImplicitAutograd}),
+        'dispatch': str(f.dispatch.keys() != {DispatchKey.Math}),
         'default': str(any(is_generic_dispatch_key(k) for k in f.dispatch))
     }
     return f"""{returns_type} {name}({args_str}); // {json.dumps(comment_data)}
@@ -809,8 +1005,8 @@ def main() -> None:
         assert f.func.kind() not in d
         d[f.func.kind()] = f
 
-    def flatten_pre_group(d: Dict[SchemaKind, NativeFunction]) -> Sequence[Union[NativeFunction, NativeFunctionsGroup]]:
-        r = NativeFunctionsGroup.from_dict(d)
+    def flatten_pre_group(d: Dict[SchemaKind, NativeFunction]) -> Sequence[Union[NativeFunction, StructuredNativeFunctions]]:
+        r = StructuredNativeFunctions.from_dict(d)
         if r is None:
             return list(d.values())
         else:
@@ -818,7 +1014,7 @@ def main() -> None:
 
     # TODO: how come ValuesView isn't a Sequence lol
     grouped_native_functions = list(concatMap(flatten_pre_group, list(pre_grouped_native_functions.values())))
-    structured_native_functions = [g for g in grouped_native_functions if isinstance(g, NativeFunctionsGroup)]
+    structured_native_functions = [g for g in grouped_native_functions if isinstance(g, StructuredNativeFunctions)]
 
     template_dir = os.path.join(options.source_path, "templates")
 
@@ -862,8 +1058,8 @@ def main() -> None:
         DispatchKey.SparseCUDA,
         DispatchKey.QuantizedCPU,
         DispatchKey.QuantizedCUDA,
-        DispatchKey.CompositeImplicitAutograd,
-        DispatchKey.CompositeExplicitAutograd,
+        DispatchKey.Math,
+        DispatchKey.DefaultBackend,
         # Meta is a magic key: it is automatically generated for structured
         # kernels
         DispatchKey.Meta,
@@ -873,8 +1069,8 @@ def main() -> None:
     functions_keys = {
         DispatchKey.CPU,
         DispatchKey.CUDA,
-        DispatchKey.CompositeImplicitAutograd,
-        DispatchKey.CompositeExplicitAutograd,
+        DispatchKey.Math,
+        DispatchKey.DefaultBackend,
     }
     if options.backend_whitelist:
         dispatch_keys = [k for k in dispatch_keys if is_generic_dispatch_key(k) or str(k) in options.backend_whitelist]
@@ -931,7 +1127,7 @@ def main() -> None:
     })
 
     cpu_fm.write('MetaFunctions.h', lambda: {
-        'declarations': list(mapMaybe(compute_meta_function_declaration, structured_native_functions)),
+        'declarations': list(map(compute_meta_function_declaration, structured_native_functions)),
     })
 
     schema_selector = selector
@@ -972,7 +1168,11 @@ def main() -> None:
         'aten_ops': list(mapMaybe(compute_aten_op, native_functions)),
     })
     cpu_fm.write('NativeFunctions.h', lambda: {
-        'native_function_declarations': list(concatMap(dest.compute_native_function_declaration, grouped_native_functions)),
+        'native_function_declarations': list(concatMap(compute_native_function_declaration, grouped_native_functions)),
+    })
+
+    cpu_fm.write('Refactors.yaml', lambda: {
+        'refactors': list(concatMap(compute_out_convention_refactor, grouped_native_functions)),
     })
 
     cpu_fm.write('Declarations.yaml', lambda: format_yaml([compute_declaration_yaml(f) for f in native_functions]))
