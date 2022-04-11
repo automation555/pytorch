@@ -6,7 +6,7 @@ namespace jit {
 namespace {
 bool isDropoutRemovable(const Node* node) {
   const auto inputs = node->inputs();
-  TORCH_INTERNAL_ASSERT(inputs.size() == 3);
+  TORCH_INTERNAL_ASSERT(inputs.size() == 4);
   const Value* training_input = inputs[2];
   auto optional_ivalue = toIValue(training_input);
   if (!optional_ivalue) {
@@ -27,10 +27,7 @@ void removeDropoutImpl(Block* block) {
       removeDropoutImpl(block);
     }
     if ((node->kind() == c10::Symbol::fromQualString("aten::dropout") ||
-         node->kind() == c10::Symbol::fromQualString("aten::dropout_") ||
-         node->kind() == c10::Symbol::fromQualString("aten::feature_dropout") ||
-         node->kind() ==
-             c10::Symbol::fromQualString("aten::feature_dropout_")) &&
+         node->kind() == c10::Symbol::fromQualString("aten::dropout_")) &&
         isDropoutRemovable(*it)) {
       // Input tensor of dropout.
       Value* input_value = node->inputs()[0];
@@ -46,16 +43,12 @@ void removeDropoutImpl(Block* block) {
 }
 } // namespace
 
-void removeDropout(std::shared_ptr<Graph>& graph) {
-  removeDropoutImpl(graph->block());
-}
-
 void removeDropout(script::Module& module) {
   TORCH_CHECK(
       !module.hasattr("training") || !module.is_training(),
       "Dropout removal module in training mode is not yet supported");
   auto graph = module.get_method("forward").graph();
-  removeDropout(graph);
+  removeDropoutImpl(graph->block());
 }
 
 } // namespace jit
