@@ -34,6 +34,8 @@ namespace c10 {
   _(prim, ConstantMKLDNNTensor)      \
   _(prim, BroadcastMKLDNNTensors)    \
   _(prim, MKLDNNGroup)               \
+  _(prim, MKLDNNHardSwish)           \
+  _(prim, MKLDNNHardSigmoid)         \
   _(prim, Drop)                      \
   _(prim, Eval)                      \
   _(prim, Expand) /* onnx */         \
@@ -321,15 +323,14 @@ namespace c10 {
   _(aten, special_erfc)              \
   _(aten, erfinv)                    \
   _(aten, special_erfinv)            \
-  _(aten, logit)                     \
-  _(aten, special_logit)             \
-  _(aten, sigmoid)                   \
-  _(aten, special_expit)             \
   _(aten, expm1)                     \
   _(aten, special_expm1)             \
   _(aten, exp2)                      \
   _(aten, special_exp2)              \
   _(aten, has_torch_function)        \
+  _(aten, hardswish)                 \
+  _(aten, hardswish_)                \
+  _(aten, hardsigmoid_)              \
   FORALL_ATEN_BASE_SYMBOLS(_)        \
   _(onnx, Add)                       \
   _(onnx, Concat)                    \
