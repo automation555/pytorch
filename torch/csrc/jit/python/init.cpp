@@ -295,9 +295,7 @@ void initJITBindings(PyObject* module) {
       .def(
           "_jit_pass_quant_fusion",
           [](std::shared_ptr<Graph>& g) { return QuantFusion(g); })
-      .def(
-          "_jit_pass_fold_convbn",
-          [](Module& module) { return FoldConvBatchNorm(module); })
+      .def("_jit_pass_fold_convbn", &FoldConvBatchNorm)
       .def(
           "_jit_onnx_list_model_parameters",
           [](Module& module) { return list_module_parameters(module); })
@@ -842,7 +840,13 @@ void initJITBindings(PyObject* module) {
           [](Code& c) {
             std::vector<GraphExecutorState> states;
             for (auto& e : c.diff_graph_op_executors()) {
-              states.emplace_back(e->getDebugState());
+              if (e->isOptimized()) {
+                states.emplace_back(e->getDebugState());
+              } else {
+                // we leave an empty entry for node that doesn't have an
+                // optimized plan
+                states.emplace_back();
+              }
             }
             return states;
           })
