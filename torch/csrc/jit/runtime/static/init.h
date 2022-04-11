@@ -3,7 +3,7 @@
 namespace torch {
 namespace jit {
 
-void initStaticModuleBindings(PyObject* module);
+void initAccelerantBindings(PyObject* module);
 
 } // namespace jit
 } // namespace torch
