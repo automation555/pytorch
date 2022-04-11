@@ -188,22 +188,26 @@ PyObject* c10d_init(PyObject* _unused, PyObject* noargs) {
       module,
       "GradBucket",
       R"(
-This class mainly passes a flattened gradient tensor
-(returned by :meth:`~torch.distributed.GradBucket.get_tensor`)
-to DDP communication hook.
-This tensor can be further decomposed into a list of per-parameter tensors within this bucket
+This class mainly passes a list of gradient tensors
+(returned by :meth:`~torch.distributed.GradBucket.get_tensors`)
+to DDP communication hook,
+where each tensor in the list refers to the replica on each device.
+Since DDP communication hook only supports single process single device mode at this time,
+only exactly one tensor is stored in this bucket.
+This tensor is actually a flattened 1D tensor,
+which can be further decomposed into a list of per-parameter tensors within this bucket
 (returned by :meth:`~torch.distributed.GradBucket.get_per_parameter_tensors`)
 to apply layer-wise operations.
 )")
       .def(
           py::init<
               size_t,
-              const Tensor&,
+              const std::vector<Tensor>&,
               const std::vector<size_t>&,
               const std::vector<size_t>&,
               const std::vector<c10::IntArrayRef>&>(),
           py::arg("index"),
-          py::arg("tensor"),
+          py::arg("tensors"),
           py::arg("offsets"),
           py::arg("lengths"),
           py::arg("sizes_list"))
@@ -220,13 +224,14 @@ Returns:
     All the gradients are bucketized.
 )")
       .def(
-          "get_tensor",
-          &::c10d::GradBucket::getTensor,
+          "get_tensors",
+          &::c10d::GradBucket::getTensors,
           py::call_guard<py::gil_scoped_release>(),
           R"(
 Returns:
-    A flattened 1D ``torch.Tensor``,
-    which can be further decomposed into a list of per-parameter tensors within this bucket.
+    A list of ``torch.Tensor``. Each tensor in the list refers to the replica on each device.
+    Since DDP communication hook only supports single process single device mode at this time,
+    only exactly one tensor is stored in this bucket.
 )")
       .def(
           "get_per_parameter_tensors",
@@ -249,9 +254,10 @@ Returns:
           "set_tensor",
           &::c10d::GradBucket::setTensor,
           py::arg("tensor"),
+          py::arg("i"),
           py::call_guard<py::gil_scoped_release>(),
           R"(
-Replaces the tensor in the bucket with the input tensor.
+Replaces the ith tensor in the bucket with the input tensor.
 )");
 
   py::enum_<::c10d::BuiltinCommHookType>(module, "BuiltinCommHookType", R"(
@@ -322,7 +328,15 @@ An enum-like class for built-in communication hooks: ``ALLREDUCE`` and ``FP16_CO
           "_set_ddp_runtime_logging_sample_rate",
           &::c10d::Reducer::set_ddp_runtime_logging_sample_rate,
           py::arg("sample_rate"),
-          py::call_guard<py::gil_scoped_release>());
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "_set_static_graph",
+          &::c10d::Reducer::set_static_graph,
+          py::call_guard<py::gil_scoped_release>())
+      .def(
+          "_delay_all_reduce",
+          &::c10d::Reducer::delay_all_reduce,
+          py::call_guard<py::gil_scoped_release>()) ;
 
   shared_ptr_class_<::c10d::Logger>(module, "Logger")
       .def(
@@ -351,8 +365,8 @@ An enum-like class for built-in communication hooks: ``ALLREDUCE`` and ``FP16_CO
           py::arg("comm_hook"),
           py::call_guard<py::gil_scoped_release>())
       .def(
-          "_set_uneven_input_join",
-          &::c10d::Logger::set_uneven_input_join,
+          "_set_static_graph",
+          &::c10d::Logger::set_static_graph,
           py::call_guard<py::gil_scoped_release>());
 
   py::enum_<::c10d::DistributedDebugLevel>(module, "_DistributedDebugLevel", R"(
@@ -1077,14 +1091,11 @@ Arguments:
           .def(
               "monitored_barrier",
               [](const c10::intrusive_ptr<::c10d::ProcessGroup>& self,
-                 const std::chrono::milliseconds& timeout,
-                 bool waitAllRanks) {
+                 const std::chrono::milliseconds& timeout) {
                 ::c10d::BarrierOptions opts;
                 opts.timeout = timeout;
-                return self->monitoredBarrier(opts, waitAllRanks);
+                return self->monitoredBarrier(opts);
               },
-              py::arg("timeout") = ::c10d::kUnsetTimeout,
-              py::arg("wait_all_ranks") = false,
               py::call_guard<py::gil_scoped_release>());
 
   // base ProcessGroup::Options binding
@@ -1449,7 +1460,6 @@ Example::
           "avg_backward_compute_comm_overlap_time",
           &c10::DDPLoggingData::avg_backward_compute_comm_overlap_time)
       .def_readwrite("comm_hook", &c10::DDPLoggingData::comm_hook)
-      .def_readwrite("join_uneven_inputs", &c10::DDPLoggingData::join_uneven_inputs)
       .def_readwrite(
           "forward_compute_time", &c10::DDPLoggingData::forward_compute_time)
       .def_readwrite(
@@ -1459,7 +1469,8 @@ Example::
       .def_readwrite(
           "backward_compute_comm_overlap_time",
           &c10::DDPLoggingData::backward_compute_comm_overlap_time)
-      .def_readwrite("is_multi_device_module", &c10::DDPLoggingData::is_multi_device_module);
+      .def_readwrite("is_multi_device_module", &c10::DDPLoggingData::is_multi_device_module)
+      .def_readwrite("static_graph", &c10::DDPLoggingData::static_graph);
 
   module.def(
       "_compute_bucket_assignment_by_size",
