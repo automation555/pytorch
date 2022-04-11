@@ -3,6 +3,11 @@
 #include <chrono>
 #include <cstdint>
 
+#ifdef USE_C10D_NCCL
+#include <ATen/cuda/CUDAContext.h>
+#include <ATen/cuda/CUDAEvent.h>
+#endif
+
 namespace c10d {
 
 enum class ReduceOp : std::uint8_t {
@@ -22,11 +27,18 @@ struct BroadcastOptions {
   int rootRank = 0;
   int rootTensor = 0;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+#ifdef USE_C10D_NCCL
+  std::vector<at::cuda::CUDAStream> cudaStreams = {};
+#endif
 };
 
 struct AllreduceOptions {
+  virtual ~AllreduceOptions() = default;
   ReduceOp reduceOp = ReduceOp::SUM;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+/* #ifdef USE_C10D_NCCL */
+/*   std::vector<at::cuda::CUDAStream> cudaStreams = {}; */
+/* #endif */
 };
 
 struct AllreduceCoalescedOptions : AllreduceOptions {};
@@ -36,10 +48,16 @@ struct ReduceOptions {
   int rootRank = 0;
   int rootTensor = 0;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+#ifdef USE_C10D_NCCL
+  std::vector<at::cuda::CUDAStream> cudaStreams = {};
+#endif
 };
 
 struct AllgatherOptions {
   std::chrono::milliseconds timeout = kUnsetTimeout;
+#ifdef USE_C10D_NCCL
+  std::vector<at::cuda::CUDAStream> cudaStreams = {};
+#endif
 };
 
 struct GatherOptions {
@@ -55,14 +73,19 @@ struct ScatterOptions {
 struct ReduceScatterOptions {
   ReduceOp reduceOp = ReduceOp::SUM;
   std::chrono::milliseconds timeout = kUnsetTimeout;
+#ifdef USE_C10D_NCCL
+  std::vector<at::cuda::CUDAStream> cudaStreams = {};
+#endif
 };
 
 struct AllToAllOptions {
   std::chrono::milliseconds timeout = kUnsetTimeout;
+#ifdef USE_C10D_NCCL
+  std::vector<at::cuda::CUDAStream> cudaStreams = {};
+#endif
 };
 
 struct BarrierOptions {
-  std::vector<int> device_ids;
   std::chrono::milliseconds timeout = kUnsetTimeout;
 };
 
