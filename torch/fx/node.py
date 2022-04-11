@@ -8,7 +8,7 @@ import types
 if TYPE_CHECKING:
     from .graph import Graph
 
-BaseArgumentTypes = Union[str, int, float, bool, torch.dtype, torch.Tensor]
+BaseArgumentTypes = Union[str, int, float, bool, torch.dtype, torch.Tensor, torch.device]
 base_types = BaseArgumentTypes.__args__  # type: ignore
 
 Target = Union[Callable[..., Any], str]
@@ -153,10 +153,6 @@ class Node:
         # If set, use this fn to print this node
         self._repr_fn : Optional[Callable[[Node], str]] = None
         self._stack_trace : Optional[str] = None
-
-        # Dictionary to store metadata passes need to do their
-        # transformations. This metadata is preserved across node copies
-        self.meta : Dict[str, Any] = {}
 
     @property
     def next(self) -> 'Node':
