@@ -7,10 +7,9 @@
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <caffe2/utils/threadpool/pthreadpool-cpp.h>
 #include <torch/library.h>
+#include <fbgemm/QuantUtils.h>
 
 #include <torch/custom_class.h>
-
-#include <c10/util/irange.h>
 
 #include <algorithm>
 #include <string>
@@ -62,16 +61,20 @@ at::Tensor PackedLinearWeight::apply_dynamic_impl(at::Tensor input, bool reduce_
   static constexpr int precision = 8;
   static constexpr bool is_signed = false;
 
+  auto qmin = is_signed ? -(1 << (precision - 1)) : 0;
+  auto qmax =  is_signed ? ((1 << (precision - 1)) - 1) : (1 << precision) - 1;
+  if (reduce_range) {
+    qmin = qmin / 2;
+    qmax = qmax / 2;
+  }
   // Calculate scale and zero point for quantization of input tensor
-  auto q_params = quant_utils::ChooseQuantizationParams(
+  auto q_params = fbgemm::ChooseQuantizationParams(
       /*min=*/x_min,
       /*max=*/x_max,
-      /*qmin=*/is_signed ? -(1 << (precision - 1)) : 0,
-      /*qmax=*/
-      is_signed ? ((1 << (precision - 1)) - 1) : (1 << precision) - 1,
+      /*qmin=*/qmin,
+      /*qmax=*/qmax,
       /*preserve_sparsity=*/false,
-      /*force_scale_power_of_two=*/false,
-      /*reduce_range=*/reduce_range);
+      /*force_scale_power_of_two=*/false);
 
   q_params.precision = precision;
 
@@ -137,7 +140,7 @@ at::Tensor PackedLinearWeight::apply_dynamic_impl(at::Tensor input, bool reduce_
     // This is the end of the pipeline, pass the resulting matrix through.
     fbgemm::DoNothing<float, float> doNothingObj{};
 
-    for (const auto task_id : c10::irange(begin, end)) {
+    for (int task_id = begin; task_id < end; ++task_id) {
       if (q_scheme == c10::kPerTensorAffine) {
         // Process the per tensor quantization.
         //
@@ -255,7 +258,7 @@ at::Tensor PackedLinearWeightsQnnp::apply_dynamic_impl(at::Tensor input) {
     x_max = 0;
   }
 
-  auto q_params = quant_utils::ChooseQuantizationParams(
+  auto q_params = fbgemm::ChooseQuantizationParams(
       /*min=*/x_min,
       /*max=*/x_max,
       /*qmin=*/0,

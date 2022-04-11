@@ -5,8 +5,7 @@
 #include <ATen/native/quantized/cpu/quant_utils.h>
 #include <ATen/quantized/QTensorImpl.h>
 #include <ATen/quantized/Quantizer.h>
-
-#include <c10/util/irange.h>
+#include <fbgemm/QuantUtils.h>
 
 namespace at {
 namespace native {
@@ -26,7 +25,7 @@ std::vector<Tensor> quantize_per_tensor_list_cpu(
     const Tensor& zero_points,
     ScalarType dtype) {
   std::vector<Tensor> quantized_tensors;
-  for (const auto i : c10::irange(tensors.size())) {
+  for (auto i = 0; i < tensors.size(); ++i) {
     quantized_tensors.push_back(at::quantize_per_tensor(
         tensors[i],
         scales[i].item<double>(),
@@ -45,18 +44,14 @@ Tensor quantize_per_channel_cpu(
   auto quantizer = make_per_channel_affine_quantizer(scales, zero_points, axis, dtype);
   return quantizer->quantize(self);
 }
-Tensor dequantize_cpu(const Tensor& self) {
-  TORCH_CHECK(!self.is_quantized());
-  return self.to(at::kFloat);
-}
 
-Tensor dequantize_quantized_cpu(const Tensor& self) {
+Tensor dequantize_quant(const Tensor& self) {
   return get_qtensorimpl(self)->quantizer()->dequantize(self);
 }
 
 std::vector<Tensor> dequantize_tensors_quantized_cpu(TensorList tensors) {
   std::vector<Tensor> dequantized_tensors;
-  for (const auto i : c10::irange(tensors.size())) {
+  for (auto i = 0; i < tensors.size(); ++i) {
     dequantized_tensors.push_back(tensors[i].dequantize());
   }
   return dequantized_tensors;
@@ -132,6 +127,11 @@ Tensor& set_storage_quantized_(
 QScheme qscheme_quant(const Tensor& self) {
   auto quantizer = get_qtensorimpl(self)->quantizer();
   return quantizer->qscheme();
+}
+
+Tensor& set_quantizer_(Tensor& self, ConstQuantizerPtr quantizer) {
+  get_qtensorimpl(self)->set_quantizer_(quantizer);
+  return self;
 }
 
 Tensor quantized_clone(
@@ -221,14 +221,13 @@ std::tuple<double, int64_t> _choose_qparams_per_tensor(
     reduce_range = false;
   }
 
-  auto q_params = quant_utils::ChooseQuantizationParams(
+  auto q_params = fbgemm::ChooseQuantizationParams(
       /*min=*/x_min,
       /*max=*/x_max,
       /*qmin=*/0,
-      /*qmax=*/255,
+      /*qmax=*/reduce_range ? 127 : 255,
       /*preserve_sparsity=*/false,
-      /*force_scale_power_of_two=*/false,
-      /*reduce_range=*/reduce_range);
+      /*force_scale_power_of_two=*/false);
 
   return std::make_tuple(q_params.scale, q_params.zero_point);
 }
