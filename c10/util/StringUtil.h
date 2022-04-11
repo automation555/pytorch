@@ -8,6 +8,7 @@
 #include <ostream>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace c10 {
@@ -16,18 +17,6 @@ namespace detail {
 
 // Obtains the base name from a full path.
 C10_API std::string StripBasename(const std::string& full_path);
-
-C10_API std::string ExcludeFileExtension(const std::string& full_path);
-
-struct CompileTimeEmptyString {
-  operator const std::string&() const {
-    static const std::string empty_string_literal;
-    return empty_string_literal;
-  }
-  operator const char*() const {
-    return "";
-  }
-};
 
 template <typename T>
 struct CanonicalizeStrTypes {
@@ -47,11 +36,6 @@ inline std::ostream& _str(std::ostream& ss) {
 template <typename T>
 inline std::ostream& _str(std::ostream& ss, const T& t) {
   ss << t;
-  return ss;
-}
-
-template <>
-inline std::ostream& _str<CompileTimeEmptyString>(std::ostream& ss, const CompileTimeEmptyString&) {
   return ss;
 }
 
@@ -80,27 +64,63 @@ struct _str_wrapper<std::string> final {
 
 template<>
 struct _str_wrapper<const char*> final {
-  static const char* call(const char* str) {
+  static std::string call(const char* str) {
     return str;
   }
 };
 
 // For c10::str() with an empty argument list (which is common in our assert macros),
 // we don't want to pay the binary size for constructing and destructing a stringstream
-// or even constructing a string.
+// or even constructing a string. Let's just return a reference to an empty string.
 template<>
 struct _str_wrapper<> final {
-  static CompileTimeEmptyString call() {
-    return CompileTimeEmptyString();
+  static const std::string& call() {
+    thread_local const std::string empty_string_literal;
+    return empty_string_literal;
   }
 };
 
+inline std::ostream& _error_value(std::ostream& ss) {
+  return ss;
+}
+
+template <typename T>
+inline std::ostream& _error_value(std::ostream& ss, const T& t) {
+  // ignore pure string literal
+  if (!(std::is_same<T, const char*>::value)) {
+    // ss << t;
+    // ss << ", ";
+  }
+
+  return ss;
+}
+
+template <typename T, typename... Args>
+inline std::ostream& _error_value(std::ostream& ss, const T& t, const Args&... args) {
+  return _error_value(_error_value(ss, t), args...);
+}
+
+template<typename... Args>
+inline const std::string _error_value_wrapper(const Args&... args) {
+  std::ostringstream ss;
+  _error_value(ss, args...);
+  return ss.str();
+}
 } // namespace detail
 
 // Convert a list of string-like arguments into a single string.
 template <typename... Args>
 inline decltype(auto) str(const Args&... args) {
   return detail::_str_wrapper<typename detail::CanonicalizeStrTypes<Args>::type...>::call(args...);
+}
+
+// Convert a list of error arguments into a single string by striping away string literal arguments, i.e.
+// if an argument is const char*, it will not show up in the returned message.
+//
+// Note: CanonicalizeStrTypes converts char[] to char*.
+template <typename... Args>
+inline decltype(auto) error_value(const Args&... args) {
+  return detail::_error_value_wrapper<typename detail::CanonicalizeStrTypes<Args>::type...>(args...);
 }
 
 template <class Container>
