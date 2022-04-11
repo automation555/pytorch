@@ -972,18 +972,6 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.rand(3, 3).to(dtype=torch.float32)
         self.run_test(MyModel(), x)
 
-    def test_hardsigmoid(self):
-        model = torch.nn.Hardsigmoid()
-
-        x = torch.rand(3, 3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
-        # corner cases
-        x = torch.tensor(3).to(dtype=torch.float32)
-        self.run_test(model, x)
-        x = torch.tensor(-3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
     def test_clamp(self):
         class ClampModel(torch.nn.Module):
             def forward(self, x):
@@ -1351,6 +1339,32 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.randn(2, 3, 4).to(torch.int32)
         self.run_test(FloatingPoint(), x)
 
+    @skipIfUnsupportedMinOpsetVersion(11)
+    def test_prim_min(self):
+        @torch.jit.script
+        def list_append(boxes: List[torch.Tensor]):
+            temp = []
+            for i, b in enumerate(boxes):
+                temp.append(torch.full_like(b[:, 1], i))
+            return temp[0]
+
+        class Min(torch.nn.Module):
+            def forward(self, x):
+                boxes = [x, x, x]
+                return list_append(boxes)
+
+        x = torch.rand(5, 5)
+        self.run_test(Min(), (x,))
+
+        class M(torch.jit.ScriptModule):
+            @torch.jit.script_method
+            def forward(self, x):
+                i = 3
+                return min(x[i], i)
+
+        x = torch.arange(6, dtype=torch.int64)
+        self.run_test(M(), (x,))
+
     def test_arithmetic(self):
         class ArithmeticModule(torch.nn.Module):
             def forward(self, x):
@@ -1552,8 +1566,8 @@ class TestONNXRuntime(unittest.TestCase):
     def test_div_rounding_mode(self):
         class TrueDivModule(torch.nn.Module):
             def forward(self, x, y):
-                return (x.div(y, rounding_mode=None),
-                        torch.div(x, y, rounding_mode=None))
+                return (x.div(y, rounding_mode='true'),
+                        torch.div(x, y, rounding_mode='true'))
 
         class TruncDivModule(torch.nn.Module):
             def forward(self, x, y):
@@ -5404,7 +5418,7 @@ class TestONNXRuntime(unittest.TestCase):
     def test_det(self):
         class Det(torch.nn.Module):
             def forward(self, x):
-                return torch.linalg.det(x)
+                return torch.det(x)
 
         x = torch.randn(2, 3, 5, 5)
         self.run_test(Det(), x)
