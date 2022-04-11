@@ -1,3 +1,4 @@
+import benchmark_fuzz_utils as fuzz_utils
 import operator_benchmark as op_bench
 
 """
@@ -8,73 +9,73 @@ def remove_cuda(config_list):
     cuda_config = {'device': 'cuda'}
     return [config for config in config_list if cuda_config not in config]
 
-# Configs for conv-1d ops
-conv_1d_configs_short = op_bench.config_list(
-    attr_names=[
-        'IC', 'OC', 'kernel', 'stride', 'N', 'L'
-    ],
-    attrs=[
-        [128, 256, 3, 1, 1, 64],
-        [256, 256, 3, 2, 4, 64],
-    ],
+conv1d_fuzzed_configs_short = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.CONV1D,
+    fuzz_utils.Scale.SMALL,
+    n=10,
+    seed="Conv1D",
+    cross_product_configs={"device": ["cpu", "cuda"]},
+    tags=["short"],
+    checksum=549,
+)
+
+conv1d_fuzzed_configs_long = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.CONV1D,
+    fuzz_utils.CPU_MEDIUM_CUDA_LARGER,
+    n=10,
+    seed="Conv1D",
+    tags=["long"],
+    checksum=(2896, 6083),
+)
+
+conv2d_fuzzed_configs_short = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.CONV2D,
+    fuzz_utils.Scale.SMALL,
+    n=10,
+    fuzzer_kwargs={"groups": {1: 0.5, 2: 0.5}},
+    seed="Conv2D",
+    cross_product_configs={"device": ["cpu", "cuda"]},
+    tags=["short"],
+    checksum=562,
+)
+
+conv2d_fuzzed_configs_long = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.CONV2D,
+    fuzz_utils.CPU_MEDIUM_CUDA_LARGER,
+    n=10,
+    fuzzer_kwargs={"groups": {1: 0.5, 2: 0.5}},
+    seed="Conv2D",
+    tags=["long"],
+    checksum=(1420, 4234),
+)
+
+
+# Configs for Batch/Instance/Layer Norm.
+norm_fuzzed_configs_short = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.UNARY,
+    fuzz_utils.Scale.SMALL,
+    n=10,
+    seed="Norm",
+    fuzzer_kwargs={"dim": {3: 0.5, 4: 0.5}, "pow_2_fraction": 0.8},
     cross_product_configs={
         'device': ['cpu', 'cuda'],
     },
-    tags=['short']
+    tags=["short"],
+    checksum=648,
 )
 
-conv_1d_configs_long = op_bench.cross_product_configs(
-    IC=[128, 512],
-    OC=[128, 512],
-    kernel=[3],
-    stride=[1, 2],
-    N=[8],
-    L=[128],
-    device=['cpu', 'cuda'],
-    tags=["long"]
+norm_fuzzed_configs_long = fuzz_utils.make_fuzzed_config(
+    fuzz_utils.Fuzzers.UNARY,
+    fuzz_utils.CPU_MEDIUM_CUDA_LARGER,
+    n=10,
+    seed="Norm",
+    fuzzer_kwargs={"dim": {3: 0.5, 4: 0.5}, "pow_2_fraction": 0.8},
+    tags=["long"],
+    checksum=(4680, 82871),
 )
 
-# Configs for Conv2d and ConvTranspose1d
-conv_2d_configs_short = op_bench.config_list(
-    attr_names=[
-        'IC', 'OC', 'kernel', 'stride', 'N', 'H', 'W', 'G', 'pad',
-    ],
-    attrs=[
-        [256, 256, 3, 1, 1, 16, 16, 1, 0],
-    ],
-    cross_product_configs={
-        'device': ['cpu', 'cuda'],
-    },
-    tags=['short']
-)
+norm_fuzzed_configs = norm_fuzzed_configs_short + norm_fuzzed_configs_long
 
-conv_2d_configs_long = op_bench.cross_product_configs(
-    IC=[128, 256],
-    OC=[128, 256],
-    kernel=[3],
-    stride=[1, 2],
-    N=[4],
-    H=[32],
-    W=[32],
-    G=[1],
-    pad=[0],
-    device=['cpu', 'cuda'],
-    tags=["long"]
-)
-
-# Configs for Conv3d and ConvTranspose3d
-conv_3d_configs_short = op_bench.config_list(
-    attr_names=[
-        'IC', 'OC', 'kernel', 'stride', 'N', 'D', 'H', 'W'
-    ],
-    attrs=[
-        [64, 64, 3, 1, 8, 4, 16, 16],
-    ],
-    cross_product_configs={
-        'device': ['cpu', 'cuda'],
-    },
-    tags=['short']
-)
 
 linear_configs_short = op_bench.config_list(
     attr_names=["N", "IN", "OUT"],

@@ -1,38 +1,32 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+
 
 import operator_benchmark as op_bench
 import torch
 import torch.nn.functional as F
 
+from . import configs
+
 
 """Microbenchmarks for layernorm operator."""
-
-layernorm_configs_short = op_bench.cross_product_configs(
-    dims=(
-        (1, 8, 16),
-        (8, 8, 16),
-        (32, 8, 16),
-        (64, 128, 56, 56),
-    ),
-    tags=["short"],
-)
-
-
 class LayerNormBenchmark(op_bench.TorchBenchmarkBase):
-    def init(self, dims):
-        input = (torch.rand(*dims) - 0.5) * 256
-        self.inputs = {
-            "input": input,
-            "weight": torch.rand(*input.size()[1:], dtype=torch.float),
-            "bias": torch.rand(*input.size()[1:], dtype=torch.float),
-            "eps": 1e-5
-        }
+    def init(self, X_SIZE, device):
+        self.X = (torch.rand(X_SIZE, device=device) - 0.5) * 256
+        self.X.requires_grad_(requires_grad=self.auto_set())
+        self.weight = torch.rand(X_SIZE[1:], dtype=torch.float, device=device)
+        self.bias = torch.rand(X_SIZE[1:], dtype=torch.float, device=device)
+        self.eps = 1e-5
 
-    def forward(self, input, weight, bias, eps: float):
+    def forward(self):
         return F.layer_norm(
-            input, input.size()[1:], weight=weight, bias=bias, eps=eps)
+            self.X, self.X.size()[1:], weight=self.weight, bias=self.bias, eps=self.eps)
 
 
-op_bench.generate_pt_test(layernorm_configs_short, LayerNormBenchmark)
+op_bench.generate_pt_test(configs.norm_fuzzed_configs, LayerNormBenchmark)
+op_bench.generate_pt_gradient_test(configs.norm_fuzzed_configs, LayerNormBenchmark)
 
 
 if __name__ == "__main__":
