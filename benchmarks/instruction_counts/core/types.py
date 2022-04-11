@@ -2,12 +2,14 @@
 from typing import Any, Dict, Optional, Tuple, Union
 
 from core.api import AutoLabels, TimerArgs, GroupedBenchmark
+from worker.main import WorkerTimerArgs
 
 
 # =============================================================================
 # == Benchmark schema =========================================================
 # =============================================================================
 """ (There is a TL;DR at the end for ad-hoc benchmarks.)
+
 The end state for representing a benchmark is:
   ```
   Tuple[
@@ -44,9 +46,10 @@ like to define something like:
       "matmul": GroupedStmts(...),
   }
   ```
-and then parse out a flat representation. The type declarations below are
+and then parse out the flat representation. The type declarations below are
 simply formalizing the structure of nested dictionaries with string or tuple
 of string keys.
+
 
 TL;DR
     If you only care about writing an ad-hoc benchmark for a PR, just use a
@@ -77,7 +80,7 @@ _Label = Union[Label, Optional[str]]
 #       # Recursive case:
 #       Dict[Label, "_Value"],
 #   ]
-# we instead have to use Any and rely on runtime asserts when flattening.
+# we instead have to use Any and rely on runtime asserts in the parser.
 _Value = Union[
     Union[TimerArgs, GroupedBenchmark],
     Dict[_Label, Any],
@@ -86,9 +89,8 @@ _Value = Union[
 Definition = Dict[_Label, _Value]
 
 # We initially have to parse (flatten) to an intermediate state in order to
-# build TorchScript models since multiple entries will share the same model
-# artifact.
+# build TorchScript models.
 FlatIntermediateDefinition = Dict[Label, Union[TimerArgs, GroupedBenchmark]]
 
 # Final parsed schema.
-FlatDefinition = Tuple[Tuple[Label, AutoLabels, TimerArgs], ...]
+FlatDefinition = Tuple[Tuple[Label, AutoLabels, WorkerTimerArgs], ...]
