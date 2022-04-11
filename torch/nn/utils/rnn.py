@@ -3,7 +3,7 @@ import warnings
 
 import torch
 from ... import _VF
-from ..._jit_internal import Optional
+from ..._jit_internal import Optional, ignore
 
 
 PackedSequence_ = namedtuple('PackedSequence',
@@ -56,6 +56,7 @@ class PackedSequence(PackedSequence_):
         (i.e., they only pass in tensors conforming to this constraint).
 
     """
+    @ignore
     def __new__(cls, data, batch_sizes=None, sorted_indices=None, unsorted_indices=None):
         return super(PackedSequence, cls).__new__(
             cls,
@@ -66,6 +67,7 @@ class PackedSequence(PackedSequence_):
     #
     # See the note above in doc string (starting with ":attr:`data` can be on
     # arbitrary device...").
+    @ignore
     def pin_memory(self):
         # Why not convert `batch_sizes`?
         # See NOTE [ device and dtype of a PackedSequence ]
@@ -73,6 +75,7 @@ class PackedSequence(PackedSequence_):
                           bind(self.sorted_indices, lambda t: t.pin_memory()),
                           bind(self.unsorted_indices, lambda t: t.pin_memory()))
 
+    @ignore
     def cuda(self, *args, **kwargs):
         # Tests to see if 'cuda' should be added to kwargs
         ex = torch.tensor((), dtype=self.data.dtype, device=self.data.device).to(*args, **kwargs)
@@ -80,6 +83,7 @@ class PackedSequence(PackedSequence_):
             return self.to(*args, **kwargs)
         return self.to(*args, device='cuda', **kwargs)
 
+    @ignore
     def cpu(self, *args, **kwargs):
 
         ex = torch.tensor((), dtype=self.data.dtype, device=self.data.device).to(*args, **kwargs)
@@ -87,30 +91,39 @@ class PackedSequence(PackedSequence_):
             return self.to(*args, **kwargs)
         return self.to(*args, device='cpu', **kwargs)
 
+    @ignore
     def double(self):
         return self.to(dtype=torch.double)
 
+    @ignore
     def float(self):
         return self.to(dtype=torch.float)
 
+    @ignore
     def half(self):
         return self.to(dtype=torch.half)
 
+    @ignore
     def long(self):
         return self.to(dtype=torch.long)
 
+    @ignore
     def int(self):
         return self.to(dtype=torch.int)
 
+    @ignore
     def short(self):
         return self.to(dtype=torch.short)
 
+    @ignore
     def char(self):
         return self.to(dtype=torch.int8)
 
+    @ignore
     def byte(self):
         return self.to(dtype=torch.uint8)
 
+    @ignore
     def to(self, *args, **kwargs):
         r"""Performs dtype and/or device conversion on `self.data`.
 
@@ -142,6 +155,7 @@ class PackedSequence(PackedSequence_):
         r"""Returns true if `self.data` stored on a gpu"""
         return self.data.is_cuda
 
+    @ignore
     def is_pinned(self):
         r"""Returns true if `self.data` stored on in pinned memory"""
         return self.data.is_pinned()
@@ -213,7 +227,7 @@ def pack_padded_sequence(input, lengths, batch_first=False, enforce_sorted=True)
         them to compute the loss directly. A Tensor can be retrieved from
         a :class:`PackedSequence` object by accessing its ``.data`` attribute.
 
-    Args:
+    Arguments:
         input (Tensor): padded batch of variable length sequences.
         lengths (Tensor or list(int)): list of sequence lengths of each batch
             element (must be on the CPU if provided as a tensor).
@@ -279,7 +293,7 @@ def pad_packed_sequence(sequence, batch_first=False, padding_value=0.0, total_le
         See :ref:`this FAQ section <pack-rnn-unpack-with-data-parallelism>` for
         details.
 
-    Args:
+    Arguments:
         sequence (PackedSequence): batch to pad
         batch_first (bool, optional): if ``True``, the output will be in ``B x T x *``
             format.
@@ -343,7 +357,7 @@ def pad_sequence(sequences, batch_first=False, padding_value=0.0):
         where `T` is the length of the longest sequence. This function assumes
         trailing dimensions and type of all the Tensors in sequences are same.
 
-    Args:
+    Arguments:
         sequences (list[Tensor]): list of variable length sequences.
         batch_first (bool, optional): output will be in ``B x T x *`` if True, or in
             ``T x B x *`` otherwise
@@ -398,7 +412,7 @@ def pack_sequence(sequences, enforce_sorted=True):
         PackedSequence(data=tensor([ 1,  4,  6,  2,  5,  3]), batch_sizes=tensor([ 3,  2,  1]))
 
 
-    Args:
+    Arguments:
         sequences (list[Tensor]): A list of sequences of decreasing length.
         enforce_sorted (bool, optional): if ``True``, checks that the input
             contains sequences sorted by length in a decreasing order. If
