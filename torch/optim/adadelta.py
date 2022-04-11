@@ -1,7 +1,5 @@
 import torch
-
-from . import _functional as F
-from .optimizer import Optimizer
+from .optimizer import Optimizer, _params_t
 
 
 class Adadelta(Optimizer):
@@ -23,7 +21,8 @@ class Adadelta(Optimizer):
     __ https://arxiv.org/abs/1212.5701
     """
 
-    def __init__(self, params, lr=1.0, rho=0.9, eps=1e-6, weight_decay=0):
+    def __init__(self, params: _params_t, lr: float = 1.0, rho: float = 0.9,
+                 eps: float = 1e-6, weight_decay: float = 0.) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= rho <= 1.0:
@@ -50,40 +49,32 @@ class Adadelta(Optimizer):
                 loss = closure()
 
         for group in self.param_groups:
-            params_with_grad = []
-            grads = []
-            square_avgs = []
-            acc_deltas = []
-            lr, rho, eps, weight_decay = group['lr'], group['rho'], group['eps'], group['weight_decay']
-
             for p in group['params']:
                 if p.grad is None:
                     continue
-                params_with_grad.append(p)
-                if p.grad.is_sparse:
+                grad = p.grad
+                if grad.is_sparse:
                     raise RuntimeError('Adadelta does not support sparse gradients')
-                grads.append(p.grad)
-
                 state = self.state[p]
 
-                # Lazy state initialization
+                # State initialization
                 if len(state) == 0:
                     state['step'] = 0
                     state['square_avg'] = torch.zeros_like(p, memory_format=torch.preserve_format)
                     state['acc_delta'] = torch.zeros_like(p, memory_format=torch.preserve_format)
 
-                square_avgs.append(state['square_avg'])
-                acc_deltas.append(state['acc_delta'])
+                square_avg, acc_delta = state['square_avg'], state['acc_delta']
+                rho, eps = group['rho'], group['eps']
 
                 state['step'] += 1
 
-            F.adadelta(params_with_grad,
-                       grads,
-                       square_avgs,
-                       acc_deltas,
-                       lr,
-                       rho,
-                       eps,
-                       weight_decay)
+                if group['weight_decay'] != 0:
+                    grad = grad.add(p, alpha=group['weight_decay'])
+
+                square_avg.mul_(rho).addcmul_(grad, grad, value=1 - rho)
+                std = square_avg.add(eps).sqrt_()
+                delta = acc_delta.add(eps).sqrt_().div_(std).mul_(grad)
+                p.add_(delta, alpha=-group['lr'])
+                acc_delta.mul_(rho).addcmul_(delta, delta, value=1 - rho)
 
         return loss

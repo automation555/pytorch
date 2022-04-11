@@ -1,6 +1,8 @@
+from typing import Tuple
+
 import torch
-from . import _functional as F
-from .optimizer import Optimizer
+from . import functional as F
+from .optimizer import Optimizer, _params_t
 
 
 class Adam(Optimizer):
@@ -31,8 +33,9 @@ class Adam(Optimizer):
         https://openreview.net/forum?id=ryQu7f-RZ
     """
 
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8,
-                 weight_decay=0, amsgrad=False):
+    def __init__(self, params: _params_t, lr: float = 1e-3,
+                 betas: Tuple[float, float] = (0.9, 0.999), eps: float = 1e-8,
+                 weight_decay: float = 0., amsgrad: bool = False) -> None:
         if not 0.0 <= lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 <= eps:
@@ -70,9 +73,9 @@ class Adam(Optimizer):
             grads = []
             exp_avgs = []
             exp_avg_sqs = []
+            state_sums = []
             max_exp_avg_sqs = []
             state_steps = []
-            beta1, beta2 = group['betas']
 
             for p in group['params']:
                 if p.grad is not None:
@@ -104,6 +107,7 @@ class Adam(Optimizer):
                     # record the step after step update
                     state_steps.append(state['step'])
 
+            beta1, beta2 = group['betas']
             F.adam(params_with_grad,
                    grads,
                    exp_avgs,
@@ -115,5 +119,6 @@ class Adam(Optimizer):
                    beta2,
                    group['lr'],
                    group['weight_decay'],
-                   group['eps'])
+                   group['eps']
+                   )
         return loss

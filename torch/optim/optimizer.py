@@ -1,16 +1,23 @@
-from collections import defaultdict, abc as container_abcs
-
-import torch
+from collections import defaultdict
+from typing import Iterable, Union, Callable, Optional, List
 from copy import deepcopy
 from itertools import chain
 import warnings
 import functools
+
+import torch
+from .. import Tensor
+from torch._six import container_abcs
+
+
+_params_t = Union[Iterable[Tensor], Iterable[dict]]
 
 
 class _RequiredParameter(object):
     """Singleton class representing a required parameter for an Optimizer."""
     def __repr__(self):
         return "<required parameter>"
+
 
 required = _RequiredParameter()
 
@@ -30,7 +37,11 @@ class Optimizer(object):
             options (used when a parameter group doesn't specify them).
     """
 
-    def __init__(self, params, defaults):
+    defaults: dict
+    state: dict
+    param_groups: List[dict]
+
+    def __init__(self, params: _params_t, defaults: dict) -> None:
         torch._C._log_api_usage_once("python.optimizer")
         self.defaults = defaults
 
@@ -60,7 +71,7 @@ class Optimizer(object):
             'param_groups': self.param_groups,
         }
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict) -> None:
         self.__dict__.update(state)
         self._hook_for_profile()  # To support multiprocessing pickle/unpickle.
 
@@ -93,7 +104,7 @@ class Optimizer(object):
             self.__class__.step = profile_hook_step(self.__class__.step)
             self.__class__.step.hooked = True
 
-    def state_dict(self):
+    def state_dict(self) -> dict:
         r"""Returns the state of the optimizer as a :class:`dict`.
 
         It contains two entries:
@@ -123,7 +134,7 @@ class Optimizer(object):
             'param_groups': param_groups,
         }
 
-    def load_state_dict(self, state_dict):
+    def load_state_dict(self, state_dict: dict) -> None:
         r"""Loads the optimizer state.
 
         Args:
@@ -185,12 +196,12 @@ class Optimizer(object):
             update_group(g, ng) for g, ng in zip(groups, saved_groups)]
         self.__setstate__({'state': state, 'param_groups': param_groups})
 
-    def zero_grad(self, set_to_none: bool = False):
+    def zero_grad(self, set_to_none: bool = False) -> None:
         r"""Sets the gradients of all optimized :class:`torch.Tensor` s to zero.
 
         Args:
             set_to_none (bool): instead of setting to zero, set the grads to None.
-                This will in general have lower memory footprint, and can modestly improve performance.
+                This is will in general have lower memory footprint, and can modestly improve performance.
                 However, it changes certain behaviors. For example:
                 1. When the user tries to access a gradient and perform manual ops on it,
                 a None attribute or a Tensor full of 0s will behave differently.
@@ -215,7 +226,7 @@ class Optimizer(object):
                                 p.grad.requires_grad_(False)
                             p.grad.zero_()
 
-    def step(self, closure):
+    def step(self, closure: Optional[Callable[[], float]]) -> None:
         r"""Performs a single optimization step (parameter update).
 
         Args:
@@ -228,7 +239,7 @@ class Optimizer(object):
         """
         raise NotImplementedError
 
-    def add_param_group(self, param_group):
+    def add_param_group(self, param_group: dict) -> None:
         r"""Add a param group to the :class:`Optimizer` s `param_groups`.
 
         This can be useful when fine tuning a pre-trained network as frozen layers can be made
