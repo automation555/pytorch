@@ -246,31 +246,6 @@ class TestSparse(TestCase):
             t, _, _ = self._gen_sparse(len(sparse_size), nnz, sparse_size + dense_size)
             _test_coalesce(t)  # this tests correctness
 
-    def test_coalesce_reference_cycle(self):
-        # Test coalesce doesn't create autograd graph cycles (gh-52253)
-
-        # Sanity check that the helper class works as expected
-        t = torch.rand(2)
-        t_ref = torch._C._WeakTensorRef(t)
-        self.assertFalse(t_ref.expired())
-
-        del t
-        self.assertTrue(t_ref.expired())
-
-        def test_sparse_sum():
-            i = torch.tensor([[0], [4]], dtype=torch.long, device=self.device)
-            v = torch.tensor([[[-0.4567, -1.8797, 0.0380, 1.4316]]],
-                             dtype=torch.double, device=self.device)
-            S = torch.sparse_coo_tensor(i, v)
-            S = S.coalesce()
-            S.requires_grad_(True)
-            S2 = S.coalesce()
-            self.assertTrue(S2.is_coalesced())
-            return torch._C._WeakTensorRef(S2)
-
-        ref = test_sparse_sum()
-        self.assertTrue(ref.expired())
-
     def test_ctor_size_checks(self):
         indices = self.index_tensor([
             [0, 0, 0],
@@ -1491,10 +1466,10 @@ class TestSparse(TestCase):
         self.assertEqual(self.safeToDense(y1), expected)
         self.assertEqual(self.safeToDense(y2), expected)
 
-        with self.assertWarnsOnceRegex(UserWarning, 'floor_divide'):
+        with self.maybeWarnsRegex(UserWarning, 'floor_divide'):
             y1 = x1 // 37.5
         y2 = x1.clone()
-        with self.assertWarnsOnceRegex(UserWarning, 'floor_divide'):
+        with self.maybeWarnsRegex(UserWarning, 'floor_divide'):
             y2.floor_divide_(37.5)
         expected = self.safeToDense(x1) // 37.5
         self.assertEqual(self.safeToDense(y1), expected)
@@ -3047,7 +3022,7 @@ class TestSparse(TestCase):
 
     def test_sparse_matmul(self):
         """
-        This function test `torch.sparse.mm` when both the mat1 and mat2 are sparse tensors.
+        This function test `torch.sparse.mm` when both the mat1 and mat2 are sparse tensors. 
         """
 
         def _indices2csr(indices, dim):
@@ -3159,10 +3134,10 @@ class TestSparse(TestCase):
             def fn(D1, D2):
                 return torch.sparse.mm(D1, D2).to_dense()
 
-            # For cuda, `nondet_tol` is set with `1e-5`
+            # For cuda, `nondet_tol` is set with `1e-5` 
             # This is because cuSparse sometimes returns approximate zero values like `~e-323`
-            # TODO: Check this cuSparse issue.
-            # This happens when you do chain multiplication `torch.sparse.mm` operations
+            # TODO: Check this cuSparse issue. 
+            # This happens when you do chain multiplication `torch.sparse.mm` operations 
             gradcheck(fn, (a, b), check_sparse_nnz=True, nondet_tol=1e-5)
             grad_with_custom_sparsity_pattern_test_helper(sparse_dims, nnz, shape_a, shape_b)
 
@@ -3175,8 +3150,8 @@ class TestSparse(TestCase):
             # This is not a matrix
             self.assertRaises(RuntimeError, lambda: fn(3, 4, [2, 2, 2], [2, 2, 2]))
 
-            # Shapes does not
-            self.assertRaisesRegex(RuntimeError,
+            # Shapes does not 
+            self.assertRaisesRegex(RuntimeError, 
                                    r"mat1 and mat2 shapes cannot be multiplied \(2x3 and 4x2\)",
                                    lambda: fn(2, 10, [2, 3], [4, 2]))
 
@@ -3217,14 +3192,6 @@ class TestCudaSparse(TestSparse):
         self.is_cuda = True
         self.device = 'cuda'
         self.legacy_sparse_tensor = torch.cuda.sparse.DoubleTensor
-
-    @unittest.skipIf(torch.cuda.device_count() < 2, "no multi-GPU")
-    def test_mixed_device_constructor(self):
-        # https://github.com/pytorch/pytorch/issues/54075
-        v = torch.empty(2, 0).cuda()
-        torch.sparse_coo_tensor(([0, 1],), v, (4, 0))
-        v = torch.empty(2, 0).cuda(1)
-        torch.sparse_coo_tensor(([0, 1],), v, (4, 0))
 
 
 @unittest.skipIf(not TEST_CUDA, 'CUDA not available')
@@ -3281,31 +3248,59 @@ class TestSparseOneOff(TestCase):
         with self.assertRaisesRegex(RuntimeError, "add: expected 'self' to be a CUDA tensor, but got a CPU tensor"):
             x + sparse_y
 
-class TestSparseUnaryUfuncs(TestCase):
+class TestSparseFuncs(TestCase):
     exact_dtype = True
 
+    # TODO - Need to extend for non-unary functions
     @ops(sparse_unary_ufuncs)
     def test_sparse_consistency(self, device, dtype, op):
-        unsupportedTypes = [torch.bfloat16, torch.cfloat, torch.cdouble]
+        unsupportedTypes = [torch.bfloat16, torch.cfloat, torch.cdouble, torch.bool]
         if dtype in unsupportedTypes:
             self.skipTest('Skipped! Unsupported dtypes for Sparse')
 
-        samples = op.sample_inputs(device, dtype)
+        samples = op.sample_sparse_inputs(device, dtype)
 
         if len(samples) == 0:
             self.skipTest("Skipped! No sample inputs!")
 
-        sample = samples[0]
+        for sample in samples:
+            sample = sample.input[0]
+            expected = op(sample.to_dense())
+            output = op(sample)
+            self.assertEqual(output.to_dense(), expected)
 
-        assert isinstance(sample.input, torch.Tensor)
+    # TODO - Need to extend for non-unary functions
+    @ops(sparse_unary_ufuncs)
+    def test_sparse_inplace_consistency(self, device, dtype, op):
+        unsupportedTypes = [torch.bfloat16, torch.cfloat, torch.cdouble, torch.bool]
+        if dtype in unsupportedTypes:
+            self.skipTest('Skipped! Unsupported dtypes for Sparse')
 
-        expected = op(sample.input)
-        assert torch.is_tensor(expected)
-        output = op(sample.input.to_sparse())
-        assert torch.is_tensor(output)
-        self.assertEqual(output.to_dense(), expected)
+        inplace_variant = op.get_inplace()
 
-instantiate_device_type_tests(TestSparseUnaryUfuncs, globals())
+        if inplace_variant is not None:
+            samples = op.sample_sparse_inputs(device, dtype)
+            if len(samples) == 0:
+                self.skipTest("Skipped! No sample inputs!")
+
+            for sample in samples:
+                # TODO - extend this logic for Binary Operations
+                sample = sample.input[0]
+                sample_copy = sample.clone()
+                expected = op(sample.to_dense())
+
+                if torch.can_cast(expected.dtype, sample.dtype) and (
+                        sample.is_coalesced() or op.is_linear_map):
+                    inplace_variant(sample)
+                    self.assertEqual(expected, sample.to_dense())
+                    op(sample_copy, out=sample_copy)
+                    self.assertEqual(sample, sample_copy)
+                else:
+                    with self.assertRaises(RuntimeError):
+                        inplace_variant(sample)
+                        op(sample_copy, out=sample_copy)
+
+instantiate_device_type_tests(TestSparseFuncs, globals())
 
 if __name__ == '__main__':
     run_tests()
