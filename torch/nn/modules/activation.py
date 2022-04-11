@@ -868,7 +868,10 @@ class MultiheadAttention(Module):
     bias_k: Optional[torch.Tensor]
     bias_v: Optional[torch.Tensor]
 
-    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False, add_zero_attn=False, kdim=None, vdim=None):
+    def __init__(self, embed_dim, num_heads, dropout=0., bias=True, add_bias_kv=False,
+                 add_zero_attn=False, kdim=None, vdim=None,
+                 device='cpu', dtype=torch.get_default_dtype()) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
         super(MultiheadAttention, self).__init__()
         self.embed_dim = embed_dim
         self.kdim = kdim if kdim is not None else embed_dim
@@ -881,25 +884,25 @@ class MultiheadAttention(Module):
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
 
         if self._qkv_same_embed_dim is False:
-            self.q_proj_weight = Parameter(torch.empty(embed_dim, embed_dim))
-            self.k_proj_weight = Parameter(torch.empty(embed_dim, self.kdim))
-            self.v_proj_weight = Parameter(torch.empty(embed_dim, self.vdim))
+            self.q_proj_weight = Parameter(torch.empty((embed_dim, embed_dim), **factory_kwargs))
+            self.k_proj_weight = Parameter(torch.empty((embed_dim, self.kdim), **factory_kwargs))
+            self.v_proj_weight = Parameter(torch.empty((embed_dim, self.vdim), **factory_kwargs))
             self.register_parameter('in_proj_weight', None)
         else:
-            self.in_proj_weight = Parameter(torch.empty(3 * embed_dim, embed_dim))
+            self.in_proj_weight = Parameter(torch.empty((3 * embed_dim, embed_dim), **factory_kwargs))
             self.register_parameter('q_proj_weight', None)
             self.register_parameter('k_proj_weight', None)
             self.register_parameter('v_proj_weight', None)
 
         if bias:
-            self.in_proj_bias = Parameter(torch.empty(3 * embed_dim))
+            self.in_proj_bias = Parameter(torch.empty(3 * embed_dim, **factory_kwargs))
         else:
             self.register_parameter('in_proj_bias', None)
-        self.out_proj = Linear(embed_dim, embed_dim, bias=bias)
+        self.out_proj = Linear(embed_dim, embed_dim, bias=bias, **factory_kwargs)
 
         if add_bias_kv:
-            self.bias_k = Parameter(torch.empty(1, 1, embed_dim))
-            self.bias_v = Parameter(torch.empty(1, 1, embed_dim))
+            self.bias_k = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
+            self.bias_v = Parameter(torch.empty((1, 1, embed_dim), **factory_kwargs))
         else:
             self.bias_k = self.bias_v = None
 
@@ -1046,10 +1049,12 @@ class PReLU(Module):
     __constants__ = ['num_parameters']
     num_parameters: int
 
-    def __init__(self, num_parameters: int = 1, init: float = 0.25) -> None:
+    def __init__(self, num_parameters: int = 1, init: float = 0.25,
+                 device='cpu', dtype=torch.get_default_dtype()) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
         self.num_parameters = num_parameters
         super(PReLU, self).__init__()
-        self.weight = Parameter(torch.empty(num_parameters).fill_(init))
+        self.weight = Parameter(torch.empty(num_parameters, **factory_kwargs).fill_(init))
 
     def forward(self, input: Tensor) -> Tensor:
         return F.prelu(input, self.weight)

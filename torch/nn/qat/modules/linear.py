@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.intrinsic import LinearReLU
@@ -20,11 +21,12 @@ class Linear(nn.Linear):
     _FLOAT_MODULE = nn.Linear
 
     def __init__(self, in_features, out_features, bias=True,
-                 qconfig=None):
-        super().__init__(in_features, out_features, bias)
+                 qconfig=None, device='cpu', dtype=torch.get_default_dtype()) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__(in_features, out_features, bias, **factory_kwargs)
         assert qconfig, 'qconfig must be provided for QAT module'
         self.qconfig = qconfig
-        self.weight_fake_quant = qconfig.weight()
+        self.weight_fake_quant = qconfig.weight(factory_kwargs=factory_kwargs)
 
     def forward(self, input):
         return F.linear(input, self.weight_fake_quant(self.weight), self.bias)

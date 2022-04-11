@@ -11,10 +11,11 @@ class _InstanceNorm(_NormBase):
         eps: float = 1e-5,
         momentum: float = 0.1,
         affine: bool = False,
-        track_running_stats: bool = False
+        track_running_stats: bool = False,
+        **kwargs
     ) -> None:
         super(_InstanceNorm, self).__init__(
-            num_features, eps, momentum, affine, track_running_stats)
+            num_features, eps, momentum, affine, track_running_stats, **kwargs)
 
     def _check_input_dim(self, input):
         raise NotImplementedError
