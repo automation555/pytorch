@@ -346,7 +346,7 @@ def create_qparam_nodes(quantizer: QuantizerCls, node_name: str, scale: Any, zer
     return (scale_node, zero_point_node)
 
 
-def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module], cache: Dict[Node, bool]) -> bool:
+def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module], cache: Optional[Dict[Node, bool]] = None) -> bool:
     """
     If we know for sure that all of this node's args have no
     tensors (are primitives), return True.  If we either
@@ -369,7 +369,7 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
         result = False
     elif node.op == 'get_attr':
         result = False
-    elif node.target is getattr and node.args[1] in ['ndim', 'shape']:
+    elif node.target is getattr and node.args[1] == 'ndim':
         # x1 = x0.ndim
         result = True
     elif node.op == 'call_method' and node.target == 'size':
@@ -389,16 +389,16 @@ def all_node_args_have_no_tensors(node: Node, modules: Dict[str, torch.nn.Module
                 pass
             else:
                 if isinstance(arg, Node):
-                    this_arg_args_have_no_tensors = all_node_args_have_no_tensors(arg, modules, cache)
+                    this_arg_args_have_no_tensors = all_node_args_have_no_tensors(arg, modules)
                     found_one_tensor = found_one_tensor or \
                         (not this_arg_args_have_no_tensors)
                 else:
                     found_one_tensor = True
-            result = not found_one_tensor
+        result = not found_one_tensor
+
     if cache:
         cache[node] = result
     return result
-
 
 def node_return_type_is_int(node: Node) -> bool:
     """
