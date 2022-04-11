@@ -1,10 +1,11 @@
-#include <math.h>
+#include <cmath>
 #include <vector>
 #include <ATen/ATen.h>
 
 #include <ATen/Dispatch.h>
 #include <ATen/native/UpSample.h>
 #include <ATen/Parallel.h>
+#include <ATen/cpu/vec256/vec256.h>
 #include <ATen/native/TensorIterator.h>
 
 namespace at {
@@ -13,6 +14,177 @@ namespace {
 
 using scale_t = std::vector<c10::optional<double>>;
 
+
+template<typename scalar_t>
+static inline void compute_source_index_and_lambda(
+    int64_t& input_index0,
+    int64_t& input_index1,
+    scalar_t& lambda0,
+    scalar_t& lambda1,
+    scalar_t ratio,
+    int64_t output_index,
+    int64_t input_size,
+    int64_t output_size,
+    bool align_corners) {
+  if (output_size == input_size) {
+    // scale_factor = 1, simply copy
+    input_index0 = output_index;
+    input_index1 = output_index;
+    lambda0 = static_cast<scalar_t>(1);
+    lambda1 = static_cast<scalar_t>(0);
+  } else {
+    const scalar_t real_input_index = area_pixel_compute_source_index<scalar_t>(
+        ratio, output_index, align_corners, /*cubic=*/false);
+    input_index0 = static_cast<int64_t>(real_input_index);
+    int64_t offset = (input_index0 < input_size - 1) ? 1 : 0;
+    input_index1 = input_index0 + offset;
+    lambda1 = real_input_index - input_index0;
+    lambda0 = static_cast<scalar_t>(1.) - lambda1;
+  }
+}
+
+// Helper structs and methods for cpu_upsample_linear
+//
+// Interpolation methods that used below are separable, and as such we can compute the interpolation
+// independently per dimension in a recursive way. Please, refer to #10482 for more context.
+//
+// Linear Interpolation structure to compute output value in n-dimensional case.
+// - recursively compute interpolated output for each dimension
+// - we rely a lot on compiler's code optimization such that implemented operations
+//   can be automatically factorized and vectorized using SSE and AVX2
+template <int n, typename scalar_t, typename index_t>
+struct InterpLinear {
+    static inline scalar_t eval(char* src, char** data, const int64_t* strides, int64_t i) {
+        index_t i0 = *(index_t*)&data[0][i * strides[0]];
+        index_t i1 = *(index_t*)&data[2][i * strides[2]];
+        scalar_t w0 = *(scalar_t *)&data[1][i * strides[1]];
+        scalar_t w1 = *(scalar_t *)&data[3][i * strides[3]];
+
+        scalar_t t0 = InterpLinear<n - 1, scalar_t, index_t>::eval(src + i0, &data[4], &strides[4], i);
+        scalar_t t1 = InterpLinear<n - 1, scalar_t, index_t>::eval(src + i1, &data[4], &strides[4], i);
+
+        return t0 * w0 + t1 * w1;
+    }
+};
+
+template <typename scalar_t, typename index_t>
+struct InterpLinear<1, scalar_t, index_t> {
+    static inline scalar_t eval(char* src, char** data, const int64_t* strides, int64_t i) {
+        index_t i0 = *(index_t*)&data[0][i * strides[0]];
+        index_t i1 = *(index_t*)&data[2][i * strides[2]];
+        scalar_t w0 = *(scalar_t *)&data[1][i * strides[1]];
+        scalar_t w1 = *(scalar_t *)&data[3][i * strides[3]];
+        scalar_t t0 = *(scalar_t *)&src[i0];
+        scalar_t t1 = *(scalar_t *)&src[i1];
+        return t0 * w0 + t1 * w1;
+    }
+};
+
+template <int n, typename scalar_t, typename index_t>
+static inline scalar_t interp_linear(char* src, char** data, const int64_t* strides, int64_t i) {
+  return InterpLinear<n, scalar_t, index_t>::eval(src, data, strides, i);
+}
+
+static inline bool is_zero_stride(const int64_t* strides) {
+  return (strides[0] == 0) && (strides[1] == 0) && (strides[2] == 0) && (strides[3] == 0);
+}
+
+template <typename scalar_t, typename index_t>
+static inline bool is_contiguous_stride(const int64_t* strides) {
+  return (strides[0] == sizeof(index_t)) && (strides[1] == sizeof(scalar_t)) &&
+         (strides[2] == sizeof(index_t)) && (strides[3] == sizeof(scalar_t));
+}
+
+
+// Helper class to recursively check if all input strides corresponding to interpolated dimensions
+// are equal zero except on a single dimension.
+//
+// Inputs: array of strides of size N, non_zero_stride_dim which can be -1, 0, 1, 2, ...
+//   if non_zero_stride_dim, we check that all strides are equal zero, otherwise
+//   4 strides corresponding to the strides for index_0, weight_0, index_1 and weight_1 for non_zero_stride_dim
+//   dimension should be non zero.
+//
+// Unit check of the recursion is to verify whether 4 strides for one interpolated dimension are either zero,
+// see method is_zero_stride, or (sizeof(index_t), sizeof(scalar_t), sizeof(index_t), sizeof(scalar_t)), see
+// method is_contiguous_stride.
+//
+// In practice, we have the following cases:
+// - for ND, float32, channel first, strides are
+//         dimN-1,              dim1,           dim0
+//         i0, w0, i1, w1, ..., i0, w0, i1, w1, i0, w0, i1, w1
+// strides=(0,  0,  0,  0, ...,  0,  0,  0,  0,  4,  4,  4,  4)
+//
+// if size dim0 is 1 then its strides are 0 and dim1 strides are equal 4
+//
+// - for ND, float32, channel last, strides are
+//         dimN-1,         dimN-2,             dim0
+//         i0, w0, i1, w1, i0, w0, i1, w1, ... i0, w0, i1, w1
+// strides=(0,  0,  0,  0,  0,  0,  0,  0, ..., 0,  0,  0,  0)
+//
+// Using these methods we can hint the compiler to factorize constant indices and weights
+// in cpu_upsample_linear method
+template <int N, int non_zero_stride_dim, typename scalar_t, typename index_t>
+struct CheckAlmostAllZeroStrides {
+  static inline bool eval(const int64_t* strides) {
+    return (N == non_zero_stride_dim ? is_contiguous_stride<scalar_t, index_t>(strides) : is_zero_stride(strides)) &&
+            CheckAlmostAllZeroStrides<N - 1, non_zero_stride_dim, scalar_t, index_t>::eval(&strides[4]);
+  }
+};
+
+template <int non_zero_stride_dim, typename scalar_t, typename index_t>
+struct CheckAlmostAllZeroStrides<0, non_zero_stride_dim, scalar_t, index_t> {
+  static inline bool eval(const int64_t* strides) {
+    return true;
+  }
+};
+
+template <int n, int s, typename scalar_t, typename index_t>
+static inline bool is_all_zero_stride(const int64_t* strides) {
+  return CheckAlmostAllZeroStrides<n, s, scalar_t, index_t>::eval(strides);
+}
+
+// Helper method to compute linear interpolation
+template <typename scalar_t, typename index_t, int out_ndims>
+static inline void basic_loop(char** data, const int64_t* strides, int64_t n) {
+  char* dst = data[0];
+  char* src = data[1];
+  for (int64_t i = 0; i < n; i++) {
+    *(scalar_t*)&dst[i * strides[0]] = interp_linear<out_ndims, scalar_t, index_t>(
+        src + i * strides[1], &data[2], &strides[2], i);
+  }
+}
+
+// Linear upsampling computation method using TensorIterator for Nd case.
+//
+// Single loop function for 1d, 2d and 3d cases.
+// For N dimensions, output value up to Di dimension can be computed as
+//
+// output_i[a] = linear_interp(output_{i+1}[a], w_{i+1}[a], output_{i+1}[a+1], w_{i+1}[a+1])
+// with
+// output_DN[a] = linear_interp(input_DN[a], w_DN[a], input_DN[a+1], w_DN[a+1])
+//
+// The recursive call is implemented with InterpLinear struct using template for
+// the loop unrolling on compile time.
+template <typename scalar_t, int out_ndims>
+void cpu_upsample_linear(at::TensorIterator& iter)
+{
+  auto loop = [&](char** data, const int64_t* strides, int64_t n) {
+    // special-cases to let the compiler apply compile-time input-specific optimizations
+    if ((strides[0] == sizeof(scalar_t) && (strides[1] == 0) &&
+        is_all_zero_stride<out_ndims, 1, scalar_t, int64_t>(&strides[2]))) {
+      // contiguous channels-first case
+      basic_loop<scalar_t, int64_t, out_ndims>(data, strides, n);
+    } else if ((strides[0] == sizeof(scalar_t) && (strides[1] == sizeof(scalar_t)) &&
+               is_all_zero_stride<out_ndims, -1, scalar_t, int64_t>(&strides[2]))) {
+      // contiguous channels-last case
+      basic_loop<scalar_t, int64_t, out_ndims>(data, strides, n);
+    } else {
+      // fallback
+      basic_loop<scalar_t, int64_t, out_ndims>(data, strides, n);
+    }
+  };
+  iter.for_each(loop);
+}
 
 template <typename scalar_t, typename scale_type>
 void cpu_upsample_linear_backward(
@@ -151,6 +323,152 @@ void cpu_upsample_linear_backward(
   }
 }
 
+
+// Method to compute indices and weights for each interpolated dimension
+// indices_weights = {
+//      {indices_0, weights_0, indices_1, weights_1},  // dim -n
+//      {indices_0, weights_0, indices_1, weights_1},  // dim -(n-1)
+//      ...
+//      {indices_0, weights_0, indices_1, weights_1},  // dim -1
+// }
+// Indices and weights are reshaped as (1, 1, ..., N, ..., 1, 1) to
+// fit input/output tensors.
+// Indices are already containing the strides to optimize the computations
+//
+template<typename scalar_t>
+std::vector<Tensor> compute_indices_weights_linear(
+  int64_t input_size, int64_t output_size, int64_t stride, int64_t ndims, int64_t reshape_dim,
+  bool align_corners, const c10::optional<double> opt_scale
+) {
+
+  scalar_t scale = area_pixel_compute_scale<scalar_t>(input_size, output_size, align_corners, opt_scale);
+
+  std::vector<Tensor> output;
+  auto new_shape = std::vector<int64_t>(ndims, 1);
+  new_shape[reshape_dim] = output_size;
+
+  output.emplace_back(empty(new_shape, CPU(at::kLong)));
+  output.emplace_back(empty(new_shape, CPU(c10::CppTypeToScalarType<scalar_t>())));
+  output.emplace_back(empty(new_shape, CPU(at::kLong)));
+  output.emplace_back(empty(new_shape, CPU(c10::CppTypeToScalarType<scalar_t>())));
+
+  auto input_index0_ptr = output[0].data_ptr<int64_t>();
+  auto lambda0_ptr = output[1].data_ptr<scalar_t>();
+  auto input_index1_ptr = output[2].data_ptr<int64_t>();
+  auto lambda1_ptr = output[3].data_ptr<scalar_t>();
+
+  for (int64_t i=0; i<output_size; i++) {
+
+    compute_source_index_and_lambda<scalar_t>(
+      input_index0_ptr[i], input_index1_ptr[i],
+      lambda0_ptr[i], lambda1_ptr[i],
+      scale, i, input_size, output_size, align_corners
+    );
+    // put stride into indices
+    // index values correspond to input indices (0, 1, 2, 3, ...)
+    // when multiplied by input stride, maximum possible value
+    // input_size[dim-1] * input_size[dim-2] * ... for the given dimension.
+    input_index0_ptr[i] *= stride;
+    input_index1_ptr[i] *= stride;
+  }
+  return output;
+}
+
+// Upsampling linear interpolation kernel for N-d case.
+// Input is assumed to be like NCHW, NCL, NCKHW - interpolated spatial dimension
+// are those from the end up to batch size N and number of channels C.
+//
+// Internally, it uses TensorIterator to optimize the computations.
+// - out_ndims is the number of interpolated dims: 1, 2, 3
+// - scale_type is template type for scales, typically c10::optional<double>
+template <int out_ndims, typename scale_type>
+void upsample_linearNd_kernel_impl(
+    const Tensor& output,
+    const Tensor& input,
+    bool align_corners,
+    const scale_type& scales) {
+
+  // We apply a similar logic as in advanced indexing implementation
+  // - output spatial dimensions are different from input ones and
+  //   we have to restride the input to have strides equal zeron on
+  //   spatial dimensions
+  auto shape = input.sizes().vec();
+  auto strides = input.strides().vec();
+  auto oshape = output.sizes();
+
+  TORCH_INTERNAL_ASSERT(
+    shape.size() == oshape.size() && shape.size() == 2 + out_ndims
+  );
+  TORCH_INTERNAL_ASSERT(strides.size() == 2 + out_ndims);
+
+  for (int i=0; i<out_ndims; i++) {
+    shape[i + 2] = oshape[i + 2];
+    strides[i + 2] = 0;
+  }
+  auto restrided_input = input.as_strided(shape, strides);
+
+  std::vector<std::vector<Tensor>> indices_weights;
+  AT_DISPATCH_FLOATING_TYPES(
+    input.scalar_type(), "compute_indices_weights_linear", [&] {
+      auto es = input.element_size();
+      for (int i=0; i<out_ndims; i++) {
+        indices_weights.emplace_back(
+          compute_indices_weights_linear<scalar_t>(
+            input.size(i + 2), oshape[i + 2], input.stride(i + 2) * es, input.dim(), i + 2, align_corners, scales[i])
+        );
+      }
+    }
+  );
+
+  TensorIteratorConfig config;
+  config.check_all_same_dtype(false)
+    .declare_static_dtype_and_device(input.scalar_type(), input.device())
+    .add_output(output)
+    .add_input(restrided_input);
+
+  for (auto & idx_weight: indices_weights) {
+    for (auto& tensor : idx_weight) {
+      config.add_input(tensor);
+    }
+  }
+
+  auto iter = config.build();
+
+  AT_DISPATCH_FLOATING_TYPES(
+      iter.dtype(), "upsample_linearNd", [&] {
+      cpu_upsample_linear<scalar_t, out_ndims>(iter);
+  });
+
+}
+
+void upsample_linear1d_kernel_impl(
+    const Tensor& output,
+    const Tensor& input,
+    bool align_corners,
+    c10::optional<double> scales_w) {
+  upsample_linearNd_kernel_impl<1, scale_t>(
+    output, input, align_corners, {scales_w});
+}
+
+void upsample_bilinear2d_kernel_impl(
+    const Tensor& output,
+    const Tensor& input,
+    bool align_corners,
+    c10::optional<double> scales_h,
+    c10::optional<double> scales_w) {
+  upsample_linearNd_kernel_impl<2, scale_t>(output, input, align_corners, {scales_h, scales_w});
+}
+
+void upsample_trilinear3d_kernel_impl(
+    const Tensor& output,
+    const Tensor& input,
+    bool align_corners,
+    c10::optional<double> scales_d,
+    c10::optional<double> scales_h,
+    c10::optional<double> scales_w) {
+  upsample_linearNd_kernel_impl<3, scale_t>(output, input, align_corners, {scales_d, scales_h, scales_w});
+}
+
 void upsample_linear1d_backward_kernel_impl(
     const Tensor& grad_input,
     const Tensor& grad_output,
@@ -186,6 +504,9 @@ void upsample_trilinear3d_backward_kernel_impl(
 
 } // anonymous namespace
 
+REGISTER_DISPATCH(upsample_linear1d_kernel, &upsample_linear1d_kernel_impl);
+REGISTER_DISPATCH(upsample_bilinear2d_kernel, &upsample_bilinear2d_kernel_impl);
+REGISTER_DISPATCH(upsample_trilinear3d_kernel, &upsample_trilinear3d_kernel_impl);
 REGISTER_DISPATCH(upsample_linear1d_backward_kernel, &upsample_linear1d_backward_kernel_impl);
 REGISTER_DISPATCH(upsample_bilinear2d_backward_kernel, &upsample_bilinear2d_backward_kernel_impl);
 REGISTER_DISPATCH(upsample_trilinear3d_backward_kernel, &upsample_trilinear3d_backward_kernel_impl);
