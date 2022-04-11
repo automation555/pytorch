@@ -5,36 +5,34 @@
 namespace at {
 namespace native {
 
+using activation_fn = void (*)(TensorIterator&);
+
 using qrelu_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/);
 using qrelu_leaky_fn = void (*)(Tensor& /*out*/, const Tensor& /*qx*/,
-                                const Scalar& /*negval_*/);
-using qsigmoid_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/, double output_scale, int64_t output_zero_point);
+                                Scalar /*negval_*/);
+using qsigmoid_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/);
 using qhardsigmoid_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/);
 using qclamp_fn = void (*)(
     const at::Tensor& /*qx*/,
-    const Scalar& min,
-    const Scalar& max,
-    at::Tensor& /*qy*/);
-using qclamp_minmax_fn = void (*)(
-    const at::Tensor& /*qx*/,
-    const Scalar& /*min or max*/,
+    Scalar min,
+    Scalar max,
     at::Tensor& /*qy*/);
 using qthreshold_fn = void (*)(
     const at::Tensor& /*qx*/,
-    const Scalar& threshold,
-    const Scalar& value,
+    Scalar threshold,
+    Scalar value,
     at::Tensor& /*qy*/);
 using qtanh_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/);
 using qelu_fn = void(*)(
     const at::Tensor& /*qx*/,
-    const Scalar& /*alpha*/,
-    const Scalar& /*scale*/,
-    const Scalar& /*input_scale*/,
+    Scalar /*alpha*/,
+    Scalar /*scale*/,
+    Scalar /*input_scale*/,
     at::Tensor& /*qy*/);
 using qbinary_fn =
     void (*)(Tensor& /*out*/, const Tensor& /*self*/, const Tensor& /*other*/);
 using qadd_scalar_fn =
-    void (*)(Tensor& /*out*/, const Tensor& /*self*/, const Scalar& other /*other*/);
+    void (*)(Tensor& /*out*/, const Tensor& /*self*/, Scalar other /*other*/);
 using qhardswish_fn = void (*)(const at::Tensor& /*qx*/, at::Tensor& /*qy*/);
 using qmaxpool_2d_fn = void (*)(
     const Tensor& qx,
@@ -156,6 +154,8 @@ using qnormalize_fn = void (*)(
     double /* eps */,
     Tensor* /* Y */);
 
+DECLARE_DISPATCH(activation_fn, qglu_stub);
+DECLARE_DISPATCH(activation_fn, qhardglu_stub);
 DECLARE_DISPATCH(qadaptive_avg_pool2d_fn, qadaptive_avg_pool2d_nhwc_stub);
 DECLARE_DISPATCH(qadaptive_avg_pool3d_fn, qadaptive_avg_pool3d_ndhwc_stub);
 DECLARE_DISPATCH(qadd_scalar_fn, qadd_scalar_relu_stub);
@@ -171,8 +171,6 @@ DECLARE_DISPATCH(qbinary_fn, qmul_stub);
 DECLARE_DISPATCH(qcat_nhwc_fn, qcat_nhwc_stub);
 DECLARE_DISPATCH(qcat_nhwc_fn, qcat_relu_nhwc_stub);
 DECLARE_DISPATCH(qclamp_fn, qclamp_stub);
-DECLARE_DISPATCH(qclamp_minmax_fn, qclamp_min_stub);
-DECLARE_DISPATCH(qclamp_minmax_fn, qclamp_max_stub);
 DECLARE_DISPATCH(qelu_fn, qelu_stub);
 DECLARE_DISPATCH(qhardsigmoid_fn, qhardsigmoid_stub);
 DECLARE_DISPATCH(qhardswish_fn, qhardswish_stub);
