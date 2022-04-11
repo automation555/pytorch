@@ -62,6 +62,8 @@
 #include <torch/csrc/distributed/c10d/c10d.h>
 #include <torch/csrc/distributed/rpc/rpc.h>
 #include <torch/csrc/distributed/rpc/testing/testing.h>
+#include <torch/csrc/distributed/spmd/spmd.h>
+
 #endif
 #endif
 
@@ -771,20 +773,6 @@ static void LogAPIUsageOnceFromPython(const std::string& event) {
   }
 }
 
-// Weak reference to tensor, used to test a tensor isn't leaked
-class WeakTensorRef {
-  c10::weak_intrusive_ptr<c10::TensorImpl> weakref_;
-
-public:
-  WeakTensorRef(const at::Tensor& t):
-    weakref_(t.getIntrusivePtr()) {
-  }
-
-  bool expired() {
-    return weakref_.expired();
-  }
-};
-
 extern "C"
 #ifdef _WIN32
 __declspec(dllexport)
@@ -817,6 +805,7 @@ PyObject* initModule() {
   THPUtils_addPyMethodDefs(
       methods, torch::distributed::autograd::python_functions());
   THPUtils_addPyMethodDefs(methods, torch::distributed::rpc::testing::python_functions());
+  THPUtils_addPyMethodDefs(methods, torch::distributed::spmd::python_functions());
 #endif
 #endif
 
@@ -983,12 +972,6 @@ Call this whenever a new thread is created in order to propagate values from
       #endif
     }
   );
-
-  py::class_<WeakTensorRef>(py_module, "_WeakTensorRef")
-    .def(py::init([](py::object tensor) {
-      return WeakTensorRef(THPVariable_Unpack(tensor.ptr()));
-    }))
-    .def("expired", &WeakTensorRef::expired);
 
 #ifdef USE_CUDA
   PyObject *has_cuda = Py_True;
