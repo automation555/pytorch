@@ -1,7 +1,7 @@
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
@@ -16,7 +16,7 @@ import numpy as np
 class MergeIdLists(ModelLayer):
     """Merge multiple ID_LISTs into a single ID_LIST
 
-    Args:
+    Arguments:
         model: A layer model instance
         input_record: Tuple (Struct) of ID_LIST features to be
         merged
@@ -25,7 +25,7 @@ class MergeIdLists(ModelLayer):
         the merged ID_LIST feature
     """
     def __init__(self, model, input_record, name='merged'):
-        super(MergeIdLists, self).__init__(model, name, input_record)
+        super(MergeIdLists, self).__init__(model, input_record, name)
         assert all(schema.equal_schemas(x, IdList) for x in input_record), \
             "Inputs to MergeIdLists should all be IdLists."
 

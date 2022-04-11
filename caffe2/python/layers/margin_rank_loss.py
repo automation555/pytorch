@@ -1,9 +1,9 @@
 ## @package random_neg_rank_loss
 # Module caffe2.python.layers.random_neg_rank_loss
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema, core
 from caffe2.python.layers.layers import (
@@ -19,7 +19,7 @@ class MarginRankLoss(ModelLayer):
 
     def __init__(self, model, input_record, name='margin_rank_loss',
                  margin=0.1, average_loss=False, **kwargs):
-        super(MarginRankLoss, self).__init__(model, name, input_record, **kwargs)
+        super(MarginRankLoss, self).__init__(model, input_record, name, **kwargs)
         assert margin >= 0, ('For hinge loss, margin should be no less than 0')
         self._margin = margin
         self._average_loss = average_loss

@@ -1,9 +1,9 @@
 ## @package uniform_sampling
 # Module caffe2.python.layers.uniform_sampling
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import numpy as np
 
@@ -28,7 +28,7 @@ class UniformSampling(ModelLayer):
         **kwargs
     ):
         super(UniformSampling, self).__init__(
-            model, name, input_record, **kwargs
+            model, input_record, name, **kwargs
         )
 
         assert num_elements > num_samples > 0

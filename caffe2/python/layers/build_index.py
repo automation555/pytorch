@@ -1,7 +1,7 @@
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import numpy as np
 
@@ -23,7 +23,7 @@ class MapToRange(ModelLayer):
         name='map_to_range',
         **kwargs
     ):
-        super(MapToRange, self).__init__(model, name, input_record, **kwargs)
+        super(MapToRange, self).__init__(model, input_record,name, **kwargs)
 
         assert max_index > 0
         assert isinstance(input_record, schema.Scalar)
@@ -32,7 +32,7 @@ class MapToRange(ModelLayer):
 
         self.handler = self.create_param(
             param_name='handler',
-            shape=[],
+            shape=None,
             initializer=('LongIndexCreate', {'max_elements': self.max_index}),
             optimizer=model.NoOptim
         )

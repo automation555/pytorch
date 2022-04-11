@@ -1,9 +1,9 @@
 ## @package batch_lr_loss
 # Module caffe2.python.layers.batch_lr_loss
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import (
@@ -35,7 +35,7 @@ class BatchLRLoss(ModelLayer):
         task_gamma_lb=0.1,
         **kwargs
     ):
-        super(BatchLRLoss, self).__init__(model, name, input_record, **kwargs)
+        super(BatchLRLoss, self).__init__(model, input_record,name, **kwargs)
 
         self.average_loss = average_loss
 

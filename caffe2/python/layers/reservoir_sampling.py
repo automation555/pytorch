@@ -1,9 +1,9 @@
 ## @package reservoir_sampling
 # Module caffe2.python.layers.reservoir_sampling
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import ModelLayer
@@ -20,7 +20,7 @@ class ReservoirSampling(ModelLayer):
     def __init__(self, model, input_record, num_to_collect,
                  name='reservoir_sampling', **kwargs):
         super(ReservoirSampling, self).__init__(
-            model, name, input_record, **kwargs)
+            model, input_record, name, **kwargs)
         assert num_to_collect > 0
         self.num_to_collect = num_to_collect
 
@@ -41,7 +41,7 @@ class ReservoirSampling(ModelLayer):
         )
         self.mutex = self.create_param(
             param_name='mutex',
-            shape=[],
+            shape=None,
             initializer=('CreateMutex',),
             optimizer=model.NoOptim,
         )

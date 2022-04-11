@@ -1,7 +1,7 @@
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import (
@@ -42,7 +42,7 @@ class SparseDropoutWithReplacement(ModelLayer):
             name='sparse_dropout',
             **kwargs):
 
-        super(SparseDropoutWithReplacement, self).__init__(model, name, input_record, **kwargs)
+        super(SparseDropoutWithReplacement, self).__init__(model, input_record, name, **kwargs)
         assert schema.equal_schemas(input_record, IdList), "Incorrect input type"
 
         self.dropout_prob_train = float(dropout_prob_train)

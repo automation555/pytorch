@@ -1,9 +1,9 @@
 ## @package sparse_feature_hash
 # Module caffe2.python.layers.sparse_feature_hash
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema, core
 from caffe2.python.layers.layers import (
@@ -22,7 +22,7 @@ class SparseFeatureHash(ModelLayer):
 
     def __init__(self, model, input_record, seed=0, modulo=None,
                  use_hashing=True, use_divide_mod=False, divisor=None, name='sparse_feature_hash', **kwargs):
-        super(SparseFeatureHash, self).__init__(model, name, input_record, **kwargs)
+        super(SparseFeatureHash, self).__init__(model, input_record, name, **kwargs)
 
         assert use_hashing + use_divide_mod < 2, "use_hashing and use_divide_mod cannot be set true at the same time."
 

@@ -1,8 +1,8 @@
 # Module caffe2.python.layers.dropout
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import ModelLayer
@@ -19,7 +19,7 @@ class Dropout(ModelLayer):
             dropout_for_eval=False,
             **kwargs):
 
-        super(Dropout, self).__init__(model, name, input_record, **kwargs)
+        super(Dropout, self).__init__(model, input_record, name, **kwargs)
         assert isinstance(input_record, schema.Scalar), "Incorrect input type"
         assert (ratio >= 0 and ratio < 1.0), \
             "Expected 0 <= ratio < 1, but got ratio of %s" % ratio

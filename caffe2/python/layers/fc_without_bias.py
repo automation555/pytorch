@@ -1,9 +1,9 @@
 ## @package fc_without_bias
 # Module caffe2.python.layers.fc_without_bias
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import schema
 from caffe2.python.layers.layers import ModelLayer
@@ -25,7 +25,7 @@ class FCWithoutBias(SamplingTrainableMixin, ModelLayer):
         uniform_weight_init_scale_numerator=1.0,
         **kwargs
     ):
-        super(FCWithoutBias, self).__init__(model, name, input_record, **kwargs)
+        super(FCWithoutBias, self).__init__(model, input_record, name, **kwargs)
         assert isinstance(input_record, schema.Scalar), "Incorrect input type"
         assert len(input_record.field_types()[0].shape) > 0, (
             "FCWithoutBias expects limited dimensions of the input tensor"

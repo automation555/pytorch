@@ -1,6 +1,6 @@
 ## @package layers
 # Module caffe2.python.layers.layers
-
+from __future__ import absolute_import, division, print_function, unicode_literals
 
 import logging
 from collections import namedtuple
@@ -252,8 +252,8 @@ class ModelLayer(object):
     def __init__(
         self,
         model,
-        prefix,
         input_record,
+        prefix,
         predict_input_record_fields=None,
         tags=None,
         **kwargs

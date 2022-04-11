@@ -15,10 +15,10 @@
 
 # @package label_smooth
 # Module caffe2.python.layers.label_smooth
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.python import core, schema
 from caffe2.python.layers.layers import ModelLayer
@@ -29,7 +29,7 @@ class LabelSmooth(ModelLayer):
     def __init__(
         self, model, label, smooth_matrix, name='label_smooth', **kwargs
     ):
-        super(LabelSmooth, self).__init__(model, name, label, **kwargs)
+        super(LabelSmooth, self).__init__(model, label, name, **kwargs)
         self.label = label
         # shape as a list
         smooth_matrix = np.array(smooth_matrix).astype(np.float32).flatten()
