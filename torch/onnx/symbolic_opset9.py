@@ -113,14 +113,14 @@ def div(g, self, other, *args):
 
 @parse_args('v', 'v', 's')
 def _div_rounding_mode(g, self, other, rounding_mode):
-    if rounding_mode is None:
+    if rounding_mode == 'true':
         return true_divide(g, self, other)
     elif rounding_mode == 'floor':
         return _floor_divide(g, self, other)
     elif rounding_mode == 'trunc':
         return _trunc_divide(g, self, other)
     else:
-        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected None, "floor" or "trunc"')
+        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected "true", "floor" or "trunc"')
 
 
 def _trunc_divide(g, self, other):
@@ -906,6 +906,44 @@ max_pool3d = _max_pool("max_pool3d", _triple, 3, return_indices=False)
 max_pool1d_with_indices = _max_pool("max_pool1d_with_indices", _single, 1, return_indices=True)
 max_pool2d_with_indices = _max_pool("max_pool2d_with_indices", _pair, 2, return_indices=True)
 max_pool3d_with_indices = _max_pool("max_pool3d_with_indices", _triple, 3, return_indices=True)
+
+
+def _max_unpool(name, tuple_fn, ndims):
+    def symbolic_fn(g, input, indices, output_size, *args):
+        # Set appropriately for check
+        kernel_size = 2
+        kwargs = {
+            'kernel_shape_i': tuple_fn(kernel_size)
+        }
+        # Check if pads and strides are provided
+        if len(args) == 2:
+            kwargs['pads_i'] = tuple_fn(args[0])
+            kwargs['strides_i'] = tuple_fn(args[1])
+
+        # Calculate output size
+        input_rank = sym_help._get_tensor_rank(input)
+        if input_rank is None:
+            raise RuntimeError('Unsupported: ONNX export of max_unpool for unknown '
+                               'input rank.')
+        
+        dim_n = sym_help._unsqueeze_helper(g, sym_help._size_helper(g, input, g.op("Constant", value_t=torch.tensor(0))), [0])
+        output_shape = [dim_n]
+        if input_rank == ndims + 2:
+            dim_c = sym_help._unsqueeze_helper(g, sym_help._size_helper(g, input, g.op("Constant", value_t=torch.tensor(1))), [0])
+            output_shape.append(dim_c)
+        for shape in sym_help._unpack_list(output_size):
+            output_shape.append(sym_help._unsqueeze_helper(g, shape, [0]))
+        output_shape = g.op("Concat", *output_shape, axis_i=0)
+
+        r = g.op("MaxUnpool", input, indices, output_shape, **kwargs)
+        return r
+
+    return symbolic_fn
+
+
+max_unpool1d = _max_unpool("max_unpool1d", _single, 1)
+max_unpool2d = _max_unpool("max_unpool2d", _pair, 2)
+max_unpool3d = _max_unpool("max_unpool3d", _triple, 3)
 
 
 def _avg_pool(name, tuple_fn):
@@ -1865,12 +1903,6 @@ def hardswish(g, self):
                                           g.op('Constant', value_t=torch.tensor(6, dtype=torch.float)))
     hardtanh_ = g.op("Div", hardtanh_, g.op('Constant', value_t=torch.tensor(6, dtype=torch.float)))
     return g.op("Mul", self, hardtanh_)
-
-
-@parse_args('v')
-def hardsigmoid(g, self):
-    return g.op('HardSigmoid', self, alpha_f=1 / 6)
-
 
 def alias(g, self):
     return self

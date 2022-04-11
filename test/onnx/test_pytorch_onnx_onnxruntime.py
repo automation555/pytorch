@@ -972,18 +972,6 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.rand(3, 3).to(dtype=torch.float32)
         self.run_test(MyModel(), x)
 
-    def test_hardsigmoid(self):
-        model = torch.nn.Hardsigmoid()
-
-        x = torch.rand(3, 3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
-        # corner cases
-        x = torch.tensor(3).to(dtype=torch.float32)
-        self.run_test(model, x)
-        x = torch.tensor(-3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
     def test_clamp(self):
         class ClampModel(torch.nn.Module):
             def forward(self, x):
@@ -1262,6 +1250,23 @@ class TestONNXRuntime(unittest.TestCase):
     def test_maxpool_dilation(self):
         model = torch.nn.MaxPool1d(2, stride=1, dilation=2)
         x = torch.randn(20, 16, 50)
+        self.run_test(model, x)
+
+    @disableScriptTest()  # Functional module not scriptable
+    def test_maxunpool_2d(self):
+        class MaxUnpoolModel(torch.nn.Module):
+            def __init__(self):
+                super(MaxUnpoolModel, self).__init__()
+                self.pool = torch.nn.MaxPool2d(2, stride=2, return_indices=True)
+                self.unpool = torch.nn.MaxUnpool2d(2, stride=2)
+
+            def forward(self, input):
+                output, indices = self.pool(input)
+                return self.unpool(output, indices)#, output_size=torch.Size([1, 1, 5, 5]))
+        
+        model = MaxUnpoolModel()
+        x = torch.ones(1, 1, 4, 4)
+        print(model(x))
         self.run_test(model, x)
 
     def test_avgpool_default_stride(self):
@@ -1552,8 +1557,8 @@ class TestONNXRuntime(unittest.TestCase):
     def test_div_rounding_mode(self):
         class TrueDivModule(torch.nn.Module):
             def forward(self, x, y):
-                return (x.div(y, rounding_mode=None),
-                        torch.div(x, y, rounding_mode=None))
+                return (x.div(y, rounding_mode='true'),
+                        torch.div(x, y, rounding_mode='true'))
 
         class TruncDivModule(torch.nn.Module):
             def forward(self, x, y):
@@ -5404,7 +5409,7 @@ class TestONNXRuntime(unittest.TestCase):
     def test_det(self):
         class Det(torch.nn.Module):
             def forward(self, x):
-                return torch.linalg.det(x)
+                return torch.det(x)
 
         x = torch.randn(2, 3, 5, 5)
         self.run_test(Det(), x)
