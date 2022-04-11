@@ -3,7 +3,6 @@
 #include <c10/util/Exception.h>
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/ir/ir.h>
-#include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/canonicalize.h>
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
 #include <torch/csrc/jit/passes/utils/subgraph_utils.h>
@@ -179,20 +178,6 @@ class SubgraphSlicer {
     return true;
   }
 
-  value_list sortReverseTopological(ArrayRef<Value*> inputs) {
-    value_list result;
-    for (auto i : inputs) {
-      if (i->node()->owningBlock() == block_) {
-        result.push_back(i);
-      }
-    }
-    // Sort in reverse topological order
-    std::sort(result.begin(), result.end(), [&](Value* a, Value* b) {
-      return a->node()->isAfter(b->node());
-    });
-    return result;
-  }
-
   bool isViewOp(Node* n) {
     switch (n->kind()) {
       case aten::view:
@@ -229,7 +214,7 @@ class SubgraphSlicer {
         consumer = SubgraphUtils::createSingletonSubgraphAndUpdateAliasing(
             consumer, prim::DifferentiableGraph, aliasDb_);
       }
-      auto inputs = sortReverseTopological(consumer->inputs());
+      auto inputs = sortReverseTopological(consumer->inputs(), block_);
       for (auto input : inputs) {
         if (auto group = tryMerge(consumer, input->node())) {
           // we successfully merged, so the new group's `inputs` may have
@@ -271,9 +256,7 @@ std::vector<Node*> CreateAutodiffSubgraphs(
     size_t threshold) {
   std::vector<Node*> diff_nodes;
   AliasDb db(graph);
-  GRAPH_DEBUG("Before creating autodiff subgraphs", *graph);
   SubgraphSlicer(graph->block(), graph, threshold, db, diff_nodes).run();
-  GRAPH_DEBUG("After creating autodiff subgraphs", *graph);
   return diff_nodes;
 }
 } // namespace jit

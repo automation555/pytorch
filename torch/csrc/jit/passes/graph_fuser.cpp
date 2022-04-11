@@ -7,7 +7,6 @@
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
 #include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
-#include <torch/csrc/jit/passes/tensorexpr_fuser.h>
 #include <torch/csrc/jit/passes/utils/subgraph_utils.h>
 #include <torch/csrc/jit/runtime/autodiff.h>
 #include <torch/csrc/jit/runtime/custom_operator.h>
@@ -121,6 +120,16 @@ bool isSimpleMap(Node* node) {
   return true;
 }
 
+Value* broadcastSizes(at::ArrayRef<Value*> sizes, AliasDb* db) {
+  AT_ASSERT(!sizes.empty());
+  Graph* graph = sizes[0]->owningGraph();
+  Node* broadcast_n =
+      graph->insertNode(graph->create(prim::BroadcastSizes, sizes));
+  broadcast_n->output()->setType(ListType::ofInts());
+  db->createValue(broadcast_n->output());
+  return broadcast_n->output();
+}
+
 struct GraphFuser {
   using FusionCallback = std::function<bool(GraphFuser*, Node*)>;
 
@@ -151,13 +160,12 @@ struct GraphFuser {
       AliasDb* aliasDb,
       Block* block,
       FusionCallback callback,
-      Symbol kind,
-      bool strict_fuser_check = false)
+      Symbol kind)
       : block_(block),
         aliasDb_(aliasDb),
         callback_(std::move(callback)),
         kind_(kind),
-        strict_fuser_check_(strict_fuser_check) {}
+        strict_fuser_check_(false) {}
 
   void setInputArgLimit(size_t limit) {
     subgraph_arg_limit_ = limit;
@@ -177,7 +185,7 @@ struct GraphFuser {
     if (!v->type()->isSubtypeOf(TensorType::get())) {
       return true;
     }
-    auto device = v->type()->expectRef<TensorType>().device();
+    auto device = v->type()->expect<TensorType>()->device();
     if (!device) {
       return !strict_fuser_check;
     }
@@ -185,11 +193,8 @@ struct GraphFuser {
       return canFuseOnCPU();
     } else if ((*device).is_cuda()) {
       return canFuseOnGPU();
-    } else if ((*device).is_xpu()) {
-      return false;
-    } else {
-      TORCH_CHECK_NOT_IMPLEMENTED(false, "Unknown device for graph fuser");
     }
+    throw std::runtime_error("Unknown device");
   }
 
   // Default fusability check - used when the user doesn't pass in
@@ -556,23 +561,9 @@ struct GraphFuser {
     return consumer->reverseIterator();
   }
 
-  value_list sortReverseTopological(ArrayRef<Value*> inputs) {
-    value_list result;
-    for (auto i : inputs) {
-      if (i->node()->owningBlock() == block_) {
-        result.push_back(i);
-      }
-    }
-    // Sort in reverse topological order
-    std::sort(result.begin(), result.end(), [&](Value* a, Value* b) {
-      return a->node()->isAfter(b->node());
-    });
-    return result;
-  }
-
   graph_node_list::iterator scanNodeForChunks(Node* consumer) {
     if (consumer->kind() == prim::FusionGroup) {
-      auto inputs = sortReverseTopological(consumer->inputs());
+      auto inputs = sortReverseTopological(consumer->inputs(), block_);
       for (auto producer : inputs) {
         if (!canFuseChunk(consumer, producer)) {
           continue;
@@ -867,7 +858,7 @@ struct GraphFuser {
       // handle inputs in reverse topological order as well...
       // otherwise in f(a,a+b) it will appear a is used twice if we consider
       // the f-a fusion before the f-(a+b) fusion first.
-      auto inputs = sortReverseTopological(consumer->inputs());
+      auto inputs = sortReverseTopological(consumer->inputs(), block_);
       for (auto producer : inputs) {
         if (tryToMoveChunk(consumer, producer)) {
           // the chunk before this consumer was re-arranged to allow fusion,
@@ -919,6 +910,13 @@ struct GraphFuser {
       }
       bchunk->destroy();
     }
+  }
+
+  bool usedOnlyInSize(Value* v) {
+    const auto& uses = v->uses();
+    return std::all_of(uses.begin(), uses.end(), [](const Use& u) {
+      return u.user->matches("aten::size(Tensor self) -> int[]");
+    });
   }
 
   // Builds up expressions that compute shapes of all intermediates (and
@@ -1085,7 +1083,7 @@ struct GraphFuser {
       Node* fused_cat = createFusedConcat(cat);
       Value* fused_cat_out = fused_cat->output();
 
-      auto sorted_inputs = sortReverseTopological(fused_cat->inputs());
+      auto sorted_inputs = sortReverseTopological(fused_cat->inputs(), block_);
       size_t input_idx = 0;
       bool any_fused = false;
       while (input_idx < sorted_inputs.size()) {
@@ -1098,7 +1096,7 @@ struct GraphFuser {
         AT_ASSERT(maybe_group && maybe_group == fused_cat);
         // We could have destroyed multiple inputs when performing this fusion,
         // so we have to recompute the list and iterate over it again.
-        sorted_inputs = sortReverseTopological(fused_cat->inputs());
+        sorted_inputs = sortReverseTopological(fused_cat->inputs(), block_);
         input_idx = 0;
       }
 
@@ -1127,13 +1125,6 @@ struct GraphFuser {
   }
 
   void run() {
-// TODO: old fuser is not maintained internally, somewhere it is being turned on
-// inadvertently for certain workflows. make this a no-op until we identify
-// location
-#if defined(FBCODE_CAFFE2)
-    return;
-#endif
-
     // Run the pass until no changes are made.
     // This is necessary, because the algorithm can miss out on certain fusion
     // opportunities if ran only once. Consider this graph:
@@ -1180,8 +1171,7 @@ struct GraphFuser {
 
     for (Node* node : block_->nodes()) {
       for (Block* sub_block : node->blocks()) {
-        GraphFuser(aliasDb_, sub_block, callback_, kind_, strict_fuser_check_)
-            .run();
+        GraphFuser(aliasDb_, sub_block, callback_, kind_).run();
       }
     }
   }
@@ -1256,7 +1246,7 @@ void FuseGraph(std::shared_ptr<Graph>& graph, bool strict_fuser_check) {
 
 void CustomFuseGraph(
     std::shared_ptr<Graph>& graph,
-    const std::function<bool(Node*)>& fn,
+    std::function<bool(Node*)> fn,
     Symbol kind,
     size_t arg_limit) {
   AliasDb db(graph);
