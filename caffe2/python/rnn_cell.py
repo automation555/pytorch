@@ -1,12 +1,8 @@
 ## @package rnn_cell
 # Module caffe2.python.rnn_cell
-
-
-
-
-
 import functools
 import inspect
+import itertools
 import logging
 import numpy as np
 import random
@@ -40,7 +36,7 @@ def _RectifyName(blob_reference_or_name):
 def _RectifyNames(blob_references_or_names):
     if blob_references_or_names is None:
         return None
-    return [_RectifyName(i) for i in blob_references_or_names]
+    return list(map(_RectifyName, blob_references_or_names))
 
 
 class RNNCell(object):
@@ -234,7 +230,7 @@ class RNNCell(object):
         '''
         Returns recurrent state names with self.name scoping applied
         '''
-        return [self.scope(name) for name in self.get_state_names_override()]
+        return list(map(self.scope, self.get_state_names_override()))
 
     def get_state_names_override(self):
         '''

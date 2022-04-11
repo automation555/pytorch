@@ -1,14 +1,11 @@
 ## @package sampling_trainable_mixin
 # Module caffe2.python.layers.sampling_trainable_mixin
 
-
-
-
-
 import abc
 
 
-class SamplingTrainableMixin(metaclass=abc.ABCMeta):
+class SamplingTrainableMixin(object):
+    __metaclass__ = abc.ABCMeta
 
     def __init__(self, *args, **kwargs):
         super(SamplingTrainableMixin, self).__init__(*args, **kwargs)

@@ -34,10 +34,6 @@ The key functions are:
   implemented on the CPU.
 """
 
-
-
-
-
 from caffe2.proto import caffe2_pb2
 from caffe2.python import (
     workspace, device_checker, gradient_checker, test_util, core)
@@ -54,7 +50,11 @@ import struct
 
 
 def is_sandcastle():
-    return os.getenv('SANDCASTLE') == '1' or os.getenv('TW_JOB_USER') == 'sandcastle'
+    if os.getenv('SANDCASTLE') == '1':
+        return True
+    elif os.getenv('TW_JOB_USER') == 'sandcastle':
+        return True
+    return False
 
 
 def is_travis():
@@ -108,7 +108,7 @@ hypothesis.settings.register_profile(
         max_examples=50,
         min_satisfying_examples=1,
         verbosity=hypothesis.Verbosity.verbose,
-        deadline=10000))
+        deadline=1000))
 hypothesis.settings.register_profile(
     "dev",
     settings(
@@ -116,8 +116,7 @@ hypothesis.settings.register_profile(
         database=None,
         max_examples=10,
         min_satisfying_examples=1,
-        verbosity=hypothesis.Verbosity.verbose,
-        deadline=10000))
+        verbosity=hypothesis.Verbosity.verbose))
 hypothesis.settings.register_profile(
     "debug",
     settings(
@@ -125,8 +124,7 @@ hypothesis.settings.register_profile(
         database=None,
         max_examples=1000,
         min_satisfying_examples=1,
-        verbosity=hypothesis.Verbosity.verbose,
-        deadline=50000))
+        verbosity=hypothesis.Verbosity.verbose))
 
 hypothesis.settings.load_profile(
     'sandcastle' if is_sandcastle() else os.getenv('CAFFE2_HYPOTHESIS_PROFILE',

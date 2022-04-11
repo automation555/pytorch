@@ -1,11 +1,6 @@
 # @package parallel_workers
 # Module caffe2.python.parallel_workers
 
-
-
-
-
-
 '''
 This module provides a python-land multithreaded mechanism for executing work.
 
@@ -108,7 +103,7 @@ class Metrics(object):
             self._metrics[count_key] += 1
 
 
-class State():
+class State(object):
     __metaclass__ = ABCMeta
 
     @abstractmethod

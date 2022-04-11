@@ -1,8 +1,3 @@
-
-
-
-
-
 from builtins import bytes
 import copy
 import logging

@@ -115,7 +115,7 @@ class ParameterSharingTest(LayersTestCase):
                 self.assertEquals(self.model.layers[-1].w,
                                   'global_scope/fc/w')
 
-                with self.assertRaisesRegex(ValueError, 'Got inconsistent shapes .*'):
+                with self.assertRaisesRegex(self, ValueError, 'Got inconsistent shapes .*'):
                     self.model.FC(
                         self.model.input_feature_schema.float_features,
                         output_dims + 1
