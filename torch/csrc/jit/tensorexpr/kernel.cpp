@@ -9,7 +9,6 @@
 #include <torch/csrc/jit/tensorexpr/ir_printer.h>
 #include <torch/csrc/jit/tensorexpr/ir_simplifier.h>
 #include <torch/csrc/jit/tensorexpr/loopnest.h>
-#include <torch/csrc/jit/tensorexpr/operators/conv2d.h>
 
 using namespace torch::jit;
 using namespace torch::jit::tensorexpr;
@@ -18,17 +17,11 @@ namespace torch {
 namespace jit {
 namespace tensorexpr {
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_loop_levels = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_block_count = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static int te_cuda_pointwise_block_size = -1;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool fallback_allowed = false;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool te_generate_block_code = false;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 static bool te_must_use_llvm_on_cpu = true;
 static bool cat_wo_conditionals = false; // NOLINT
 
@@ -114,79 +107,6 @@ c10::optional<at::Device> pickDeviceType(
   return device;
 }
 
-// If v is a Tensor with concretely-known sizes, return them, else nullopt.
-c10::optional<std::vector<int64_t>> tensorSizes(torch::jit::Value* v) {
-  auto const& it = v->type()->cast<TensorType>();
-  if (!it) {
-    return c10::nullopt;
-  }
-  if (!it->isComplete()) {
-    return c10::nullopt;
-  }
-  return it->sizes().concrete_sizes();
-}
-
-// The fuser only supports conv2d with very specific properties:
-// - Static shapes: 4-d input and filter, 1-d bias.
-// - Constant strides/padding/dilation/groups
-// - Equal padding and strides, dilation == 1.
-// - Depthwise (groups == in_channels == out_channels)
-// - 3x3 kernel
-bool conv2dIsSupported(const torch::jit::Node* node) {
-  auto const& input = tensorSizes(node->input(0));
-  auto const& weight = tensorSizes(node->input(1));
-  auto const& bias = tensorSizes(node->input(2));
-  auto const& stride = constant_as<c10::List<int64_t>>(node->input(3));
-  auto const& pad = constant_as<c10::List<int64_t>>(node->input(4));
-  auto const& dilation = constant_as<c10::List<int64_t>>(node->input(5));
-  auto const& groups = constant_as<int64_t>(node->input(6));
-
-  // Everything should be statically known.
-  if (!input || !weight || !bias || !stride || !pad || !dilation || !groups) {
-    GRAPH_DEBUG("some params aren't static");
-    return false;
-  }
-
-  // Proper ndim for tensor inputs.
-  if (input->size() != 4 || weight->size() != 4 || bias->size() != 1) {
-    GRAPH_DEBUG("inputs are the wrong size");
-    return false;
-  }
-
-  // Depthwise.
-  auto Cin = (*input)[1];
-  auto Cout = (*weight)[0];
-  auto CperG = (*weight)[1];
-  if (Cin != Cout || Cin != *groups || CperG != 1) {
-    GRAPH_DEBUG("not depthwise");
-    return false;
-  }
-
-  // 3x3 kernel.
-  auto KH = (*weight)[2];
-  auto KW = (*weight)[3];
-  if (KH != 3 || KW != 3) {
-    GRAPH_DEBUG("not 3x3");
-    return false;
-  }
-
-  // Stride, pad, and dilation checks.
-  if (stride->size() != 2 || (*stride)[0] != (*stride)[1]) {
-    GRAPH_DEBUG("unsupported stride");
-    return false;
-  }
-  if (pad->size() != 2 || (*pad)[0] != (*pad)[1]) {
-    GRAPH_DEBUG("unsupported pad");
-    return false;
-  }
-  if (dilation->size() != 2 || (*dilation)[0] != 1 || (*dilation)[1] != 1) {
-    GRAPH_DEBUG("unsupported dilation");
-    return false;
-  }
-
-  return true;
-}
-
 } // namespace tensorexpr
 } // namespace jit
 } // namespace torch
@@ -230,6 +150,12 @@ static std::vector<ExprHandle> computeIndicesToBroadcast(
   return bcast;
 }
 
+ExprHandle TensorExprKernel::broadcastBufTemp(
+    BufHandle b,
+    const std::vector<ExprHandle>& axes) {
+  return b.load(computeIndicesToBroadcast(
+      axes, ExprVectorToExprHandleVector(b.node()->dims())));
+}
 ExprHandle TensorExprKernel::broadcast(
     Tensor* t,
     const std::vector<ExprHandle>& axes) {
@@ -276,6 +202,45 @@ ExprHandle promoteToDtype(ExprHandle e, ScalarType dt) {
       throw unsupported_dtype();
   }
   return e;
+}
+
+ArgValue TensorExprKernel::jitToArgValue(const torch::jit::Value* v) const {
+  auto ti = tensors_.find(v);
+  if (ti != tensors_.end()) {
+    return BufHandle(ti->second->buf());
+  }
+  if (v->node()->kind() == prim::Constant) {
+    const auto val = toIValue(v).value();
+    if (val.isDouble()) {
+      return val.toDouble();
+    } else if (val.isInt()) {
+      return val.toInt();
+    } else if (val.isBool()) {
+      return val.toBool();
+    } else if (val.isNone()) {
+      // This is just a placeholder so we don't throw.  None-handling
+      // is operator-specific and should be handled properly in
+      // the operator-specific lowering code.
+      return ArgNone();
+    } else {
+      throw unsupported_dtype();
+    }
+  }
+
+  if (!scalars_.count(v)) {
+    throw malformed_input("no scalar in Constant");
+  }
+
+  return ArgValue(scalars_.at(v));
+}
+
+ExprHandle TensorExprKernel::tensorOrConstant(
+    const ArgValue& v,
+    const std::vector<ExprHandle>& axes) {
+  if (auto b = c10::get_if<BufHandle>(&v)) {
+    return broadcastBufTemp(*b, axes);
+  }
+  return constant(v);
 }
 
 ExprHandle TensorExprKernel::tensorOrConstant(
@@ -447,7 +412,6 @@ std::vector<ExprHandle> TensorExprKernel::inferSizesForValue(
       if (dim < 0) {
         dim = dim + shape.size() + 1;
       }
-      // NOLINTNEXTLINE(clang-diagnostic-sign-compare)
       if (dim < 0 || dim > shape.size()) {
         throw std::runtime_error("Invalid 'dim' input in aten::unsqueeze");
       }
@@ -503,6 +467,23 @@ std::vector<ExprHandle> TensorExprKernel::inferSizesForValue(
   }
 }
 
+ExprHandle TensorExprKernel::constant(const ArgValue& v) {
+  if (auto s = c10::get_if<tensorexpr::VarHandle>(&v)) {
+    return *s;
+  } else if (auto d = c10::get_if<double>(&v)) {
+    return DoubleImm::make(*d);
+  } else if (auto i = c10::get_if<int64_t>(&v)) {
+    return LongImm::make(*i);
+  } else if (auto b = c10::get_if<bool>(&v)) {
+    return BoolImm::make(*b);
+    } else if (c10::get_if<ArgNone>(&v)) {
+      // This is just a placeholder so we don't throw.  None-handling
+      // is operator-specific and should be handled properly in
+      // the operator-specific lowering code.
+      return IntImm::make(0);
+  }
+  throw unsupported_dtype();
+}
 ExprHandle TensorExprKernel::constant(const torch::jit::Value* v) {
   if (v->node()->kind() == prim::Constant) {
     const auto val = toIValue(v).value();
@@ -603,6 +584,44 @@ void TensorExprKernel::promoteInputs(
 
 ExprHandle TensorExprKernel::demoteOutput(
     const ExprHandle& e,
+    const c10::optional<at::ScalarType> type) {
+  if (!type.has_value()) {
+    return e;
+  }
+  if (*type == static_cast<at::ScalarType>(e.dtype().scalar_type())) {
+    return e;
+  }
+
+  switch (*type) {
+// NOLINTNEXTLINE
+#define TYPE_CASE(Type, Name) \
+  case at::ScalarType::Name:  \
+    return cast<Type>(e);
+    AT_FORALL_SCALAR_TYPES_AND(Half, TYPE_CASE);
+#undef TYPE_CASE
+    case at::ScalarType::Bool:
+      return cast<bool>(e);
+    default:
+      throw unsupported_dtype();
+  }
+
+  return e;
+}
+
+c10::optional<at::ScalarType> getOutputType(const torch::jit::Value* v) {
+  if (v->type()->kind() != TypeKind::TensorType) {
+    return c10::optional<at::ScalarType>();
+  }
+
+  if (!v->isCompleteTensor()) {
+    return c10::nullopt;
+  }
+
+  return v->type()->castRaw<TensorType>()->scalarType();
+}
+
+ExprHandle TensorExprKernel::demoteOutput(
+    const ExprHandle& e,
     const torch::jit::Value* v) {
   if (v->type()->kind() != TypeKind::TensorType) {
     return e;
@@ -699,6 +718,13 @@ std::vector<ExprHandle> TensorExprKernel::valueShape(
   return ExprVectorToExprHandleVector(it->second->buf()->dims());
 }
 
+std::vector<ExprHandle> TensorExprKernel::valueShape(const ArgValue& v) {
+  if (auto b = c10::get_if<tensorexpr::BufHandle>(&v)) {
+    return ExprVectorToExprHandleVector(b->node()->dims());
+  }
+  return {};
+}
+
 Tensor* TensorExprKernel::computeOneOperand(
     const std::string& name,
     const torch::jit::Value* v,
@@ -743,6 +769,30 @@ Tensor* TensorExprKernel::computeTwoOperand(
         promoteInputs(inputs);
         ExprHandle compute = innerExpr(inputs[0], inputs[1]);
         return demoteOutput(compute, n->output());
+      });
+}
+
+Tensor* TensorExprKernel::computeTwoOperand(
+    const std::string& name,
+    const std::vector<ArgValue> inputValues,
+    const c10::optional<at::ScalarType> outputTensorType,
+    const std::vector<ExprHandle> outputShape,
+    const std::function<ExprHandle(const ExprHandle&, const ExprHandle&)>&
+        innerExpr) {
+  return Compute(
+      name,
+      c10::fmap<DimArg>(outputShape),
+      [this, inputValues, outputTensorType, innerExpr](
+          const std::vector<VarHandle>& axes) {
+        std::vector<ExprHandle> indices(axes.begin(), axes.end());
+        std::vector<ExprHandle> inputs = {
+            tensorOrConstant(inputValues[0], indices),
+            tensorOrConstant(inputValues[1], indices),
+        };
+
+        promoteInputs(inputs);
+        ExprHandle compute = innerExpr(inputs[0], inputs[1]);
+        return demoteOutput(compute, outputTensorType);
       });
 }
 
@@ -935,8 +985,18 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
     } break;
 
     case aten::mul: {
+      std::vector<ArgValue> argInputs;
+      for (auto inp : v->node()->inputs()) {
+        argInputs.push_back(jitToArgValue(inp));
+      }
+      auto outputType = getOutputType(v->node()->output());
+      auto outputShape = inferSizesForValue(v);
       return computeTwoOperand(
-          "aten_mul", v, [](const ExprHandle& lhs, const ExprHandle& rhs) {
+          "aten_mul",
+          argInputs,
+          outputType,
+          outputShape,
+          [](const ExprHandle& lhs, const ExprHandle& rhs) {
             return boolToInteger(lhs) * boolToInteger(rhs);
           });
     } break;
@@ -1179,7 +1239,6 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
                 tensorOrConstant(n->input(0), indices), // input
                 tensorOrConstant(n->input(3), {c}), // mean
                 tensorOrConstant(n->input(4), {c}), // var
-                // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
                 constant(n->input(7)) // eps
             };
             if (hasWeight) {
@@ -1201,7 +1260,6 @@ Tensor* TensorExprKernel::computeValue(const torch::jit::Value* v) {
               weight = inputs[4];
             }
             if (hasBias) {
-              // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
               bias = inputs[5];
             }
 
@@ -1727,9 +1785,7 @@ Stmt* TensorExprKernel::transformLoops(BackendType backendType, Stmt* st) {
       int blockSize = getTECudaPointwiseBlockSize();
 
       if (loopLevels == 2) {
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* outer;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner;
         const int kDefaultBlockSize = 512;
         if (blockSize < 0) {
@@ -1739,13 +1795,9 @@ Stmt* TensorExprKernel::transformLoops(BackendType backendType, Stmt* st) {
         l.setGPUBlockIndex(outer, 0);
         l.setGPUThreadIndex(inner, 0);
       } else if (loopLevels == 3) {
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* outer;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner1;
-        // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
         For* inner2;
         // TODO: change the number of microprocessors
         const int kDefaultBlockCount = 1280;
@@ -1871,7 +1923,6 @@ void TensorExprKernel::genInputDebugNames() {
     std::string sanitized_name = sanitizeName(input->debugName());
     // we could get fancier here, but name conflict is extremely unlikely
     while (name_set.count(sanitized_name)) {
-      // NOLINTNEXTLINE(performance-inefficient-string-concatenation)
       sanitized_name = sanitized_name + "_";
     }
     value_to_name[input] = sanitized_name;
@@ -2002,7 +2053,6 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   BufHandle w = BufHandle(tensors_.at(n->input(1))->buf());
   BufHandle b = BufHandle(tensors_.at(n->input(2))->buf());
 
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int sH, sW;
   auto strides_iv = *toIValue(n->input(3));
   if (strides_iv.isIntList()) {
@@ -2011,7 +2061,6 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     sH = sW = strides_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int pH, pW;
   auto padding_iv = *toIValue(n->input(4));
   if (padding_iv.isIntList()) {
@@ -2020,9 +2069,7 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     pH = pW = padding_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
   int dH, dW;
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
   auto dil_iv = *toIValue(n->input(5));
   if (dil_iv.isIntList()) {
     dH = dil_iv.toIntList()[0];
@@ -2030,13 +2077,7 @@ Tensor* TensorExprKernel::computeConv2d(const torch::jit::Value* v) {
   } else {
     dH = dW = dil_iv.toInt();
   }
-  // NOLINTNEXTLINE(cppcoreguidelines-avoid-magic-numbers)
   int groups = toIValue(n->input(6))->toInt();
-
-  // Generate TE for depthwise convolutions.
-  if (conv2dIsSupported(n)) {
-    return conv2d_depthwise(inp, w, b, sH, pH, groups);
-  }
 
   // Once we have a performant TE representation for conv2d, we could use it
   // here instead of the external call!
