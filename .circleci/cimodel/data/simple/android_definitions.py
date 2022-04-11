@@ -79,6 +79,7 @@ WORKFLOW_DATA = [
     AndroidJob(["x86_64"], "pytorch_linux_build"),
     AndroidJob(["arm", "v7a"], "pytorch_linux_build"),
     AndroidJob(["arm", "v8a"], "pytorch_linux_build"),
+    AndroidJob(["vulkan", "x86_32"], "pytorch_linux_build", is_master_only=False),
     AndroidGradleJob(
         "pytorch-linux-xenial-py3-clang5-android-ndk-r19c-gradle-build-x86_32",
         "pytorch_android_gradle_build-x86_32",
@@ -88,7 +89,7 @@ WORKFLOW_DATA = [
     AndroidGradleJob(
         "pytorch-linux-xenial-py3-clang5-android-ndk-r19c-gradle-custom-build-single",
         "pytorch_android_gradle_custom_build_single",
-        [DOCKER_REQUIREMENT_NDK],
+        [],
         is_master_only=False,
         is_pr_only=True),
     AndroidGradleJob(

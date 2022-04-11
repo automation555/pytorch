@@ -3,7 +3,6 @@
 #include <ATen/ATen.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/Functions.h>
-#include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/op_registration/op_registration.h>
 #include <torch/library.h>
 
@@ -72,10 +71,10 @@ void generic_wrapper_fallback(const c10::OperatorHandle& op, torch::jit::Stack* 
   auto rets = torch::jit::pop(*stack, num_returns);
   for (size_t i = 0; i < num_returns; i++) {
     // TODO: Handle tensor list
-    if (rets[i].isTensor()) {
-      torch::jit::push(*stack, at::detail::make_tensor<GenericWrapperTensorImpl>(std::move(rets[i]).toTensor()));  // yes move!
+    if (args[i].isTensor()) {
+      torch::jit::push(*stack, at::detail::make_tensor<GenericWrapperTensorImpl>(std::move(args[i]).toTensor()));  // yes move!
     } else {
-      torch::jit::push(*stack, std::move(rets[i]));
+      torch::jit::push(*stack, std::move(args[i]));
     }
   }
 }
@@ -100,6 +99,12 @@ TEST(BackendFallbackTest, TestBackendFallbackWithWrapper) {
   Tensor a = at::detail::make_tensor<GenericWrapperTensorImpl>(ones({5, 5}, kDouble));
   Tensor b = batch_norm(a, {}, {}, {}, {}, true, 0.1, 1e-05, false);
   ASSERT_EQ(override_call_count, 1);
+
+  // Errors out with the following:
+  // C++ exception with description "stack.size() == 1 INTERNAL ASSERT FAILED
+  // at "../aten/src/ATen/core/boxing/impl/boxing.h":187, please report a bug to PyTorch.
+  // Boxed kernel was expected to push exactly one return value to the stack."
+  auto result = at::var_mean(a);
 }
 
 TEST(BackendFallbackTest, TestFallthroughBackendFallback) {
