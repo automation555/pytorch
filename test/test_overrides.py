@@ -793,6 +793,10 @@ class TestGradCheckOverride(TestCase):
         a.requires_grad = True
         b.requires_grad = True
 
+        # Run both here to make sure as much of the code path is used as possible
+        gradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False, check_forward=True)
+        gradgradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False, check_forward=True)
+
         gradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False)
         gradgradcheck(torch.add, (a, b), raise_exception=False, check_batched_grad=False)
 
@@ -960,16 +964,6 @@ class TestIndexing(TestCase):
         t[5, A()] = 1
         self.assertIn(Tensor.__setitem__, triggered)
         self.assertEqual(t, torch.tensor([5]))
-
-
-class TestIterator(TestCase):
-    # Regression test for gh-54457
-    def test_iterator(self):
-        t = torch.tensor([5, 6, 7]).as_subclass(SubTensor2)
-        it = iter(t)
-        self.assertIs(type(next(it)), SubTensor2)
-        self.assertIs(type(next(it)), SubTensor2)
-        self.assertIs(type(next(it)), SubTensor2)
 
 if __name__ == '__main__':
     run_tests()
