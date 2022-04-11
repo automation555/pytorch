@@ -1,5 +1,4 @@
 #include <ATen/ATen.h>
-#include <ATen/CPUApplyUtils.h>
 #include <ATen/Dispatch.h>
 #include <ATen/NativeFunctions.h>
 
@@ -103,7 +102,7 @@ Tensor& tril_cpu_(Tensor &self, int64_t k) {
   return self;
 }
 
-Tensor& tril_cpu_out(const Tensor& self, int64_t k, Tensor &result) {
+Tensor& tril_cpu_out(Tensor &result, const Tensor& self, int64_t k) {
   if (result.sizes() != self.sizes()) {
     result.resize_as_(self);
   }
@@ -139,7 +138,7 @@ Tensor& triu_cpu_(Tensor &self, int64_t k) {
   return self;
 }
 
-Tensor& triu_cpu_out(const Tensor& self, int64_t k, Tensor &result) {
+Tensor& triu_cpu_out(Tensor &result, const Tensor& self, int64_t k) {
   if (result.sizes() != self.sizes()) {
     result.resize_as_(self);
   }
