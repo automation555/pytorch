@@ -246,31 +246,6 @@ class TestSparse(TestCase):
             t, _, _ = self._gen_sparse(len(sparse_size), nnz, sparse_size + dense_size)
             _test_coalesce(t)  # this tests correctness
 
-    def test_coalesce_reference_cycle(self):
-        # Test coalesce doesn't create autograd graph cycles (gh-52253)
-
-        # Sanity check that the helper class works as expected
-        t = torch.rand(2)
-        t_ref = torch._C._WeakTensorRef(t)
-        self.assertFalse(t_ref.expired())
-
-        del t
-        self.assertTrue(t_ref.expired())
-
-        def test_sparse_sum():
-            i = torch.tensor([[0], [4]], dtype=torch.long, device=self.device)
-            v = torch.tensor([[[-0.4567, -1.8797, 0.0380, 1.4316]]],
-                             dtype=torch.double, device=self.device)
-            S = torch.sparse_coo_tensor(i, v)
-            S = S.coalesce()
-            S.requires_grad_(True)
-            S2 = S.coalesce()
-            self.assertTrue(S2.is_coalesced())
-            return torch._C._WeakTensorRef(S2)
-
-        ref = test_sparse_sum()
-        self.assertTrue(ref.expired())
-
     def test_ctor_size_checks(self):
         indices = self.index_tensor([
             [0, 0, 0],
@@ -2754,6 +2729,48 @@ class TestSparse(TestCase):
         t = torch.sparse_coo_tensor(torch.tensor(([0, 0], [2, 0])), torch.tensor([1, 4]))
         self.assertRaises(TypeError, lambda: t.numpy())
 
+    def test_hardshrink(self):
+
+        def test_hardshrink_edge_cases(device, dtype):
+            def h(values, l_expected):
+                for l, expected in l_expected.items():
+                    values_tensor = torch.tensor([float(v) for v in values], dtype=dtype, device=device).to_sparse()
+                    expected_tensor = torch.tensor([float(v) for v in expected], dtype=dtype, device=device)
+                    self.assertEqual(expected_tensor == torch.sparse.hardshrink(values_tensor, l).to_dense(),
+                                     torch.ones_like(values_tensor.to_dense(), dtype=torch.bool))
+
+            def test_helper(min, max):
+                inf = math.inf
+                h([0.0, min, -min, 0.1, -0.1, 1.0, -1.0, max, -max, inf, -inf],
+                  {0.0: [0.0, min, -min, 0.1, -0.1, 1.0, -1.0, max, -max, inf, -inf],
+                   min: [0.0, 0.0, 0.0, 0.1, -0.1, 1.0, -1.0, max, -max, inf, -inf],
+                   0.1: [0.0, 0.0, 0.0, 0.0, 0.0, 1.0, -1.0, max, -max, inf, -inf],
+                   1.0: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, max, -max, inf, -inf],
+                   max: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, inf, -inf],
+                   inf: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]})
+
+            test_helper(torch.finfo(dtype).tiny, torch.finfo(dtype).max)
+
+        def simple_test(device, dtype):
+            data = torch.tensor([1, 0.5, 0.3, 0.6], dtype=dtype, device=device).view(2, 2).to_sparse()
+            data_typename = torch.typename(data).split('.')[-1]
+
+            self.assertEqual(torch.tensor([1, 0.5, 0, 0.6], dtype=dtype, device=device).view(2, 2),
+                             torch.sparse.hardshrink(data, 0.3).to_dense())
+            self.assertEqual(torch.tensor([1, 0, 0, 0.6], dtype=dtype, device=device).view(2, 2),
+                             torch.sparse.hardshrink(data, 0.5).to_dense())
+
+            # test default lambd=0.5
+            self.assertEqual(torch.sparse.hardshrink(data), torch.sparse.hardshrink(data, 0.5))
+
+            # test non-contiguous case
+            self.assertEqual(torch.tensor([1, 0, 0.5, 0.6], dtype=dtype, device=device).view(2, 2),
+                             torch.sparse.hardshrink(data.t(), 0.3).to_dense())
+
+        for dtype in [torch.float64]:
+            simple_test(self.device, dtype)
+            test_hardshrink_edge_cases(self.device, dtype) 
+
     def test_softmax(self):
         import torch.nn.functional as F
 
@@ -3218,14 +3235,6 @@ class TestCudaSparse(TestSparse):
         self.device = 'cuda'
         self.legacy_sparse_tensor = torch.cuda.sparse.DoubleTensor
 
-    @unittest.skipIf(torch.cuda.device_count() < 2, "no multi-GPU")
-    def test_mixed_device_constructor(self):
-        # https://github.com/pytorch/pytorch/issues/54075
-        v = torch.empty(2, 0).cuda()
-        torch.sparse_coo_tensor(([0, 1],), v, (4, 0))
-        v = torch.empty(2, 0).cuda(1)
-        torch.sparse_coo_tensor(([0, 1],), v, (4, 0))
-
 
 @unittest.skipIf(not TEST_CUDA, 'CUDA not available')
 class TestCudaUncoalescedSparse(TestCudaSparse):
@@ -3297,11 +3306,13 @@ class TestSparseUnaryUfuncs(TestCase):
 
         sample = samples[0]
 
-        assert isinstance(sample.input, torch.Tensor)
+        if len(sample.input) > 1:
+            self.skipTest("Skipped! Testing unary ops, one input is expected")
+        sample = sample.input[0]
 
-        expected = op(sample.input)
+        expected = op(sample)
         assert torch.is_tensor(expected)
-        output = op(sample.input.to_sparse())
+        output = op(sample.to_sparse())
         assert torch.is_tensor(output)
         self.assertEqual(output.to_dense(), expected)
 
