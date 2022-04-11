@@ -124,7 +124,7 @@
 #      CUDA_ADD_LIBRARY, CUDA_ADD_EXECUTABLE, or CUDA_WRAP_SRCS.  Flags used for
 #      shared library compilation are not affected by this flag.
 #
-#   CUDA_PROPAGATE_HOST_FLAGS_BLACKLIST (Default "")
+#   CUDA_PROPAGATE_HOST_FLAGS_BLOCKLIST (Default "")
 #   -- A list containing the host flags that should not be propagated when
 #      CUDA_PROPAGATE_HOST_FLAGS is ON.
 #
@@ -579,8 +579,8 @@ endif()
 # Propagate the host flags to the host compiler via -Xcompiler
 option(CUDA_PROPAGATE_HOST_FLAGS "Propagate C/CXX_FLAGS and friends to the host compiler via -Xcompile" ON)
 
-# Blacklisted flags to prevent propagation
-set(CUDA_PROPAGATE_HOST_FLAGS_BLACKLIST  "" CACHE STRING "Blacklisted flags to prevent propagation")
+# Blocklisted flags to prevent propagation
+set(CUDA_PROPAGATE_HOST_FLAGS_BLOCKLIST  "" CACHE STRING "Blocklisted flags to prevent propagation")
 
 # Enable CUDA_SEPARABLE_COMPILATION
 option(CUDA_SEPARABLE_COMPILATION "Compile CUDA objects with separable compilation enabled.  Requires CUDA 5.0+" OFF)
@@ -595,7 +595,7 @@ mark_as_advanced(
   CUDA_HOST_COMPILATION_CPP
   CUDA_NVCC_FLAGS
   CUDA_PROPAGATE_HOST_FLAGS
-  CUDA_PROPAGATE_HOST_FLAGS_BLACKLIST
+  CUDA_PROPAGATE_HOST_FLAGS_BLOCKLIST
   CUDA_BUILD_CUBIN
   CUDA_BUILD_EMULATION
   CUDA_VERBOSE_BUILD
@@ -767,30 +767,11 @@ else()
   # Search default search paths, after we search our own set of paths.
   cuda_find_host_program(CUDA_NVCC_EXECUTABLE nvcc)
 endif()
-
-# FAST_NVCC
-if(USE_FAST_NVCC AND CUDA_NVCC_EXECUTABLE AND NOT CUDA_NVCC_EXECUTABLE_ORIGIN)
-  set(CUDA_NVCC_EXECUTABLE_ORIGIN "${CUDA_NVCC_EXECUTABLE}")
-  set(FAST_NVCC_EXECUTABLE "${PROJECT_SOURCE_DIR}/tools/fast_nvcc/fast_nvcc.py")
-  configure_file(${PROJECT_SOURCE_DIR}/tools/fast_nvcc/wrap_nvcc.sh.in "${PROJECT_SOURCE_DIR}/tools/fast_nvcc/tmp/wrap_nvcc.sh")
-  file(COPY "${PROJECT_SOURCE_DIR}/tools/fast_nvcc/tmp/wrap_nvcc.sh"
-    DESTINATION "${PROJECT_SOURCE_DIR}/tools/fast_nvcc/"
-    FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
-  )
-  set(CUDA_NVCC_EXECUTABLE "${PROJECT_SOURCE_DIR}/tools/fast_nvcc/wrap_nvcc.sh")
-endif()
 mark_as_advanced(CUDA_NVCC_EXECUTABLE)
 
 if(CUDA_NVCC_EXECUTABLE AND NOT CUDA_VERSION)
   # Compute the version.
-  execute_process(COMMAND ${CUDA_NVCC_EXECUTABLE} "--version"
-    OUTPUT_VARIABLE NVCC_OUT
-    RESULT_VARIABLE NVCC_RC)
-  if(NOT (${NVCC_RC} EQUAL 0))
-    message(WARNING "Failed to execute '${CUDA_NVCC_EXECUTABLE} --version'")
-    set(CUDA_FOUND FALSE)
-    return()
-  endif()
+  execute_process (COMMAND ${CUDA_NVCC_EXECUTABLE} "--version" OUTPUT_VARIABLE NVCC_OUT)
   string(REGEX REPLACE ".*release ([0-9]+)\\.([0-9]+).*" "\\1" CUDA_VERSION_MAJOR ${NVCC_OUT})
   string(REGEX REPLACE ".*release ([0-9]+)\\.([0-9]+).*" "\\2" CUDA_VERSION_MINOR ${NVCC_OUT})
   set(CUDA_VERSION "${CUDA_VERSION_MAJOR}.${CUDA_VERSION_MINOR}" CACHE STRING "Version of CUDA as computed from nvcc.")
@@ -800,6 +781,7 @@ else()
   string(REGEX REPLACE "([0-9]+)\\.([0-9]+).*" "\\1" CUDA_VERSION_MAJOR "${CUDA_VERSION}")
   string(REGEX REPLACE "([0-9]+)\\.([0-9]+).*" "\\2" CUDA_VERSION_MINOR "${CUDA_VERSION}")
 endif()
+
 
 # Always set this convenience variable
 set(CUDA_VERSION_STRING "${CUDA_VERSION}")
@@ -1440,8 +1422,8 @@ macro(CUDA_WRAP_SRCS cuda_target format generated_files)
 
   macro(_filter_blocklisted_host_flags CUDA_FLAGS)
     string(REGEX REPLACE "[ \t]+" ";" ${CUDA_FLAGS} "${${CUDA_FLAGS}}")
-    foreach(_blacklisted ${CUDA_PROPAGATE_HOST_FLAGS_BLACKLIST})
-      list(REMOVE_ITEM ${CUDA_FLAGS} "${_blacklisted}")
+    foreach(_blocklisted ${CUDA_PROPAGATE_HOST_FLAGS_BLoCKLIST})
+      list(REMOVE_ITEM ${CUDA_FLAGS} "${_blocklisted}")
     endforeach()
     string(REPLACE ";" " " ${CUDA_FLAGS} "${${CUDA_FLAGS}}")
   endmacro()
