@@ -327,8 +327,8 @@
 - name: polar(Tensor abs, Tensor angle) -> Tensor
   abs, angle: polar_backward(grad, result)
 
-- name: _conj(Tensor self) -> Tensor
-  self: grad.conj()
+- name: conj(Tensor(a) self) -> Tensor(a)
+  self: grad.clone().conj_()
 
 - name: copysign.Tensor(Tensor self, Tensor other) -> Tensor
   self: copysign_tensor_self_backward(grad, self, result)
@@ -1098,9 +1098,6 @@
 - name: linalg_eigvalsh(Tensor self, str UPLO="L") -> Tensor
   self: non_differentiable
 
-- name: linalg_eigvals(Tensor self) -> Tensor
-  self: non_differentiable
-
 - name: t(Tensor(a) self) -> Tensor(a)
   self: grad.t()
 
@@ -1210,11 +1207,16 @@
 - name: view.dtype(Tensor(a) self, ScalarType dtype) -> Tensor(a)
   output_differentiability: [False]
 
+# When result1 is true, this is effectively a fused conj() and view_as_real
+- name: view_as_real_physical(Tensor(a) self) -> Tensor(a)
+  self: "self.is_conj() ? at::view_as_complex(grad.contiguous()) : at::view_as_complex(grad.contiguous()).conj()"
+
 - name: view_as_real(Tensor(a) self) -> Tensor(a)
   self: at::view_as_complex(grad.contiguous()) # gx0 + 1j * gx1
 
+# NB: resolve_conj() will implicitly apply contiguous()
 - name: view_as_complex(Tensor(a) self) -> Tensor(a)
-  self: at::view_as_real(grad.contiguous()) # [gx, gy]
+  self: at::view_as_real(grad.resolve_conj()) # [gx, gy]
 
 - name: _s_where(Tensor condition, Tensor self, Tensor other) -> Tensor
   condition: non_differentiable
@@ -1486,8 +1488,8 @@
 - name: _adaptive_avg_pool2d(Tensor self, int[2] output_size) -> Tensor
   self: _adaptive_avg_pool2d_backward(grad, self)
 
-- name: _adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
-  self: _adaptive_avg_pool3d_backward(grad, self)
+- name: adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
+  self: adaptive_avg_pool3d_backward(grad, self)
 
 - name: adaptive_max_pool2d(Tensor self, int[2] output_size) -> (Tensor, Tensor)
   self: adaptive_max_pool2d_backward(grad, self, result1)
@@ -1595,8 +1597,8 @@
   grad_output: _adaptive_avg_pool2d(grad, { grad_output.size(-2), grad_output.size(-1) })
   self: zeros_like(self)
 
-- name: _adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
-  grad_output: _adaptive_avg_pool3d(grad, { grad_output.size(-3), grad_output.size(-2), grad_output.size(-1) })
+- name: adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
+  grad_output: adaptive_avg_pool3d(grad, { grad_output.size(-3), grad_output.size(-2), grad_output.size(-1) })
   self: zeros_like(self)
 
 - name: adaptive_max_pool2d_backward(Tensor grad_output, Tensor self, Tensor indices) -> Tensor
