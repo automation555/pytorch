@@ -6,19 +6,16 @@ torch.set_default_dtype(torch.double)
 
 import itertools
 import functools
-import operator
 import random
 from collections import defaultdict
 import unittest
 from torch.testing._internal.common_utils import TestCase, run_tests, skipIfRocm, do_test_dtypes, \
-    do_test_empty_full, load_tests, TEST_NUMPY, TEST_SCIPY, IS_WINDOWS, gradcheck
+    do_test_empty_full, load_tests, TEST_NUMPY, TEST_SCIPY, IS_WINDOWS, gradcheck, clone_input_helper
 from torch.testing._internal.common_cuda import TEST_CUDA, _get_torch_cuda_version
+from torch.testing._internal.common_methods_invocations import sparse_unary_ufuncs
+from torch.testing._internal.common_device_type import instantiate_device_type_tests, ops
 from numbers import Number
 from typing import Dict, Any
-from torch.testing._internal.common_device_type import \
-    (instantiate_device_type_tests, ops)
-from torch.testing._internal.common_methods_invocations import \
-    (sparse_unary_ufuncs)
 
 if TEST_SCIPY:
     import scipy.sparse
@@ -245,31 +242,6 @@ class TestSparse(TestCase):
 
             t, _, _ = self._gen_sparse(len(sparse_size), nnz, sparse_size + dense_size)
             _test_coalesce(t)  # this tests correctness
-
-    def test_coalesce_reference_cycle(self):
-        # Test coalesce doesn't create autograd graph cycles (gh-52253)
-
-        # Sanity check that the helper class works as expected
-        t = torch.rand(2)
-        t_ref = torch._C._WeakTensorRef(t)
-        self.assertFalse(t_ref.expired())
-
-        del t
-        self.assertTrue(t_ref.expired())
-
-        def test_sparse_sum():
-            i = torch.tensor([[0], [4]], dtype=torch.long, device=self.device)
-            v = torch.tensor([[[-0.4567, -1.8797, 0.0380, 1.4316]]],
-                             dtype=torch.double, device=self.device)
-            S = torch.sparse_coo_tensor(i, v)
-            S = S.coalesce()
-            S.requires_grad_(True)
-            S2 = S.coalesce()
-            self.assertTrue(S2.is_coalesced())
-            return torch._C._WeakTensorRef(S2)
-
-        ref = test_sparse_sum()
-        self.assertTrue(ref.expired())
 
     def test_ctor_size_checks(self):
         indices = self.index_tensor([
@@ -1849,226 +1821,6 @@ class TestSparse(TestCase):
 
         self.assertRaises(RuntimeError, lambda: with_dense.narrow_copy(10, 0, 3))  # dim > sparseDim + denseDim
 
-    def _test_log1p_tensor(self, sparse_tensor):
-        def is_integral(dtype):
-            return dtype in torch.testing.get_all_int_dtypes()
-
-        dense_tensor = sparse_tensor.to_dense()
-        expected_output = dense_tensor.log1p()
-        is_integral_dtype = is_integral(sparse_tensor.dtype)
-        self.assertEqual(expected_output, sparse_tensor.log1p().to_dense())
-        if is_integral_dtype:
-            with self.assertRaisesRegex(RuntimeError, "log1p: result type cannot be Integral, got:"):
-                sparse_tensor.coalesce().log1p_()
-        else:
-            self.assertEqual(expected_output, sparse_tensor.coalesce().log1p_().to_dense())
-
-        if self.is_uncoalesced and not is_integral_dtype:
-            # test in-place op on uncoalesced input
-            with self.assertRaisesRegex(RuntimeError, "in-place on uncoalesced tensors is not supported"):
-                sparse_tensor.log1p_()
-        elif self.is_uncoalesced and is_integral_dtype:
-            with self.assertRaisesRegex(RuntimeError, "log1p: result type cannot be Integral, got"):
-                sparse_tensor.log1p_()
-
-        if not is_integral_dtype:
-            sparse_tensor.requires_grad_()
-            self.assertTrue(sparse_tensor.requires_grad)
-
-            # test autograd
-            x = sparse_tensor.clone()
-            y = sparse_tensor.log1p()
-            with self.assertRaisesRegex(RuntimeError, "log1p of a sparse tensor is made to be non-differentiable"):
-                y.backward(x)
-        else:
-            with self.assertRaisesRegex(RuntimeError, "only Tensors of floating point dtype can require gradients"):
-                sparse_tensor.requires_grad_()
-
-    def test_log1p(self):
-        for dtype in torch.testing.get_all_dtypes(include_bool=False, include_half=False,
-                                                  include_bfloat16=False, include_complex=False):
-            if not self.is_uncoalesced:
-                input_coalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[0], [1], [2]]).transpose(1, 0),
-                    values=torch.tensor([3.0, 4.0, 5.0]),
-                    size=[3, ],
-                    device=self.device,
-                    dtype=dtype
-                ).coalesce()
-                self._test_log1p_tensor(input_coalesced)
-
-                # hybrid sparse input
-                input_coalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[1, 3], [2, 4]]),
-                    values=torch.tensor([[1.0, 3.0], [5.0, 7.0]]),
-                    size=[4, 5, 2],
-                    device=self.device,
-                    dtype=dtype
-                ).coalesce()
-                self._test_log1p_tensor(input_coalesced)
-
-            if self.is_uncoalesced:
-                # test uncoalesced input
-                input_uncoalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[0], [1], [2], [0], [1], [2]]).transpose(1, 0),
-                    values=torch.tensor([2.0, 3.0, 4.0, 1.0, 1.0, 1.0]),
-                    size=[3, ],
-                    device=self.device,
-                    dtype=dtype
-                )
-                self._test_log1p_tensor(input_uncoalesced)
-
-                # test on empty sparse tensor
-                input_uncoalesced = torch.sparse_coo_tensor(
-                    indices=torch.zeros([2, 0]),
-                    values=torch.zeros([0, 5, 5, 5, 5, 5, 5, 0]),
-                    size=[0, 0, 5, 5, 5, 5, 5, 5, 0],
-                    device=self.device,
-                    dtype=dtype
-                )
-                self._test_log1p_tensor(input_uncoalesced)
-
-    def _test_neg_negative(self, sparse_tensor):
-        dense_tensor = sparse_tensor.to_dense()
-        expected_output = dense_tensor.neg()
-
-        ops = (
-            torch.neg, torch.Tensor.neg, torch.Tensor.neg_,
-            torch.negative, torch.Tensor.negative, torch.Tensor.negative_,
-            operator.neg
-        )
-        for op in ops:
-            sparse_tensor_copy = sparse_tensor.clone()
-            self.assertEqual(expected_output, op(sparse_tensor_copy).to_dense())
-
-            if op in (torch.neg, torch.negative):
-                sparse_tensor_out = torch.zeros_like(sparse_tensor)
-                op(sparse_tensor, out=sparse_tensor_out)
-                self.assertEqual(expected_output, sparse_tensor_out.to_dense())
-
-    def test_neg_negative(self):
-
-        if not self.is_uncoalesced:
-            input_coalesced = torch.sparse_coo_tensor(
-                indices=torch.tensor([[0, 1, 2]]),
-                values=torch.tensor([3.0, -4.0, 5.0]),
-                size=[3, ],
-                device=self.device
-            ).coalesce()
-            self._test_neg_negative(input_coalesced)
-
-            # hybrid sparse input
-            input_coalesced = torch.sparse_coo_tensor(
-                indices=torch.tensor([[1, 3], [2, 4]]),
-                values=torch.tensor([[-1.0, 3.0], [-5.0, 7.0]]),
-                size=[4, 5, 2],
-                device=self.device
-            ).coalesce()
-            self._test_neg_negative(input_coalesced)
-
-        if self.is_uncoalesced:
-            # test uncoalesced input
-            input_uncoalesced = torch.sparse_coo_tensor(
-                indices=torch.tensor([[0], [1], [2], [0], [1], [2]]).transpose(1, 0),
-                values=torch.tensor([2.0, -3.0, -4.0, 1.0, -1.0, 1.5]),
-                size=[3, ],
-                device=self.device
-            )
-            self._test_neg_negative(input_uncoalesced)
-
-            # test on empty sparse tensor
-            input_uncoalesced = torch.sparse_coo_tensor(
-                indices=torch.zeros([2, 0]),
-                values=torch.zeros([0, 5, 5, 5, 5, 5, 5, 0]),
-                size=[0, 0, 5, 5, 5, 5, 5, 5, 0],
-                device=self.device
-            )
-            self._test_neg_negative(input_uncoalesced)
-
-    def _test_asin_arcsin(self, sparse_tensor):
-        def is_integral(dtype):
-            return dtype in torch.testing.get_all_int_dtypes()
-        is_integral_dtype = is_integral(sparse_tensor.dtype)
-
-        dense_tensor = sparse_tensor.to_dense()
-        expected_output = dense_tensor.asin()
-
-        ops = (
-            torch.asin, torch.Tensor.asin,
-            torch.arcsin, torch.Tensor.arcsin,
-        )
-        for op in ops:
-            self.assertEqual(expected_output, op(sparse_tensor).to_dense())
-            if op in (torch.asin, torch.arcsin):
-                sparse_tensor_out = torch.zeros_like(sparse_tensor)
-                if not is_integral_dtype:
-                    op(sparse_tensor, out=sparse_tensor_out)
-                    self.assertEqual(expected_output, sparse_tensor_out.to_dense())
-                else:
-                    with self.assertRaisesRegex(RuntimeError, "asin: result type cannot be Integral"):
-                        op(sparse_tensor, out=sparse_tensor_out)
-
-        for op in (torch.Tensor.asin_, torch.Tensor.arcsin_):
-            if is_integral_dtype:
-                # test coalesce on integral dtype tensor
-                with self.assertRaisesRegex(RuntimeError, "asin: result type cannot be Integral"):
-                    op(sparse_tensor.clone().coalesce()).to_dense()
-            else:
-                self.assertEqual(expected_output, op(sparse_tensor.clone().coalesce()).to_dense())
-
-            if self.is_uncoalesced and not is_integral_dtype:
-                # test in-place op on uncoalesced input
-                with self.assertRaisesRegex(RuntimeError, "in-place on uncoalesced tensors is not supported"):
-                    op(sparse_tensor)
-            elif self.is_uncoalesced:
-                # test in-place op on integral dtype tensor
-                with self.assertRaisesRegex(RuntimeError, "asin: result type cannot be Integral"):
-                    op(sparse_tensor)
-
-    def test_asin_arcsin(self):
-        for dtype in torch.testing.get_all_dtypes(include_bool=False, include_half=False,
-                                                  include_bfloat16=False, include_complex=False):
-            if not self.is_uncoalesced:
-                input_coalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[0, 1, 2, 3]]),
-                    values=torch.tensor([0.5, -0.5, 0.7, -0.7]),
-                    size=[4, ],
-                    dtype=dtype,
-                    device=self.device
-                ).coalesce()
-                self._test_asin_arcsin(input_coalesced)
-
-                # hybrid sparse input
-                input_coalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[1, 3], [2, 4]]),
-                    values=torch.tensor([[-0.1, 0.24], [-0.44, 0.1]]),
-                    size=[4, 5, 2],
-                    dtype=dtype,
-                    device=self.device
-                ).coalesce()
-                self._test_asin_arcsin(input_coalesced)
-
-            if self.is_uncoalesced:
-                # test uncoalesced input
-                input_uncoalesced = torch.sparse_coo_tensor(
-                    indices=torch.tensor([[0], [1], [2], [0], [1], [2]]).transpose(1, 0),
-                    values=torch.tensor([0.3, -0.3, -0.4, 0.3, -0.5, 0.15]),
-                    size=[3, ],
-                    dtype=dtype,
-                    device=self.device
-                )
-                self._test_asin_arcsin(input_uncoalesced)
-
-                # test on empty sparse tensor
-                input_uncoalesced = torch.sparse_coo_tensor(
-                    indices=torch.zeros([2, 0]),
-                    values=torch.zeros([0, 5, 5, 5, 5, 5, 5, 0]),
-                    size=[0, 0, 5, 5, 5, 5, 5, 5, 0],
-                    dtype=dtype,
-                    device=self.device
-                )
-                self._test_asin_arcsin(input_uncoalesced)
-
     def test_mv(self):
         def test_shape(di, dj, dk, nnz):
             x, _, _ = self._gen_sparse(2, nnz, [di, dj])
@@ -3281,31 +3033,159 @@ class TestSparseOneOff(TestCase):
         with self.assertRaisesRegex(RuntimeError, "add: expected 'self' to be a CUDA tensor, but got a CPU tensor"):
             x + sparse_y
 
+
 class TestSparseUnaryUfuncs(TestCase):
     exact_dtype = True
 
-    @ops(sparse_unary_ufuncs)
-    def test_sparse_consistency(self, device, dtype, op):
-        unsupportedTypes = [torch.bfloat16, torch.cfloat, torch.cdouble]
-        if dtype in unsupportedTypes:
-            self.skipTest('Skipped! Unsupported dtypes for Sparse')
+    def _skip_helper(self, device, dtype):
+        unsupportedDevicesTypes = [
+            ("cpu", torch.bool), ("cpu", torch.bfloat16), ("cpu", torch.float16),
+            ("cpu", torch.complex64), ("cpu", torch.complex128),
+            ("cuda", torch.bool), ("cuda", torch.complex64), ("cuda", torch.complex128),
+        ]
+        if (torch.device(device).type, dtype) in unsupportedDevicesTypes:
+            self.skipTest(f'Skipped! "coalesce" not implemented for {dtype} and {device}')
 
-        samples = op.sample_inputs(device, dtype)
+    def _get_dense_and_sparse_samples(self, device, dtype, op):
+        test_backward = op.supports_autograd and op.test_complex_grad or not dtype.is_complex
+        samples = op.sample_inputs(device, dtype, requires_grad=test_backward)
+        sparse_samples = op.sparse_sample_inputs(device, dtype, requires_grad=test_backward)
+        if sparse_samples is not None:
+            samples += sparse_samples
+        return samples
+
+    def _test_forward(self, sample, op, inplace_op=None):
+        # In this method we assume that input args and kwargs should not
+        # need to be modified between dense and sparse
+        # This assumption holds for unary ops for which args/kwargs wont be tensors.
+        dense_sample_input = tuple(
+            (i.to_dense() if i.layout != torch.strided else i) for i in sample.input
+        )
+        sparse_sample_input = tuple(
+            (i.to_sparse() if i.layout == torch.strided else i) for i in sample.input
+        )
+
+        expected_forward = op(*dense_sample_input, *sample.args, **sample.kwargs)
+        if inplace_op is None:
+            # Simple consistency check for non-inplace op
+            sparse_forward = op(*sparse_sample_input, *sample.args, **sample.kwargs)
+            self.assertEqual(sparse_forward.to_dense(), expected_forward)
+        else:
+            assert len(sparse_sample_input) == 1, "Unary op should have single input"
+            expected_forward_dtype = expected_forward.dtype
+            dtype = sparse_sample_input[0].dtype
+            # Test inplace op either on coalesced input
+            # or on uncoalesced input for the ops that supports inplace computation on uncoalesced
+            # (e.g. neg: neg(x + y) = neg(x) + neg(y))
+            if op.supports_inplace_on_uncoalesced or sparse_sample_input[0].is_coalesced():
+                # Check if resulting dtype can be cast to the input dtype
+                if torch.can_cast(expected_forward_dtype, dtype):
+                    sparse_forward = inplace_op(*(clone_input_helper(input) for input in sparse_sample_input),
+                                                *sample.args,
+                                                **sample.kwargs)
+                    self.assertEqual(sparse_forward.to_dense(), expected_forward)
+                else:
+                    # otherwise assert op raises an exception
+                    with self.assertRaisesRegex(RuntimeError, "result type cannot be"):
+                        sparse_forward = inplace_op(*(clone_input_helper(input) for input in sparse_sample_input),
+                                                    *sample.args,
+                                                    **sample.kwargs)
+            else:
+                # Here input is uncoalesced and op does not support inplace
+                if torch.can_cast(expected_forward.dtype, dtype):
+                    err_msg = "in-place on uncoalesced tensors is not supported"
+                else:
+                    err_msg = "result type cannot be"
+                with self.assertRaisesRegex(RuntimeError, err_msg):
+                    sparse_forward = inplace_op(*(clone_input_helper(input) for input in sparse_sample_input),
+                                                *sample.args,
+                                                **sample.kwargs)
+
+    @ops(sparse_unary_ufuncs)
+    def test_function_consistency(self, device, dtype, op):
+        self._skip_helper(device, dtype)
+        # Checks sparse/dense consistency for funtion only
+        samples = self._get_dense_and_sparse_samples(device, dtype, op)
 
         if len(samples) == 0:
             self.skipTest("Skipped! No sample inputs!")
 
+        for sample in samples:
+            self._test_forward(sample, op)
+            # We can not check grads for sparse yet
+
+    @ops(sparse_unary_ufuncs)
+    def test_method_variant_consistency(self, device, dtype, op):
+        self._skip_helper(device, dtype)
+        # Checks sparse/dense consistency for method variant only
+        samples = self._get_dense_and_sparse_samples(device, dtype, op)
+
+        if len(samples) == 0:
+            self.skipTest("Skipped! No sample inputs!")
+
+        method = op.get_method()
+        if method is None:
+            self.skipTest("Skipped! No method variant op")
+
+        # Note: check on a single sample
+        sample = samples[0]
+        self._test_forward(sample, method)
+        # We can not check grads for sparse yet
+
+    @ops(sparse_unary_ufuncs)
+    def test_operator_variant_consistency(self, device, dtype, op):
+        self._skip_helper(device, dtype)
+        # Checks sparse/dense consistency for method variant only
+        samples = self._get_dense_and_sparse_samples(device, dtype, op)
+
+        if len(samples) == 0:
+            self.skipTest("Skipped! No sample inputs!")
+
+        method = op.get_operator_variant()
+        if method is None:
+            self.skipTest("Skipped! No operator variant op")
+
+        # Note: check on a single sample
+        sample = samples[0]
+        self._test_forward(sample, method)
+        # We can not check grads for sparse yet
+
+    @ops(sparse_unary_ufuncs)
+    def test_alias_variant_consistency(self, device, dtype, op):
+        self._skip_helper(device, dtype)
+        # Checks sparse/dense consistency for method variant only
+        samples = self._get_dense_and_sparse_samples(device, dtype, op)
+
+        if len(samples) == 0:
+            self.skipTest("Skipped! No sample inputs!")
+
+        # Note: check on a single sample
         sample = samples[0]
 
-        assert isinstance(sample.input, torch.Tensor)
+        for a_op in op.aliases:
+            self._test_forward(sample, a_op)
+            # We can not check grads for sparse yet
 
-        expected = op(sample.input)
-        assert torch.is_tensor(expected)
-        output = op(sample.input.to_sparse())
-        assert torch.is_tensor(output)
-        self.assertEqual(output.to_dense(), expected)
+    @ops(sparse_unary_ufuncs)
+    def test_inplace_variant_consistency(self, device, dtype, op):
+        self._skip_helper(device, dtype)
+        # Checks sparse/dense consistency for inplace method variant only
+        samples = self._get_dense_and_sparse_samples(device, dtype, op)
+
+        if len(samples) == 0:
+            self.skipTest("Skipped! No sample inputs!")
+
+        inplace = op.get_inplace()
+        if inplace is None:
+            self.skipTest("Skipped! No inplace variant op")
+
+        # Below we test unary inplace op on a single input
+        for sample in samples:
+            self._test_forward(sample, op, inplace)
+            # We can not check grads for sparse yet
 
 instantiate_device_type_tests(TestSparseUnaryUfuncs, globals())
+
 
 if __name__ == '__main__':
     run_tests()
