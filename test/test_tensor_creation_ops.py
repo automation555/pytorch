@@ -2980,36 +2980,6 @@ class TestRandomTensorCreation(TestCase):
             self.assertEqual(t_transform(r).mean(), 2, atol=0.3, rtol=0)
             self.assertEqual(t_transform(r).std(), std_transform(3), atol=0.3, rtol=0)
 
-            # float std 0 with float mean
-            r.fill_(42)
-            torch.normal(2, 0, (10, 10), dtype=dtype, device=device, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertTrue(r.eq(2).all())
-
-            # float std 0 with tensor mean
-            r.fill_(42)
-            mean_rand = torch.randn(10, 10, dtype=dtype, device=device)
-            torch.normal(mean_rand, 0, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertEqual(mean_rand, r, atol=0, rtol=0)
-
-            # tensor std 0 with float mean
-            r.fill_(42)
-            std_zeros = torch.zeros(10, 10, dtype=dtype, device=device)
-            torch.normal(2, std_zeros, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertTrue(r.eq(2).all())
-
-            # tensor std 0 with tensor mean
-            r.fill_(42)
-            torch.normal(mean_rand, std_zeros, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertEqual(mean_rand, r, atol=0, rtol=0)
-
         if dtype.is_complex:
             helper(self, device, dtype, lambda x: complex(x, x),
                    lambda t: torch.real(t).to(torch.float), lambda mean: mean / math.sqrt(2))
@@ -3024,18 +2994,6 @@ class TestRandomTensorCreation(TestCase):
                 lambda: torch.normal(0, torch.empty(100, 100, dtype=dtype, device=device), out=out))
         else:
             helper(self, device, dtype, lambda x: x, lambda t: t, lambda mean: mean)
-
-    # Ensure that normal raises appropriate error when `std` < 0
-    def test_normal_std_error(self, device):
-        a = torch.tensor(0, dtype=torch.float32, device=device)
-        std = torch.tensor(-1, dtype=torch.float32, device=device)
-
-        for input in [0, a]:
-            with self.assertRaisesRegex(RuntimeError, r'normal_ expects std >= 0.0'):
-                torch.normal(input, -1, (10,))
-
-            with self.assertRaisesRegex(RuntimeError, r'normal expects all elements of std >= 0.0'):
-                torch.normal(input, std)
 
     @dtypes(torch.float, torch.double, torch.half)
     @dtypesIfCUDA(torch.float, torch.double, torch.half, torch.bfloat16)
@@ -3171,16 +3129,16 @@ class TestRandomTensorCreation(TestCase):
             torch.rand(size, size, out=res2)
             self.assertEqual(res1, res2)
 
-    @onlyCUDA
+    @onlyCUDA  # this test is flaky on CPU: https://github.com/pytorch/pytorch/issues/54282
     def test_randperm(self, device):
         if device == 'cpu':
             rng_device = None
         else:
             rng_device = [device]
 
-        # Test core functionality. On CUDA, for small n, randperm is offloaded to CPU instead. For large n, randperm is
-        # executed on GPU.
-        for n in (100, 50000, 100000):
+        # Test core functionality. On CUDA, different value of n has different
+        # code path
+        for n in (5, 100, 50000, 100000):
             # Ensure both integer and floating-point numbers are tested. Half follows an execution path that is
             # different from others on CUDA.
             for dtype in (torch.long, torch.half, torch.float):
