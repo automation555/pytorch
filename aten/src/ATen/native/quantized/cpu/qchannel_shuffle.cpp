@@ -36,13 +36,11 @@ Tensor quantized_channel_shuffle_impl(
   const Tensor self_nhwc = self.contiguous(MemoryFormat::ChannelsLast);
   Tensor qy = at::native::empty_affine_quantized(
       self_nhwc.sizes(),
-      kQUInt8,
-      c10::nullopt /* layout */,
-      kCPU,
-      c10::nullopt /* pin_memory */,
+      at::device(kCPU).dtype(kQUInt8).memory_format(MemoryFormat::ChannelsLast),
       self_nhwc.q_scale(),
       self_nhwc.q_zero_point(),
-      MemoryFormat::ChannelsLast);
+      c10::nullopt
+      );
 
   // Degenerate case of just copying.
   if (groups == 1) {
@@ -97,7 +95,7 @@ Tensor quantized_channel_shuffle_impl(
 #endif
 
 // at::native functions for the native_functions.yaml
-Tensor channel_shuffle_quantized_cpu(
+Tensor quantized_channel_shuffle(
     const Tensor& self,
     int64_t groups) {
 #ifdef USE_PYTORCH_QNNPACK
@@ -113,7 +111,7 @@ namespace {
 class QChannelShuffle final : public c10::OperatorKernel {
  public:
   Tensor operator()(Tensor qx, int64_t groups) {
-    return channel_shuffle_quantized_cpu(qx, groups);
+    return quantized_channel_shuffle(qx, groups);
   }
 };
 

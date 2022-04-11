@@ -113,7 +113,7 @@ When the output tensor of an arithmetic operation is specified, we allow casting
 Casting Examples::
 
     # allowed:
-    >>> float_tensor *= float_tensor
+    >>> float_tensor *= double_tensor
     >>> float_tensor *= int_tensor
     >>> float_tensor *= uint_tensor
     >>> float_tensor *= bool_tensor
@@ -205,9 +205,6 @@ torch.layout
 ------------
 
 .. class:: torch.layout
-
-.. warning::
-  The ``torch.layout`` class is in beta and subject to change.
 
 A :class:`torch.layout` is an object that represents the memory layout of a
 :class:`torch.Tensor`. Currently, we support ``torch.strided`` (dense Tensors)

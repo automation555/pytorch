@@ -28,8 +28,6 @@ struct CUDAHooks : public at::CUDAHooksInterface {
   bool compiledWithMIOpen() const override;
   bool supportsDilatedConvolutionWithCuDNN() const override;
   bool supportsDepthwiseConvolutionWithCuDNN() const override;
-  bool hasCUDART() const override;
-  long versionCUDART() const override;
   long versionCuDNN() const override;
   std::string showConfig() const override;
   double batchnormMinEpsilonCuDNN() const override;
@@ -38,7 +36,6 @@ struct CUDAHooks : public at::CUDAHooksInterface {
   int64_t cuFFTGetPlanCacheSize(int64_t device_index) const override;
   void cuFFTClearPlanCache(int64_t device_index) const override;
   int getNumGPUs() const override;
-  void deviceSynchronize(int64_t device_index) const override;
 };
 
 }}} // at::cuda::detail

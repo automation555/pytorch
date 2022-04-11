@@ -3,6 +3,7 @@ import gc
 import os
 import sys
 import time
+import subprocess
 import unittest
 import copy
 from sys import platform
@@ -367,11 +368,8 @@ class TestMultiprocessing(TestCase):
         t = torch.zeros(5, 5)
         p = SubProcess(t.share_memory_())
         p.start()
-        p.join(2)
-        if p.exitcode is None:
-            print("test_inherit_tensor: SubProcess too slow")
-        else:
-            self.assertEqual(t, torch.ones(5, 5) * 3, atol=0, rtol=0)
+        p.join(1)
+        self.assertEqual(t, torch.ones(5, 5) * 3, atol=0, rtol=0)
 
     @unittest.skipIf(IS_WINDOWS, "Test needs to use fork multiprocessing")
     def test_autograd_errors(self):
@@ -524,7 +522,7 @@ class TestMultiprocessing(TestCase):
     @unittest.skipIf(IS_WINDOWS, 'not applicable to Windows (only fails with fork)')
     @unittest.skipIf(not torch.cuda.is_available(), 'CUDA not available')
     def test_wrong_cuda_fork(self):
-        stderr = TestCase.runWithPytorchAPIUsageStderr("""\
+        results = self.run_process_no_exception("""\
 import torch
 from torch.multiprocessing import Process
 def run(rank):
@@ -541,7 +539,7 @@ if __name__ == "__main__":
     for p in processes:
         p.join()
 """)
-        self.assertRegex(stderr, "Cannot re-initialize CUDA in forked subprocess.")
+        self.assertRegex(results[1].decode('ascii'), "Cannot re-initialize CUDA in forked subprocess.")
 
     @unittest.skipIf(NO_MULTIPROCESSING_SPAWN, "Disabled for environments that \
                      don't support multiprocessing with spawn start method")
@@ -829,6 +827,15 @@ if __name__ == "__main__":
     def test_cuda_parameter_sharing(self):
         param = Parameter(torch.arange(1., 26, device='cuda').view(5, 5))
         self._test_autograd_sharing(param, mp.get_context('spawn'), is_parameter=True)
+
+    @staticmethod
+    def run_process_no_exception(code):
+        popen = subprocess.Popen(
+            [sys.executable, '-c', code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE)
+        pipes = popen.communicate()
+        return pipes
 
     @unittest.skipIf(NO_MULTIPROCESSING_SPAWN, "Disabled for environments that \
                      don't support multiprocessing with spawn start method")
