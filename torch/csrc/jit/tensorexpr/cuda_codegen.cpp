@@ -6,11 +6,13 @@
 #include <torch/csrc/jit/codegen/fuser/cuda/resource_strings.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/tensorexpr/analysis.h>
+#include <torch/csrc/jit/tensorexpr/bounds_inference.h>
 #include <torch/csrc/jit/tensorexpr/cuda_random.h>
 #include <torch/csrc/jit/tensorexpr/eval.h>
 #include <torch/csrc/jit/tensorexpr/exceptions.h>
 #include <torch/csrc/jit/tensorexpr/execution_counter.h>
 #include <torch/csrc/jit/tensorexpr/ir_simplifier.h>
+#include <torch/csrc/jit/tensorexpr/mem_dependency_checker.h>
 #include <torch/csrc/jit/tensorexpr/registerizer.h>
 
 namespace torch {
@@ -69,12 +71,10 @@ static const at::cuda::NVRTC& nvrtc() {
   return at::globalContext().getNVRTC();
 }
 
-// query codegen output arch and target
-static void codegenOutputQuery(
+static void getMajorMinor(
     const cudaDeviceProp* const prop,
     int& major,
-    int& minor,
-    bool& compile_to_sass) {
+    int& minor) {
   using CudaVersion = std::pair<int, int>;
   CudaVersion nvrtc_version;
   AT_CUDA_NVRTC_CHECK(
@@ -101,9 +101,6 @@ static void codegenOutputQuery(
   }
   major = dev_version.first;
   minor = dev_version.second;
-
-  // if we are clamping major/minor, sass is not compatible
-  compile_to_sass = (major == prop->major) && (minor == prop->minor);
 }
 
 std::string cudaDtypeCppString(const Dtype& dtype) {
@@ -292,12 +289,8 @@ void CudaPrinter::visit(const Intrinsics* v) {
   if (returnType == ScalarType::Half || returnType == ScalarType::Float) {
     func_name = func_name + "f";
   }
-  if (v->op_type() == IntrinsicsOp::kAbs && !is_integral(returnType)) {
-    // since kAbs's func_name is `abs`, prefix `f` for floating point
-    func_name = "f" + func_name;
-  }
-  if (v->op_type() == IntrinsicsOp::kIsNan) {
-    func_name = "isnan";
+  if (v->op_type() == IntrinsicsOp::kFabs && is_integral(returnType)) {
+    func_name = "abs";
   }
 
   os() << func_name << "(";
@@ -308,10 +301,6 @@ void CudaPrinter::visit(const Intrinsics* v) {
     os() << *v->param(i);
   }
   os() << ")";
-}
-
-void CudaPrinter::visit(const ExternalCall* v) {
-  throw unimplemented_lowering(v);
 }
 
 void CudaPrinter::visit(const Load* v) {
@@ -674,6 +663,148 @@ class PrioritizeLoad : public IRMutator {
   std::unordered_set<const Var*> thread_local_bufs_;
 };
 
+class CudaDependencyHandler : public IRMutator {
+ public:
+  CudaDependencyHandler(analysis::MemDependencyChecker* checker)
+      : mem_dependency_checker_(checker) {}
+
+  Stmt* mutate(const Block* v) override {
+    auto stmts = v->stmts();
+    const auto& newStmts = handleDependences({stmts.begin(), stmts.end()});
+    return new Block(newStmts);
+  }
+
+ private:
+  // Check if the given statements have the same thread index.
+  bool sameThreadIdx(Stmt* s1, Stmt* s2) {
+    auto enclosing_for = [](Stmt* s) -> For* {
+      Stmt* curr = s;
+      while (curr) {
+        if (auto f = dynamic_cast<For*>(curr)) {
+          return f;
+        }
+        curr = curr->get_parent();
+      }
+      return nullptr;
+    };
+    auto for1 = enclosing_for(s1);
+    auto for2 = enclosing_for(s2);
+    if (for1 && for2) {
+      auto loopOptions1 = for1->loop_options();
+      auto loopOptions2 = for2->loop_options();
+      if (loopOptions1.is_gpu_thread_index() &&
+          loopOptions2.is_gpu_thread_index()) {
+        return loopOptions1.gpu_thread_index() ==
+            loopOptions2.gpu_thread_index();
+      }
+    }
+    return false;
+  }
+
+  // Identify the list of buffers that were written to in `s1` and read in `s2`
+  // and hence need synchronization before `s2` is executed.
+  std::unordered_set<const Buf*> buffersNeedingSync(Stmt* s1, Stmt* s2) {
+    auto s1Bounds = getInferredBounds(*mem_dependency_checker_, s1, true);
+    auto s2Bounds = getInferredBounds(*mem_dependency_checker_, s2, true);
+    std::unordered_set<const Buf*> syncBuffers;
+    for (const auto& s2Bound : s2Bounds) {
+      const Buf* buf = s2Bound.first;
+      if (s1Bounds.find(buf) == s1Bounds.end()) {
+        continue;
+      }
+
+      // We only handle RAW hazards now.
+      auto s1Writes = convertBounds(s1Bounds, buf, kStore);
+      auto s2Reads = convertBounds(s2Bound.second, kLoad);
+
+      for (auto& s1W : s1Writes) {
+        for (auto& s2R : s2Reads) {
+          if (s1W.equals(s2R) && sameThreadIdx(s1, s2)) {
+            // No need for sync if the bounds are equal and they belong
+            // to the same thread.
+            continue;
+          }
+          if (boundOverlap(s1W, s2R) != analysis::NoOverlap) {
+            syncBuffers.insert(buf);
+          }
+        }
+      }
+    }
+    return syncBuffers;
+  }
+
+  // Check if any of the buffers in the given list has been written to since
+  // the last synchronization was added.
+  bool needSync(std::unordered_set<const Buf*>& bufs) {
+    for (auto b : bufs) {
+      if (bufs_written_after_sync_.find(b) != bufs_written_after_sync_.end()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  std::vector<Stmt*> handleDependences(std::vector<Stmt*> stmts) {
+    // Iterate over the given list of statements. For every pair of these
+    // statements, identify the list of buffers that require synchronization
+    // (before the second statement in the pair is executed.)
+    //
+    // Note that the iteration below is quadratic in the number of statements in
+    // the block. This could affect the compile-time performance when the
+    // number of statements in the list is large.
+    // TODO: Improve performance of this loop.
+    std::unordered_map<Stmt*, std::unordered_set<const Buf*>> stmtsNeedingSync;
+    for (auto it1 = stmts.begin(); it1 != stmts.end(); ++it1) {
+      for (auto it2 = std::next(it1); it2 != stmts.end(); ++it2) {
+        auto bufs = buffersNeedingSync(*it1, *it2);
+        if (!bufs.empty()) {
+          stmtsNeedingSync[*it2] = std::move(bufs);
+        }
+      }
+    }
+    // Maintain a set of buffers that have been written to since the last
+    // synchronization. Whenever we add `SyncThreads`, this set it cleared
+    // to indicate that all these buffers' writes are guaranteed to complete
+    // beyond this synchronization point.
+    //
+    // This approach requires that the statements are processed in the order
+    // in which they appear in the kernel.
+    //
+    // Repeat the following for every statement in the given list:
+    //   * If the statement requires synchronization for any buffer and
+    //     that buffer hasn't been synchronized yet, then add a `SyncThreads`
+    //     before this statement.
+    //   * If a `SyncThreads` is added, add all the buffers that have been
+    //     written to and not synchronized to the list of synchronized buffers.
+    //   * Call this mutator on the current statement. This might modify the
+    //     statement by inserting more `SyncThreads` as well as add buffers
+    //     to the list of buffers that have been written to since the last
+    //     synchronization.
+    //   * If the current statement is a `Store`, add the buffer that is
+    //     written to the list of buffers yet to synchronized.
+    std::vector<Stmt*> stmtsWithSync;
+    for (auto stmt : stmts) {
+      auto it = stmtsNeedingSync.find(stmt);
+      if (it != stmtsNeedingSync.end() && needSync(it->second)) {
+        stmtsWithSync.push_back(new SyncThreads());
+        bufs_written_after_sync_.clear();
+      }
+      auto newStmt = stmt->accept_mutator(this);
+      if (newStmt == stmt) {
+        newStmt = Stmt::clone(stmt);
+      }
+      if (auto store = dynamic_cast<Store*>(newStmt)) {
+        bufs_written_after_sync_.insert(store->buf());
+      }
+      stmtsWithSync.push_back(newStmt);
+    }
+    return stmtsWithSync;
+  }
+
+  analysis::MemDependencyChecker* mem_dependency_checker_;
+  std::unordered_set<const Buf*> bufs_written_after_sync_;
+};
+
 std::string CudaCodeGen::GetUniqueFuncName(const std::string& func_prefix) {
   int64_t counter = 0;
   std::string name = func_prefix;
@@ -945,6 +1076,14 @@ void CudaCodeGen::Initialize() {
     os() << fuser::cuda::half_support_literal << std::endl;
   }
 
+  // Handle dependences between statements by adding necessary sync threads.
+  // Compute the dependences on the entire graph before feeding that into the
+  // dependency handler.
+  analysis::MemDependencyChecker analyzer;
+  stmt_v->accept(&analyzer);
+  CudaDependencyHandler depHandler(&analyzer);
+  stmt_v = stmt_v->accept_mutator(&depHandler);
+
   std::string func_name = GetUniqueFuncName(kernel_func_name());
   os() << "extern \"C\" __global__" << std::endl;
 #ifdef USE_ROCM
@@ -1159,18 +1298,6 @@ void CudaCodeGen::call(const std::vector<CallArg>& args) {
   }
 }
 
-at::Tensor CudaCodeGen::empty_strided(
-    c10::IntArrayRef size,
-    c10::IntArrayRef stride,
-    c10::optional<c10::ScalarType> dtype_opt,
-    c10::optional<c10::Layout> layout_opt,
-    c10::optional<c10::Device> device_opt,
-    c10::optional<bool> pin_memory_opt) {
-  c10::DeviceGuard device_guard(device_opt.value());
-  return at::native::empty_strided_cuda(
-      size, stride, dtype_opt, layout_opt, device_opt, pin_memory_opt);
-}
-
 void CudaCodeGen::CompileToNVRTC(
     const std::string& code,
     const std::string& func_name) {
@@ -1194,8 +1321,7 @@ void CudaCodeGen::CompileToNVRTC(
   // calculations)
   cudaDeviceProp* prop = at::cuda::getCurrentDeviceProperties();
   int major, minor;
-  bool compile_to_sass = false;
-  codegenOutputQuery(prop, major, minor, compile_to_sass);
+  getMajorMinor(prop, major, minor);
 
   // Creates the NVRTC program
   nvrtcProgram program;
@@ -1205,19 +1331,7 @@ void CudaCodeGen::CompileToNVRTC(
 #ifdef __HIP_PLATFORM_HCC__
   std::vector<const char*> args = {};
 #else
-  const std::string compute = std::string("--gpu-architecture=") +
-#if CUDA_VERSION >= 11010
-      // CUDA 11.1 allows going directly to SASS (sm_) instead of PTX (compute_)
-      // which gives better backwards compatibility to work on older driver,
-      // (since older driver doesn't necessrily recognize PTX emitted by new
-      // toolkit);
-      // Meanwhile, for forward compatibility (future device with
-      // `compile_to_sass==false`), since SASS are not necessarily compatible,
-      // we fallback to PTX instead.
-      (compile_to_sass ? "sm_" : "compute_") +
-#else
-      "compute_" +
-#endif
+  const std::string compute = "--gpu-architecture=compute_" +
       std::to_string(major) + std::to_string(minor);
   const std::vector<const char*> args = {
       "--std=c++14", compute.c_str(), "-default-device"};
@@ -1240,23 +1354,10 @@ void CudaCodeGen::CompileToNVRTC(
       [&] { AT_CUDA_NVRTC_CHECK(nvrtc().nvrtcDestroyProgram(&program)); });
   AT_CUDA_NVRTC_CHECK(result);
   size_t ptx_size;
+  AT_CUDA_NVRTC_CHECK(nvrtc().nvrtcGetPTXSize(program, &ptx_size));
   std::vector<char> ptx;
-#if CUDA_VERSION >= 11010
-  // compile_to_sass determines whether we are generating SASS or PTX, hence
-  // the different API.
-  const auto getSize = compile_to_sass
-      ? at::globalContext().getNVRTC().nvrtcGetCUBINSize
-      : at::globalContext().getNVRTC().nvrtcGetPTXSize;
-  const auto getFunc = compile_to_sass
-      ? at::globalContext().getNVRTC().nvrtcGetCUBIN
-      : at::globalContext().getNVRTC().nvrtcGetPTX;
-#else
-  const auto getSize = at::globalContext().getNVRTC().nvrtcGetPTXSize;
-  const auto getFunc = at::globalContext().getNVRTC().nvrtcGetPTX;
-#endif
-  AT_CUDA_NVRTC_CHECK(getSize(program, &ptx_size));
   ptx.resize(ptx_size);
-  AT_CUDA_NVRTC_CHECK(getFunc(program, ptx.data()));
+  AT_CUDA_NVRTC_CHECK(nvrtc().nvrtcGetPTX(program, ptx.data()));
 
   CUmodule module;
   AT_CUDA_DRIVER_CHECK(nvrtc().cuModuleLoadData(&module, ptx.data()));
