@@ -1,3 +1,5 @@
+import torch
+
 from .quantize import *
 from .observer import *
 from .qconfig import *
@@ -43,7 +45,7 @@ _all__ = [
     'register_activation_post_process_hook',
     # Observers
     'ObserverBase', 'WeightObserver', 'observer', 'default_observer',
-    'default_weight_observer', 'default_placeholder_observer',
+    'default_weight_observer',
     # FakeQuantize (for qat)
     'default_fake_quant', 'default_weight_fake_quant',
     'default_symmetric_fixed_qparams_fake_quant',
@@ -52,9 +54,14 @@ _all__ = [
     'default_histogram_fake_quant',
     # QConfig
     'QConfig', 'default_qconfig', 'default_dynamic_qconfig', 'float16_dynamic_qconfig',
-    'float_qparams_weight_only_qconfig',
     # QAT utilities
     'default_qat_qconfig', 'prepare_qat', 'quantize_qat',
     # module transformations
     'fuse_modules',
 ]
+
+
+# Importing here to avoid importing the function in the `nn.quantized` to
+# avoid the cyclic import
+# register_observed_custom_module_mapping(torch.nn.LSTM, torch.nn.quantized.LSTM)
+# register_quantized_custom_module_mapping(torch.nn.LSTM, torch.nn.quantized.LSTM)
