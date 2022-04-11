@@ -10,7 +10,7 @@ import random
 
 from torch.testing._internal.common_utils import (
     TestCase, run_tests, do_test_empty_full, TEST_WITH_ROCM, suppress_warnings,
-    torch_to_numpy_dtype_dict, slowTest, TEST_SCIPY, IS_MACOS, IS_PPC,
+    torch_to_numpy_dtype_dict, slowTest, make_tensor, TEST_SCIPY, IS_MACOS, IS_PPC,
     IS_WINDOWS)
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests, deviceCountAtLeast, onlyOnCPUAndCUDA,
@@ -831,6 +831,139 @@ class TestTensorCreation(TestCase):
                 for p in permutations(range(t.dim())):
                     tp = t.permute(p)
                     compare_helper_(like_fn, tp)
+
+    @onlyOnCPUAndCUDA
+    @dtypes(*torch.testing.get_all_dtypes(include_bfloat16=False, include_bool=False))
+    def test_hsplit(self, device, dtype):
+        inputs = (
+            ((), 3),
+            ((), [2, 4, 6]),
+            ((6), 2),
+            ((6), 4),
+            ((6), [2, 5]),
+            ((6), [7, 9]),
+            ((3, 8), 4),
+            ((3, 8), 5),
+            ((3, 8), [1, 5]),
+            ((3, 8), [3, 8]),
+            ((S, S, S), 2),
+            ((S, S, S), [1, 4]),
+            ((S, 0, S), 3),
+            ((S, S, 0), [2, 6]),
+        )
+
+        for shape, arg in inputs:
+            t = make_tensor(shape, dtype, device)
+            t_n = t.cpu().numpy()
+
+            if len(shape) < 1:
+                with self.assertRaisesRegex(RuntimeError, "torch.hsplit requires a tensor with at least 1 dimension"):
+                    torch.hsplit(t, arg)
+                with self.assertRaises(ValueError):
+                    np.hsplit(t_n, arg)
+
+            elif isinstance(arg, list) or len(shape) == 0:
+                result = torch.hsplit(t, arg)
+                result_n = np.hsplit(t_n, arg)
+                self.assertEqual(result, result_n)
+            else:
+                dim = 1 if len(shape) > 1 else 0
+                if shape[dim] % arg == 0:
+                    result = torch.hsplit(t, arg)
+                    result_n = np.hsplit(t_n, arg)
+                    self.assertEqual(result, result_n)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, f"torch.hsplit's input axis : {dim}  dimension size : "
+                                                              + f"{ self.sizes()[dim]} is not divisible by split_size"
+                                                              + f"={split_size}"):
+                        torch.hsplit(t, arg)
+                    with self.assertRaises(ValueError):
+                        np.hsplit(t_n, arg)
+
+    @onlyOnCPUAndCUDA
+    @dtypes(*torch.testing.get_all_dtypes(include_bfloat16=False, include_bool=False))
+    def test_vsplit(self, device, dtype):
+        inputs = (
+            ((6), 2),
+            ((6), 4),
+            ((6, S), 2),
+            ((6, S), 4),
+            ((6, S), [1, 2, 3]),
+            ((6, S), [1, 5, 9]),
+            ((6, S, S), 2),
+            ((6, 0, S), 2),
+            ((S, 0, S), [1, 5]),
+        )
+
+        for shape, arg in inputs:
+            t = make_tensor(shape, dtype, device)
+            t_n = t.cpu().numpy()
+
+            if len(shape) < 2:
+                with self.assertRaisesRegex(RuntimeError, "torch.vsplit requires a tensor with at least 2 dimension"):
+                    torch.hsplit(t, arg)
+                with self.assertRaises(ValueError):
+                    np.hsplit(t_n, arg)
+
+            elif isinstance(arg, list) or len(shape) == 0:
+                result = torch.vsplit(t, arg)
+                result_n = np.vsplit(t_n, arg)
+                self.assertEqual(result, result_n)
+            else:
+                if shape[0] % arg == 0:
+                    result = torch.vsplit(t, arg)
+                    result_n = np.vsplit(t_n, arg)
+                    self.assertEqual(result, result_n)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "torch.vsplit's input axis : 0  dimension size : "
+                                                              + f"{ self.sizes()[0] } is not divisible by split_size"
+                                                              + f"={split_size}"):
+                        torch.vsplit(t, arg)
+                    with self.assertRaises(ValueError):
+                        np.vsplit(t_n, arg)
+
+    @onlyOnCPUAndCUDA
+    @dtypes(*torch.testing.get_all_dtypes(include_bfloat16=False, include_bool=False))
+    def test_dsplit(self, device, dtype):
+        inputs = (
+            ((6), 4),
+            ((6, 6), 3),
+            ((S, S, 6), 2),
+            ((S, S, 6), 4),
+            ((S, S, 6), [1, 2, 3]),
+            ((S, S, 6), [1, 5, 9]),
+            ((S, S, 0), 2),
+            ((S, 0, 6), 4),
+            ((S, 0, 6), [1, 2, 3]),
+            ((0, S, 6), [1, 5, 9]),
+        )
+
+        for shape, arg in inputs:
+            t = make_tensor(shape, dtype, device)
+            t_n = t.cpu().numpy()
+
+            if len(shape) < 2:
+                with self.assertRaisesRegex(RuntimeError, "torch.dsplit requires a tensor with at least 3 dimension"):
+                    torch.hsplit(t, arg)
+                with self.assertRaises(ValueError):
+                    np.hsplit(t_n, arg)
+
+            elif isinstance(arg, list) or len(shape) == 0:
+                result = torch.dsplit(t, arg)
+                result_n = np.dsplit(t_n, arg)
+                self.assertEqual(result, result_n)
+            else:
+                if shape[2] % arg == 0:
+                    result = torch.dsplit(t, arg)
+                    result_n = np.dsplit(t_n, arg)
+                    self.assertEqual(result, result_n)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "torch.dsplit's input axis : 2  dimension size : "
+                                                              + f"{ self.sizes()[2]} is not divisible by split_size="
+                                                              + f"{split_size}"):
+                        torch.dsplit(t, arg)
+                    with self.assertRaises(ValueError):
+                        np.dsplit(t_n, arg)
 
     def _test_special_stacks(self, dim, at_least_dim, torch_fn, np_fn, device, dtype):
         # Test error for non-tuple argument
@@ -2980,36 +3113,6 @@ class TestRandomTensorCreation(TestCase):
             self.assertEqual(t_transform(r).mean(), 2, atol=0.3, rtol=0)
             self.assertEqual(t_transform(r).std(), std_transform(3), atol=0.3, rtol=0)
 
-            # float std 0 with float mean
-            r.fill_(42)
-            torch.normal(2, 0, (10, 10), dtype=dtype, device=device, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertTrue(r.eq(2).all())
-
-            # float std 0 with tensor mean
-            r.fill_(42)
-            mean_rand = torch.randn(10, 10, dtype=dtype, device=device)
-            torch.normal(mean_rand, 0, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertEqual(mean_rand, r, atol=0, rtol=0)
-
-            # tensor std 0 with float mean
-            r.fill_(42)
-            std_zeros = torch.zeros(10, 10, dtype=dtype, device=device)
-            torch.normal(2, std_zeros, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertTrue(r.eq(2).all())
-
-            # tensor std 0 with tensor mean
-            r.fill_(42)
-            torch.normal(mean_rand, std_zeros, out=r)
-            self.assertEqual(r.dtype, dtype)
-            self.assertEqual(str(r.device), device)
-            self.assertEqual(mean_rand, r, atol=0, rtol=0)
-
         if dtype.is_complex:
             helper(self, device, dtype, lambda x: complex(x, x),
                    lambda t: torch.real(t).to(torch.float), lambda mean: mean / math.sqrt(2))
@@ -3024,18 +3127,6 @@ class TestRandomTensorCreation(TestCase):
                 lambda: torch.normal(0, torch.empty(100, 100, dtype=dtype, device=device), out=out))
         else:
             helper(self, device, dtype, lambda x: x, lambda t: t, lambda mean: mean)
-
-    # Ensure that normal raises appropriate error when `std` < 0
-    def test_normal_std_error(self, device):
-        a = torch.tensor(0, dtype=torch.float32, device=device)
-        std = torch.tensor(-1, dtype=torch.float32, device=device)
-
-        for input in [0, a]:
-            with self.assertRaisesRegex(RuntimeError, r'normal_ expects std >= 0.0'):
-                torch.normal(input, -1, (10,))
-
-            with self.assertRaisesRegex(RuntimeError, r'normal expects all elements of std >= 0.0'):
-                torch.normal(input, std)
 
     @dtypes(torch.float, torch.double, torch.half)
     @dtypesIfCUDA(torch.float, torch.double, torch.half, torch.bfloat16)
@@ -3171,7 +3262,7 @@ class TestRandomTensorCreation(TestCase):
             torch.rand(size, size, out=res2)
             self.assertEqual(res1, res2)
 
-    @onlyCUDA
+    @slowTest
     def test_randperm(self, device):
         if device == 'cpu':
             rng_device = None
@@ -3191,7 +3282,6 @@ class TestRandomTensorCreation(TestCase):
                 res2 = torch.empty(0, dtype=dtype, device=device)
                 torch.randperm(n, out=res2, dtype=dtype, device=device)
                 self.assertEqual(res1, res2, atol=0, rtol=0)
-                self.assertEqual(res1.sort().values.long(), torch.arange(n, device=device))
 
         # Default type is long
         for n in (100, 10000):
@@ -3221,7 +3311,6 @@ class TestRandomTensorCreation(TestCase):
                 res = torch.randperm(n, dtype=torch.long, device=device)
             torch.randperm(n, out=non_contiguous_tensor)
             self.assertEqual(non_contiguous_tensor, res)
-            self.assertEqual(res.sort().values.long(), torch.arange(n, device=device))
 
     # Test exceptions when device and generator types are incompatible
     @onlyCUDA
