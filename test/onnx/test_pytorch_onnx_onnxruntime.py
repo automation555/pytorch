@@ -727,6 +727,32 @@ class TestONNXRuntime(unittest.TestCase):
         d = torch.randn(2, 3)
         self.run_test(MyModel(), (a, b, c, d))
 
+    def test_tuple_input(self):
+        class TupleModel(torch.nn.Module):
+            def forward(self, a: Tuple[torch.Tensor, torch.Tensor]):
+                return a
+
+        x = (torch.randn(3, 4), torch.randn(4, 3))
+        self.run_test(TupleModel(), input=(x,))
+
+    def test_tuple_primitive_input(self):
+        class TupleModel(torch.nn.Module):
+            def forward(self, a: Tuple[int, torch.Tensor], b):
+                return a[0], a[1] + b
+
+        x = (3, torch.randn(4, 3))
+        y = torch.randn(4, 3)
+        self.run_test(TupleModel(), input=(x, y))
+
+    def test_nested_tuple_input(self):
+        class NestedTupleModel(torch.nn.Module):
+            def forward(self, a, b: Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]):
+                return a + b[0] + b[1][0] + b[1][1]
+
+        x = torch.randn(4, 5)
+        y = (torch.randn(4, 5), (torch.randn(1, 5), torch.randn(4, 1)))
+        self.run_test(NestedTupleModel(), input=(x, y))
+
     @disableScriptTest()
     def test_optional_inputs_with_no_optionals(self):
         class NoOptionalModel(torch.nn.Module):
@@ -873,6 +899,46 @@ class TestONNXRuntime(unittest.TestCase):
         z = torch.randn(2, 3)
         self.run_test(Model(), (x, None, z))
 
+    def test_primitive_input_integer(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, x: int, y):
+                return x + y
+
+        x = 3
+        y = torch.randint(10, (2, 3, 4))
+        self.run_test(Model(), (x, y))
+
+    def test_primitive_input_floating(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, x: float, y):
+                return x + y
+
+        x = 3.0
+        y = torch.randn(2, 3, 4)
+        self.run_test(Model(), (x, y))
+
+    def test_primitive_input_bool(self):
+        class Model(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, flag: bool, x, y):
+                if flag:
+                    return x
+                else:
+                    return y
+
+        flag = True
+        x = torch.randn(2, 3, 4)
+        y = torch.randn(2, 3, 4)
+        self.run_test(torch.jit.script(Model()), (flag, x, y))
+
     @skipIfUnsupportedMinOpsetVersion(9)
     def test_cste_script(self):
         class MyModel(torch.jit.ScriptModule):
@@ -971,18 +1037,6 @@ class TestONNXRuntime(unittest.TestCase):
 
         x = torch.rand(3, 3).to(dtype=torch.float32)
         self.run_test(MyModel(), x)
-
-    def test_hardsigmoid(self):
-        model = torch.nn.Hardsigmoid()
-
-        x = torch.rand(3, 3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
-        # corner cases
-        x = torch.tensor(3).to(dtype=torch.float32)
-        self.run_test(model, x)
-        x = torch.tensor(-3).to(dtype=torch.float32)
-        self.run_test(model, x)
 
     def test_clamp(self):
         class ClampModel(torch.nn.Module):
@@ -1424,7 +1478,7 @@ class TestONNXRuntime(unittest.TestCase):
         self.run_test(ArithmeticModule(), (x, y, z, t))
 
         class ArithmeticModule(torch.nn.Module):
-            def forward(self, x: float, y: float):
+            def forward(self, x: int, y: int):
                 return x == y
 
         x = 3
@@ -1552,8 +1606,8 @@ class TestONNXRuntime(unittest.TestCase):
     def test_div_rounding_mode(self):
         class TrueDivModule(torch.nn.Module):
             def forward(self, x, y):
-                return (x.div(y, rounding_mode=None),
-                        torch.div(x, y, rounding_mode=None))
+                return (x.div(y, rounding_mode='true'),
+                        torch.div(x, y, rounding_mode='true'))
 
         class TruncDivModule(torch.nn.Module):
             def forward(self, x, y):
@@ -2430,6 +2484,131 @@ class TestONNXRuntime(unittest.TestCase):
         y = torch.rand(100)
         self.run_test(PowModule3(), (x, y))
 
+    # the arithmeticOps(Add\Sub\Mul\Div\Gemm\Pow\Mod) with low precision include unit8 will be failed in ORT
+    # add to(dtype=torch.long) to avoid ORT output type does not match expected type.
+    # will be fixed in ONNX version 14.
+    @skipIfUnsupportedMaxOpsetVersion(13)
+    def test_arithmeticOps_with_low_precision(self):
+        class AddModule(torch.nn.Module):
+            def forward(self, x, y):
+                return x + y
+
+        class SubModule(torch.nn.Module):
+            def forward(self, x, y):
+                return x - y
+
+        class MulModule(torch.nn.Module):
+            def forward(self, x, y):
+                return x * y
+
+        class DivModule(torch.nn.Module):
+            def forward(self, x, y):
+                return x / y
+
+        class PowModule(torch.nn.Module):
+            def forward(self, x, y):
+                return x.pow(y)
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        z = torch.tensor([1], dtype=torch.uint8)
+        self.run_test(AddModule(), (x, y))
+        self.run_test(SubModule(), (x, y))
+        self.run_test(MulModule(), (x, y))
+        self.run_test(DivModule(), (x, y))
+        self.run_test(PowModule(), (x, z))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.int8)
+        y = torch.tensor([2, 3, 5], dtype=torch.int8)
+        z = torch.tensor([1], dtype=torch.int8)
+        self.run_test(AddModule(), (x, y))
+        self.run_test(SubModule(), (x, y))
+        self.run_test(MulModule(), (x, y))
+        self.run_test(DivModule(), (x, y))
+        self.run_test(PowModule(), (x, z))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.int16)
+        y = torch.tensor([2, 3, 5], dtype=torch.int16)
+        z = torch.tensor([1], dtype=torch.int16)
+        self.run_test(AddModule(), (x, y))
+        self.run_test(SubModule(), (x, y))
+        self.run_test(MulModule(), (x, y))
+        self.run_test(DivModule(), (x, y))
+        self.run_test(PowModule(), (x, z))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.float32)
+        z = torch.tensor([1], dtype=torch.float64)
+        self.run_test(AddModule(), (x, y))
+        self.run_test(SubModule(), (x, y))
+        self.run_test(MulModule(), (x, y))
+        self.run_test(DivModule(), (x, y))
+        self.run_test(PowModule(), (x, z))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.int64)
+        z = torch.tensor([1], dtype=torch.int32)
+        self.run_test(AddModule(), (x, y))
+        self.run_test(SubModule(), (x, y))
+        self.run_test(MulModule(), (x, y))
+        self.run_test(DivModule(), (x, y))
+        self.run_test(PowModule(), (x, z))
+
+    # fmod was added in version 10
+    @skipIfUnsupportedMinOpsetVersion(10)
+    @skipIfUnsupportedMaxOpsetVersion(13)
+    def test_mod_with_low_precision(self):
+        class ModModule(torch.nn.Module):
+            def forward(self, x, y):
+                return torch.fmod(x, y).to(dtype=torch.long)
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        self.run_test(ModModule(), (x, y))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.int8)
+        y = torch.tensor([2, 3, 5], dtype=torch.int8)
+        self.run_test(ModModule(), (x, y))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.int16)
+        y = torch.tensor([2, 3, 5], dtype=torch.int16)
+        self.run_test(ModModule(), (x, y))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.int32)
+        self.run_test(ModModule(), (x, y))
+
+        x = torch.tensor([2, 3, 5], dtype=torch.uint8)
+        y = torch.tensor([2, 3, 5], dtype=torch.float64)
+        self.run_test(ModModule(), (x, y))
+
+    @unittest.skip("Gemm operator only support float/double in ONNX")
+    @skipIfUnsupportedMaxOpsetVersion(13)
+    def test_gemm_with_low_precision(self):
+        class GemmModule(torch.nn.Module):
+            def forward(self, x, y):
+                return torch.mm(x, y).to(dtype=torch.long)
+
+            mat1 = torch.randn(2, 3).to(dtype=torch.uint8)
+            mat2 = torch.randn(3, 2).to(dtype=torch.uint8)
+            self.run_test(GemmModule(), (mat1, mat2))
+
+            mat1 = torch.randn(2, 3).to(dtype=torch.int8)
+            mat2 = torch.randn(3, 2).to(dtype=torch.int8)
+            self.run_test(GemmModule(), (mat1, mat2))
+
+            mat1 = torch.randn(2, 3).to(dtype=torch.int16)
+            mat2 = torch.randn(3, 2).to(dtype=torch.int16)
+            self.run_test(GemmModule(), (mat1, mat2))
+
+            mat1 = torch.randn(2, 3).to(dtype=torch.uint8)
+            mat2 = torch.randn(3, 2).to(dtype=torch.int32)
+            self.run_test(GemmModule(), (mat1, mat2))
+
+            mat1 = torch.randn(2, 3).to(dtype=torch.uint8)
+            mat2 = torch.randn(3, 2).to(dtype=torch.float64)
+            self.run_test(GemmModule(), (mat1, mat2))
+
     def test_std(self):
         class StandardDeviation(torch.nn.Module):
             def forward(self, input):
@@ -3166,7 +3345,6 @@ class TestONNXRuntime(unittest.TestCase):
         self.run_test(Model(), x)
 
     @skipIfUnsupportedMinOpsetVersion(9)
-    @disableScriptTest()  # scripting prim_dtype
     def test_lstm_no_hidden(self):
         class LSTMModel(torch.nn.Module):
             def __init__(self):
@@ -3180,7 +3358,6 @@ class TestONNXRuntime(unittest.TestCase):
         self.run_test(LSTMModel(), (input,))
 
     @skipIfUnsupportedMinOpsetVersion(9)
-    @disableScriptTest()  # scripting prim_dtype
     def test_lstm_proj_no_hidden(self):
         class LSTMModel(torch.nn.Module):
             def __init__(self):
@@ -3623,6 +3800,18 @@ class TestONNXRuntime(unittest.TestCase):
                 return input > 1
         self._test_compare_ops(GreaterModel(), 1)
 
+    def test_gt_primitive(self):
+        class GreaterModel(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.y : int = 2
+
+            def forward(self, x: int):
+                return self.y > x
+
+        x = 3
+        self.run_test(GreaterModel(), (x, ))
+
     @skipIfUnsupportedMinOpsetVersion(9)
     def test_ge_scalar(self):
         class GreaterOrEqualModel(torch.nn.Module):
@@ -3758,6 +3947,48 @@ class TestONNXRuntime(unittest.TestCase):
 
         x = torch.tensor([[1, 2], [3, 4]])
         self.run_test(RepeatsDimsModel2(), (x,))
+
+    @skipIfUnsupportedMinOpsetVersion(11)
+    def test_dynamic_repeat_interleave(self):
+        class SingleDynamicModel(torch.nn.Module):
+            def forward(self, x):
+                repeats = torch.tensor(4)
+                return torch.repeat_interleave(x, repeats, dim=1)
+
+        x = torch.tensor([[1, 2, 4], [3, 4, 7]])
+        another_x = torch.tensor([[7, 8], [5, 6]])
+        self.run_test(SingleDynamicModel(), x, test_with_inputs=[another_x],
+                      input_names=['input_1'], dynamic_axes={'input_1' : {1 : 'w'}})
+
+        class NegDynamicModel(torch.nn.Module):
+            def forward(self, x):
+                repeats = torch.tensor(4)
+                return torch.repeat_interleave(x, repeats, dim=-1)
+
+        x = torch.tensor([[1, 2, 4], [3, 4, 7]])
+        another_x = torch.tensor([[7, 8], [5, 6]])
+        self.run_test(NegDynamicModel(), x, test_with_inputs=[another_x],
+                      input_names=['input_1'], dynamic_axes={'input_1' : {1 : 'w'}})
+
+        class SingleDynamicModel2(torch.nn.Module):
+            def forward(self, x):
+                repeats = torch.tensor([4])
+                return torch.repeat_interleave(x, repeats, dim=0)
+
+        x = torch.tensor([[1, 2], [3, 4]])
+        another_x = torch.tensor([[7, 8], [5, 6]])
+        self.run_test(SingleDynamicModel2(), x, test_with_inputs=[another_x],
+                      input_names=['input_1'], dynamic_axes={'input_1' : {0 : 'h'}})
+
+        class AllDynamicModel(torch.nn.Module):
+            def forward(self, x):
+                repeats = torch.tensor([4])
+                return torch.repeat_interleave(x, repeats, dim=0)
+
+        x = torch.tensor([[1, 2, 4, 16], [3, 9, 27, 81], [2, 3, 5, 7]])
+        another_x = torch.tensor([[7, 8], [5, 6]])
+        self.run_test(AllDynamicModel(), x, test_with_inputs=[another_x],
+                      input_names=['input_1'], dynamic_axes={'input_1' : {0 : 'h', 1 : 'w'}})
 
     def test_view(self):
         class ViewModel(torch.nn.Module):
@@ -5404,7 +5635,7 @@ class TestONNXRuntime(unittest.TestCase):
     def test_det(self):
         class Det(torch.nn.Module):
             def forward(self, x):
-                return torch.linalg.det(x)
+                return torch.det(x)
 
         x = torch.randn(2, 3, 5, 5)
         self.run_test(Det(), x)
@@ -7788,6 +8019,60 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.randn(3, 16)
         self.run_test(M(), (x,), input_names=['input_ids'],
                       dynamic_axes={'input_ids': {0: 'batch', 1: 'sequence'}})
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    def test_hann_window_periodic(self):
+        class HannWindowModule_Periodic(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule_Periodic, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                self.window_length = window_length
+                return torch.add(x, torch.hann_window(self.window_length, periodic=True, dtype=torch.float))
+
+        win_length = 100
+        x = torch.randn(win_length)
+
+        module = HannWindowModule_Periodic()
+        self.run_test(module, (x, win_length))
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    def test_hann_window_not_periodic(self):
+        class HannWindowModule_NotPeriodic(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule_NotPeriodic, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                self.window_length = window_length
+                return torch.add(x, torch.hann_window(self.window_length, periodic=False, dtype=torch.float))
+
+        win_length = 100
+        x = torch.randn(win_length)
+
+        module = HannWindowModule_NotPeriodic()
+        self.run_test(module, (x, win_length))
+
+    @skipIfUnsupportedMinOpsetVersion(9)
+    @disableScriptTest()
+    def test_hann_window_default_values(self):
+        class HannWindowModule(torch.nn.Module):
+            def __init__(self):
+                super(HannWindowModule, self).__init__()
+                self.window_length = 0
+
+            def forward(self, x, window_length: int):
+                import torch.nn.functional as F
+                self.window_length = window_length
+                return torch.add(x, F.relu(torch.hann_window(self.window_length)))
+
+        win_length = 100
+        x = torch.randn(win_length, dtype=torch.float)
+        module = HannWindowModule()
+
+        output = module(x, win_length)
+        self.run_test(module, (x, win_length))
 
 def make_test(name, base, layer, bidirectional, initial_state,
               variable_length, dropout,
