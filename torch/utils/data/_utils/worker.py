@@ -7,10 +7,10 @@ static methods.
 import torch
 import random
 import os
-import queue
-from dataclasses import dataclass
+import traceback
+from collections import namedtuple
+from torch._six import queue
 from torch._utils import ExceptionWrapper
-from typing import Union
 from . import signal_handling, MP_STATUS_CHECK_INTERVAL, IS_WINDOWS
 
 if IS_WINDOWS:
@@ -24,8 +24,7 @@ if IS_WINDOWS:
         def __init__(self):
             self.manager_pid = os.getppid()
 
-            # mypy cannot detect this code is windows only
-            self.kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)  # type: ignore
+            self.kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
             self.kernel32.OpenProcess.argtypes = (DWORD, BOOL, DWORD)
             self.kernel32.OpenProcess.restype = HANDLE
             self.kernel32.WaitForSingleObject.argtypes = (HANDLE, DWORD)
@@ -36,7 +35,7 @@ if IS_WINDOWS:
             self.manager_handle = self.kernel32.OpenProcess(SYNCHRONIZE, 0, self.manager_pid)
 
             if not self.manager_handle:
-                raise ctypes.WinError(ctypes.get_last_error())  # type: ignore
+                raise ctypes.WinError(ctypes.get_last_error())
 
             self.manager_dead = False
 
@@ -110,14 +109,10 @@ def get_worker_info():
 
 
 r"""Dummy class used to signal the end of an IterableDataset"""
-@dataclass(frozen=True)
-class _IterableDatasetStopIteration(object):
-    worker_id: int
+_IterableDatasetStopIteration = namedtuple('_IterableDatasetStopIteration', ['worker_id'])
 
 r"""Dummy class used to resume the fetching when worker reuse is enabled"""
-@dataclass(frozen=True)
-class _ResumeIteration(object):
-    pass
+_ResumeIteration = namedtuple('_ResumeIteration', [])
 
 def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                  auto_collation, collate_fn, drop_last, seed, init_fn, worker_id,
@@ -177,7 +172,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 continue
             if isinstance(r, _ResumeIteration):
                 # Acknowledge the main process
-                data_queue.put((r, None))
+                data_queue.put(r)
                 iteration_end = False
                 # Recreate the fetcher for worker-reuse policy
                 fetcher = _DatasetKind.create_fetcher(
@@ -193,7 +188,6 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
                 # processing steps.
                 continue
             idx, index = r
-            data: Union[_IterableDatasetStopIteration, ExceptionWrapper]
             if init_exception is not None:
                 data = init_exception
                 init_exception = None
@@ -217,6 +211,7 @@ def _worker_loop(dataset_kind, dataset, index_queue, data_queue, done_event,
             del data, idx, index, r  # save memory
     except KeyboardInterrupt:
         # Main process will raise KeyboardInterrupt anyways.
+        traceback.print_exc()
         pass
     if done_event.is_set():
         data_queue.cancel_join_thread()
