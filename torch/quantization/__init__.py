@@ -6,7 +6,6 @@ from .fuse_modules import fuse_modules
 from .stubs import *
 from .quant_type import *
 from .quantize_jit import *
-# from .quantize_fx import *
 from .quantization_mappings import *
 from .fuser_method_mappings import *
 
@@ -43,7 +42,7 @@ _all__ = [
     'register_activation_post_process_hook',
     # Observers
     'ObserverBase', 'WeightObserver', 'observer', 'default_observer',
-    'default_weight_observer', 'default_placeholder_observer',
+    'default_weight_observer',
     # FakeQuantize (for qat)
     'default_fake_quant', 'default_weight_fake_quant',
     'default_symmetric_fixed_qparams_fake_quant',
@@ -52,7 +51,6 @@ _all__ = [
     'default_histogram_fake_quant',
     # QConfig
     'QConfig', 'default_qconfig', 'default_dynamic_qconfig', 'float16_dynamic_qconfig',
-    'float_qparams_weight_only_qconfig',
     # QAT utilities
     'default_qat_qconfig', 'prepare_qat', 'quantize_qat',
     # module transformations
