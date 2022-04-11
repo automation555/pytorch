@@ -162,11 +162,12 @@ void replaceLoopCounter(Node* loop) {
   body->insertOutput(1, result);
 }
 
-bool unroll(Node* loop) {
+void unroll(Node* loop, bool constant_only) {
   Graph* graph = loop->owningGraph();
   Block* body = loop->blocks().at(0);
-  if (!isSmallBlock(body))
-    return false;
+
+  if (!isSmallBlock(body) && !constant_only)
+    return;
 
   // We will be using a "mutable" counter outside of the loop instead of the
   // default one, because this will allow us to share it between the unrolled
@@ -184,7 +185,7 @@ bool unroll(Node* loop) {
     repeatBody(body, *const_len, dest);
     loop->eraseBlock(0);
     inlineBody(loop);
-    return true;
+    return;
   }
 
   WithInsertPoint insert_point_guard{loop};
@@ -212,25 +213,25 @@ bool unroll(Node* loop) {
           aten::sub,
           {iter_count,
            graph->insert(aten::mul, {unrolled_iter_count, kUnrollFactor})}));
-
-  return true;
 }
 
-bool UnrollLoops(Block* block) {
-  bool changed = false;
+void UnrollLoops(Block* block, bool constant_only) {
   for (auto it = block->nodes().begin(); it != block->nodes().end();) {
     // XXX: unroll might destroy the current node, so we need to pre-increment
     // the iterator
     Node* node = *it;
     ++it;
     for (Block* subblock : node->blocks()) {
-      changed |= UnrollLoops(subblock);
+      UnrollLoops(subblock, constant_only);
     }
     if (isForLoop(node)) {
-      changed |= unroll(node);
+      if (constant_only &&
+          node->inputs().at(0)->node()->kind() != prim::Constant) {
+        continue;
+      }
+      unroll(node, constant_only);
     }
   }
-  return changed;
 }
 
 } // anonymous namespace
@@ -248,12 +249,11 @@ static void addCondAsOutput(Node* loop) {
   cond_output->copyMetadata(loop_view.nextCond());
 }
 
-bool LoopsPeeler::run(const std::shared_ptr<Graph>& graph) {
+void LoopsPeeler::run(const std::shared_ptr<Graph>& graph) {
   GRAPH_DUMP("Before LoopsPeeler", graph);
   collectLoops(graph->block());
   peelLoops();
   GRAPH_DUMP("After LoopsPeeler", graph);
-  return true;
 }
 
 void LoopsPeeler::collectLoop(Node* n) {
@@ -293,7 +293,7 @@ void LoopsPeeler::peelLoops() {
   }
 }
 
-bool PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
+void PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
   auto peel_predicate = [](Node* n) {
     for (auto i : n->inputs()) {
       if (i->type()->isSubtypeOf(TensorType::get())) {
@@ -305,7 +305,7 @@ bool PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
   };
 
   LoopsPeeler lp(peel_predicate);
-  return lp.run(graph);
+  lp.run(graph);
 }
 
 Node* PeelLoop(Node* n, size_t times) {
@@ -365,12 +365,14 @@ Node* PeelLoop(Node* n, size_t times) {
   return peeled_copy;
 }
 
-bool UnrollLoops(std::shared_ptr<Graph>& graph) {
-  bool changed = UnrollLoops(graph->block());
-  if (changed) {
-    EliminateDeadCode(graph);
-  }
-  return changed;
+void UnrollLoops(std::shared_ptr<Graph>& graph) {
+  UnrollLoops(graph->block(), false);
+  EliminateDeadCode(graph);
+}
+
+void UnrollConstantLoops(std::shared_ptr<Graph>& graph) {
+  UnrollLoops(graph->block(), true);
+  EliminateDeadCode(graph);
 }
 
 } // namespace jit
