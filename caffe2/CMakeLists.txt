@@ -67,7 +67,7 @@ if(INTERN_BUILD_ATEN_OPS)
   "${PYTHON_EXECUTABLE}" ${CMAKE_CURRENT_SOURCE_DIR}/contrib/aten/gen_op.py
     --aten_root=${CMAKE_CURRENT_SOURCE_DIR}/../aten
     --template_dir=${CMAKE_CURRENT_SOURCE_DIR}/contrib/aten
-    --yaml_dir=${CMAKE_CURRENT_BINARY_DIR}/../aten/src/ATen
+    --yaml_dir=${CMAKE_BINARY_DIR}/aten/src/ATen
     --install_dir=${CMAKE_CURRENT_BINARY_DIR}/contrib/aten
   DEPENDS
   ATEN_CPU_FILES_GEN_TARGET
@@ -614,7 +614,7 @@ if(NOT INTERN_BUILD_MOBILE OR NOT BUILD_CAFFE2_MOBILE)
       set(DELAY_LOAD_FLAGS "")
     endif()
     target_link_libraries(caffe2_nvrtc ${CUDA_NVRTC} ${CUDA_CUDA_LIB} ${CUDA_NVRTC_LIB} ${DELAY_LOAD_FLAGS})
-    target_include_directories(caffe2_nvrtc PRIVATE ${CUDA_INCLUDE_DIRS})
+    target_include_directories(caffe2_nvrtc PRIVATE ${CUDA_INCLUDE_DIRS} ${CMAKE_BINARY_DIR})
     install(TARGETS caffe2_nvrtc DESTINATION "${TORCH_INSTALL_LIB_DIR}")
     if(USE_NCCL AND BUILD_SPLIT_CUDA)
       list(APPEND Caffe2_GPU_SRCS_CPP
@@ -643,6 +643,7 @@ if(NOT INTERN_BUILD_MOBILE OR NOT BUILD_CAFFE2_MOBILE)
     # See NOTE [ ATen NVRTC Stub and HIP ]
     add_library(caffe2_nvrtc SHARED ${ATen_NVRTC_STUB_SRCS})
     target_link_libraries(caffe2_nvrtc ${PYTORCH_HIP_HCC_LIBRARIES} ${ROCM_HIPRTC_LIB})
+    target_include_directories(caffe2_nvrtc PRIVATE ${CMAKE_BINARY_DIR})
     target_compile_definitions(caffe2_nvrtc PRIVATE USE_ROCM __HIP_PLATFORM_HCC__)
     install(TARGETS caffe2_nvrtc DESTINATION "${TORCH_INSTALL_LIB_DIR}")
   endif()
@@ -1496,8 +1497,7 @@ if(USE_ROCM)
     # correct dependency from generated files.)
     target_link_libraries(torch_hip PRIVATE ATEN_CUDA_FILES_GEN_LIB)
   endif()
-  target_link_libraries(torch_hip PUBLIC torch_cpu_library ${Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS})
-  target_link_libraries(torch_hip PRIVATE ${Caffe2_HIP_DEPENDENCY_LIBS})
+  target_link_libraries(torch_hip PUBLIC torch_cpu_library ${Caffe2_HIP_DEPENDENCY_LIBS})
 
   # Since PyTorch files contain HIP headers, this is also needed to capture the includes.
   target_include_directories(torch_hip PRIVATE ${Caffe2_HIP_INCLUDE})
