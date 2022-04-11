@@ -1,3 +1,5 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
+
 import caffe2.python.fakelowp.init_shared_libs  # noqa
 import numpy as np
 from caffe2.python import core, workspace
@@ -5,14 +7,8 @@ from caffe2.python.onnx.onnxifi import onnxifi_caffe2_net
 from hypothesis import given, strategies as st, settings
 from caffe2.python.fakelowp.test_utils import print_test_debug_info
 import caffe2.python.serialized_test.serialized_test_util as serial
-import datetime
 
-core.GlobalInit(["caffe2",
-                 "--caffe2_log_level=-3",
-                 "--glow_global_fp16=1",
-                 "--glow_clip_quant_range_to_fp16=1",
-                 "--glow_global_fp16_constants=1"
-                 ])
+core.GlobalInit(["caffe2", "--caffe2_log_level=-3", "--glow_global_fp16=1"])
 
 
 class Int8OpsTest(serial.SerializedTestCase):
@@ -31,7 +27,7 @@ class Int8OpsTest(serial.SerializedTestCase):
         rand_seed=st.integers(0, 65534),
         non_zero_offset=st.booleans()
     )
-    @settings(deadline=datetime.timedelta(seconds=50))
+    @settings(max_examples=100)
     def test_int8_quantize(self, n, rand_seed, non_zero_offset):
         print("n={}, rand_seed={}".format(n, rand_seed))
         np.random.seed(rand_seed)
@@ -128,11 +124,11 @@ class Int8OpsTest(serial.SerializedTestCase):
         n=st.integers(1, 1024),
         m=st.integers(1, 1024),
         k=st.integers(1, 1024),
-        f=st.integers(1, 1),  # TODO: figure a safe number to increase
+        f=st.integers(10, 50),
         rand_seed=st.integers(0, 65534),
         quantize_bias=st.sampled_from([False]),
     )
-    @settings(deadline=datetime.timedelta(seconds=50))
+    @settings(max_examples=100)
     def test_int8_fc(
         self, n, m, k, rand_seed, quantize_bias, f
     ):
@@ -233,7 +229,7 @@ class Int8OpsTest(serial.SerializedTestCase):
         n=st.integers(1, 4),
         rand_seed=st.integers(0, 65534)
     )
-    @settings(deadline=datetime.timedelta(seconds=10))
+    @settings(max_examples=100)
     def test_int8_small_input(self, n, rand_seed):
         print("n={}, rand_seed={}".format(n, rand_seed))
         np.random.seed(rand_seed)
