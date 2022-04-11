@@ -1,11 +1,10 @@
 #include <ATen/AccumulateType.h>
 #include <ATen/Dispatch.h>
-#include <ATen/native/BinaryOps.h>
 #include <ATen/native/DispatchStub.h>
-#include <ATen/native/TensorIterator.h>
-#include <c10/cuda/CUDAGuard.h>
-#include <c10/cuda/CUDAMathCompat.h>
 #include <ATen/native/cuda/Loops.cuh>
+#include <ATen/native/TensorIterator.h>
+#include <ATen/native/BinaryOps.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <type_traits>
 
@@ -46,6 +45,54 @@ struct MulFunctor<bool> {
   }
 };
 
+#if defined(_MSC_VER) && _MSC_VER >= 1928
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<!std::is_same<scalar_t, double>::value, scalar_t>::type
+  ceil_(scalar_t a) {
+  return std::ceilf(static_cast<float>(a));
+}
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<std::is_same<scalar_t, double>::value, scalar_t>::type
+  ceil_(scalar_t a) {
+  return std::ceil(a);
+}
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<!std::is_same<scalar_t, double>::value, scalar_t>::type
+  floor_(scalar_t a) {
+  return std::floorf(static_cast<float>(a));
+}
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<std::is_same<scalar_t, double>::value, scalar_t>::type
+  floor_(scalar_t a) {
+  return std::floor(a);
+}
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<!std::is_same<scalar_t, double>::value, scalar_t>::type
+  trunc_(scalar_t a) {
+  return std::truncf(static_cast<float>(a));
+}
+template <typename scalar_t>
+static inline __host__ __device__ typename std::enable_if<std::is_same<scalar_t, double>::value, scalar_t>::type
+  trunc_(scalar_t a) {
+  return std::trunc(a);
+}
+template <typename scalar_t1, typename scalar_t2>
+static inline __host__ __device__ typename std::enable_if<!std::is_same<scalar_t1, double>::value && !std::is_same<scalar_t2, double>::value, scalar_t1>::type
+  copysign_(scalar_t1 a, scalar_t2 b) {
+  return std::copysignf(static_cast<float>(a), static_cast<float>(b));
+}
+template <typename scalar_t1, typename scalar_t2>
+static inline __host__ __device__ typename std::enable_if<std::is_same<scalar_t1, double>::value || std::is_same<scalar_t2, double>::value, scalar_t1>::type
+  copysign_(scalar_t1 a, scalar_t2 b) {
+  return std::copysign(static_cast<double>(a), static_cast<double>(b));
+}
+#else
+#define ceil_ std::ceil
+#define floor_ std::floor
+#define trunc_ std::trunc
+#define copysign_ std::copysign
+#endif
+
 
 void div_true_kernel_cuda(TensorIteratorBase& iter) {
   if (iter.is_cpu_scalar(2)) {
@@ -84,13 +131,13 @@ void div_trunc_kernel_cuda(TensorIteratorBase& iter) {
       auto inv_b = accscalar_t(1.0) / iter.scalar_value<accscalar_t>(2);
       iter.remove_operand(2);
       gpu_kernel(iter, [inv_b] GPU_LAMBDA (scalar_t a) -> scalar_t {
-        return std::trunc(a * inv_b);
+        return trunc_(a * inv_b);
       });
     });
   } else {
     AT_DISPATCH_FLOATING_TYPES_AND2(kHalf, kBFloat16, dtype, "div_trunc_cuda", [&]() {
       gpu_kernel_with_scalars(iter, [] GPU_LAMBDA (scalar_t a, scalar_t b) -> scalar_t {
-        return std::trunc(a / b);
+        return trunc_(a / b);
       });
     });
   }
@@ -137,12 +184,12 @@ void div_floor_kernel_cuda(TensorIteratorBase& iter) {
 
         scalar_t floordiv;
         if (div != 0) {
-          floordiv = std::floor(div);
+          floordiv = floor_(div);
           if (div - floordiv > scalar_t(0.5)) {
             floordiv += scalar_t(1.0);
           }
         } else {
-          floordiv = c10::cuda::compat::copysign(scalar_t(0), a * inv_b);
+          floordiv = copysign_(scalar_t(0), a * inv_b);
         }
         return floordiv;
       });
@@ -158,12 +205,12 @@ void div_floor_kernel_cuda(TensorIteratorBase& iter) {
 
         scalar_t floordiv;
         if (div != 0) {
-          floordiv = std::floor(div);
+          floordiv = floor_(div);
           if (div - floordiv > scalar_t(0.5)) {
             floordiv += scalar_t(1.0);
           }
         } else {
-          floordiv = c10::cuda::compat::copysign(scalar_t(0), a / b);
+          floordiv = copysign_(scalar_t(0), a / b);
         }
         return floordiv;
       });
