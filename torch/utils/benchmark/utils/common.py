@@ -28,7 +28,7 @@ class TaskSpec:
     """Container for information used to define a Timer. (except globals)"""
     stmt: str
     setup: str
-    global_setup: str = ""
+    global_setup: Optional[str] = None
     label: Optional[str] = None
     sub_label: Optional[str] = None
     description: Optional[str] = None
@@ -224,9 +224,8 @@ class Measurement:
     @staticmethod
     def merge(measurements):  # type: (Iterable[Measurement]) -> List[Measurement]
         """Convenience method for merging replicates.
-
-        Merge will extrapolate times to `number_per_run=1` and will not
-        transfer any metadata. (Since it might differ between replicates)
+        NB: merge will extrapolate times to `number_per_run=1` and will not
+            transfer any metadata (since it might differ between replicates)
         """
         grouped_measurements: DefaultDict[TaskSpec, List[Measurement]] = collections.defaultdict(list)
         for m in measurements:
