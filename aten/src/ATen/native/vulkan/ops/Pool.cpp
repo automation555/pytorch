@@ -10,6 +10,22 @@ namespace {
 
 using namespace api::utils;
 
+struct Pool_Block {
+  uvec3 extents;
+  int32_t range;
+  ivec2 iextents;
+  ivec2 stride;
+  ivec2 padding;
+  ivec2 kernel;
+};
+
+struct Pool_Block0 {
+  uvec3 size;
+  uint32_t _;
+  vec2 stride;
+  vec2 kernel;
+};
+
 Tensor adaptive_avg_pool2d(
     const at::Tensor& self_arg,
     const IntArrayRef output_size) {
@@ -33,10 +49,10 @@ Tensor adaptive_avg_pool2d(
     v_self.options(),
   };
 
-  api::Command::Pool& command_pool = context->command().pool;
-  api::Command::Buffer& command_buffer = command_pool.stream();
+  api::Command::Buffer command_buffer = context->command().pool.allocate();
+  command_buffer.begin();
   {
-    if C10_LIKELY(v_self.has_image()) {
+    if (v_self.has_image()) {
       const uvec3 v_output_size = v_output.extents();
       const uvec3 v_self_size = v_self.extents();
 
@@ -45,19 +61,14 @@ Tensor adaptive_avg_pool2d(
         static_cast<float>(v_self_size.data[1u]) / v_output_size.data[1u],
       };
 
-      const struct Block final {
-        uvec3 extents;
-        uint32_t _;
-        vec2 kernel;
-        vec2 stride;
-      } block {
+      const Pool_Block0 block {
         v_output.extents(),
         0u,
+        stride,
         {
           v_self_size.data[0u] - (v_output_size.data[0u] - 1u) * stride.data[0u],
           v_self_size.data[1u] - (v_output_size.data[1u] - 1u) * stride.data[1u],
         },
-        stride,
       };
 
       context->dispatch(
@@ -69,7 +80,6 @@ Tensor adaptive_avg_pool2d(
           },
           VK_KERNEL(adaptive_avg_pool2d),
           v_output.extents(),
-          context->gpu().adapter->local_work_group_size(),
           // Write-only access bypasses synchronization but inserts appropriate
           // barriers if necessary.
           v_output.image(
@@ -89,7 +99,8 @@ Tensor adaptive_avg_pool2d(
       TORCH_CHECK(false, "Not implemented!");
     }
   }
-  command_pool.submit(context->gpu().queue, command_buffer);
+  command_buffer.end();
+  command_buffer.submit(context->gpu().queue);
 
   return convert(v_output);
 }
@@ -153,8 +164,7 @@ Tensor avg_pool2d(
       input_size[Layout::Activation4D::height],
       input_size[Layout::Activation4D::width],
       output_height,
-      output_width,
-      self_arg.suggest_memory_format());
+      output_width);
 
   api::Context* const context = api::context();
 
@@ -172,24 +182,18 @@ Tensor avg_pool2d(
     v_self.options(),
   };
 
-  api::Command::Pool& command_pool = context->command().pool;
-  api::Command::Buffer& command_buffer = command_pool.stream();
+  api::Command::Buffer command_buffer = context->command().pool.allocate();
+  command_buffer.begin();
   {
-    if C10_LIKELY(v_self.has_image()) {
-      const struct Block final {
-        uvec3 extents;
-        int32_t range;
-        ivec4 kernel;
-        ivec2 stride;
-        ivec2 padding;
-      } block {
+    using namespace utils;
+
+    if (v_self.has_image()) {
+      const Pool_Block block {
         v_output.extents(),
         safe_downcast<int32_t>(
             kernel[Layout::Parameter::width] *
             kernel[Layout::Parameter::height]),
         {
-          safe_downcast<int32_t>(kernel[Layout::Parameter::width]),
-          safe_downcast<int32_t>(kernel[Layout::Parameter::height]),
           safe_downcast<int32_t>(self.size(Layout::Activation4D::width)),
           safe_downcast<int32_t>(self.size(Layout::Activation4D::height)),
         },
@@ -200,6 +204,10 @@ Tensor avg_pool2d(
         {
           safe_downcast<int32_t>(padding[Layout::Parameter::width]),
           safe_downcast<int32_t>(padding[Layout::Parameter::height]),
+        },
+        {
+          safe_downcast<int32_t>(kernel[Layout::Parameter::width]),
+          safe_downcast<int32_t>(kernel[Layout::Parameter::height]),
         },
       };
 
@@ -212,7 +220,6 @@ Tensor avg_pool2d(
           },
           VK_KERNEL(avg_pool2d),
           v_output.extents(),
-          context->gpu().adapter->local_work_group_size(),
           // Write-only access bypasses synchronization but inserts appropriate
           // barriers if necessary.
           v_output.image(
@@ -232,7 +239,8 @@ Tensor avg_pool2d(
       TORCH_CHECK(false, "Not implemented!");
     }
   }
-  command_pool.submit(context->gpu().queue, command_buffer);
+  command_buffer.end();
+  command_buffer.submit(context->gpu().queue);
 
   return convert(v_output);
 }

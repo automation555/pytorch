@@ -21,16 +21,6 @@ struct Resource final {
 
   struct Memory final {
     /*
-      Descriptor
-    */
-
-    struct Descriptor final {
-      VmaMemoryUsage usage;
-      VkMemoryPropertyFlags /* optional */ required;
-      VkMemoryPropertyFlags /* optional */ preferred;
-    };
-
-    /*
       Barrier
     */
 
@@ -40,8 +30,17 @@ struct Resource final {
     };
 
     /*
-      Access
+      Descriptor
     */
+
+    struct Descriptor final {
+      VmaMemoryUsage usage;
+      VkMemoryPropertyFlags /* optional */ required;
+      VkMemoryPropertyFlags /* optional */ preferred;
+    };
+
+    VmaAllocator allocator;
+    VmaAllocation allocation;
 
     struct Access final {
       typedef uint8_t Flags;
@@ -74,9 +73,6 @@ struct Resource final {
         Access::Flags kAccess,
         typename Pointer = Access::Pointer<Type, kAccess>>
     Handle<Pointer> map() &;
-
-    VmaAllocator allocator;
-    VmaAllocation allocation;
 
    private:
     // Intentionally disabed to ensure memory access is always properly
@@ -168,13 +164,13 @@ struct Resource final {
 
         typedef Sampler::Descriptor Descriptor;
         typedef VK_DELETER(Sampler) Deleter;
-        typedef api::Handle<VkSampler, Deleter> Handle;
+        typedef Handle<VkSampler, Deleter> Handler;
 
         struct Hasher {
           size_t operator()(const Descriptor& descriptor) const;
         };
 
-        Handle operator()(const Descriptor& descriptor) const;
+        Handler operator()(const Descriptor& descriptor) const;
 
        private:
         VkDevice device_;
@@ -303,8 +299,6 @@ struct Resource final {
    private:
     friend struct Fence;
 
-    void invalidate();
-
    private:
     struct Configuration final {
       static constexpr uint32_t kReserve = 256u;
@@ -359,8 +353,7 @@ class Resource::Memory::Scope final {
 
 template<typename, typename Pointer>
 inline Resource::Memory::Handle<Pointer> Resource::Memory::map() const & {
-  // Forward declaration
-  void* map(const Memory&, Access::Flags);
+  void* map(const Memory& memory, Access::Flags);
 
   return Handle<Pointer>{
     reinterpret_cast<Pointer>(map(*this, Access::Read)),
@@ -370,8 +363,7 @@ inline Resource::Memory::Handle<Pointer> Resource::Memory::map() const & {
 
 template<typename, Resource::Memory::Access::Flags kAccess, typename Pointer>
 inline Resource::Memory::Handle<Pointer> Resource::Memory::map() & {
-  // Forward declaration
-  void* map(const Memory&, Access::Flags);
+  void* map(const Memory& memory, Access::Flags);
 
   static_assert(
       (kAccess == Access::Read) ||
@@ -396,11 +388,10 @@ inline Resource::Buffer::operator bool() const {
 inline bool operator==(
     const Resource::Image::Sampler::Descriptor& _1,
     const Resource::Image::Sampler::Descriptor& _2) {
-    static_assert(
-      std::is_trivially_copyable<Resource::Image::Sampler::Descriptor>::value,
-      "This implementation is no longer valid!");
-
-  return (0 == memcmp(&_1, &_2, sizeof(Resource::Image::Sampler::Descriptor)));
+    return (_1.filter == _2.filter) &&
+           (_1.mipmap_mode == _2.mipmap_mode) &&
+           (_1.address_mode == _2.address_mode) &&
+           (_1.border == _2.border);
 }
 
 inline size_t Resource::Image::Sampler::Factory::Hasher::operator()(
