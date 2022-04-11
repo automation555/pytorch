@@ -1,9 +1,9 @@
 ## @package net_printer
 # Module caffe2.python.net_printer
-
-
-
-
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 from caffe2.proto.caffe2_pb2 import OperatorDef, NetDef
 from caffe2.python.checkpoint import Job
@@ -416,7 +416,7 @@ def debug_net(net):
     assert isinstance(net, Net)
     for op in net.Proto().op:
         text = Text()
-        print_op(op, text)
+        print_op(text, op)
         debug_net.LogInfo(str(text))
         debug_net.Proto().op.extend([op])
     return debug_net
