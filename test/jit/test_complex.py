@@ -40,7 +40,6 @@ class TestComplex(JitTestCase):
                 self.b = [2 + 3j, 3 + 4j, 0 - 3j, -4 + 0j]
                 self.c = {2 + 3j : 2 - 3j, -4.3 - 2j: 3j}
 
-            @torch.jit.script_method
             def forward(self, b: int):
                 return b + 2j
 
@@ -48,7 +47,6 @@ class TestComplex(JitTestCase):
         self.assertEqual(loaded.a, 3 + 5j)
         self.assertEqual(loaded.b, [2 + 3j, 3 + 4j, -3j, -4])
         self.assertEqual(loaded.c, {2 + 3j : 2 - 3j, -4.3 - 2j: 3j})
-        self.assertEqual(loaded(2), 2 + 2j)
 
     def test_complex_parse(self):
         def fn(a: int, b: torch.Tensor, dim: int):
@@ -61,25 +59,30 @@ class TestComplex(JitTestCase):
 
         self.checkScript(fn, (t1, t2, 2))
 
-    def test_complex_constants_and_ops(self):
+    def test_complex_math_ops(self):
         vals = ([0.0, 1.0, 2.2, -1.0, -0.0, -2.2, 1, 0, 2]
-                + [10.0 ** i for i in range(2)] + [-(10.0 ** i) for i in range(2)])
+                + [10.0 ** i for i in range(5)] + [-(10.0 ** i) for i in range(5)])
         complex_vals = tuple(complex(x, y) for x, y in product(vals, vals))
 
-        funcs_template = dedent('''
+        def checkMath(func_name):
+            funcs_template = dedent('''
             def func(a: complex):
-                return cmath.{func_or_const}(a)
+                return cmath.{func}(a)
             ''')
 
-        def checkCmath(func_name, funcs_template=funcs_template):
-            funcs_str = funcs_template.format(func_or_const=func_name)
+            funcs_str = funcs_template.format(func=func_name)
+            if func_name in ['isinf', 'isnan', 'isfinite']:
+                new_vals = vals + ([float('inf'), float('nan'), -1 * float('inf')])
+                final_vals = tuple(complex(x, y) for x, y in product(new_vals, new_vals))
+            else:
+                final_vals = complex_vals
             scope = {}
             execWrapper(funcs_str, globals(), scope)
             cu = torch.jit.CompilationUnit(funcs_str)
             f_script = cu.func
             f = scope['func']
 
-            for a in complex_vals:
+            for a in final_vals:
                 res_python = None
                 res_script = None
                 try:
@@ -95,15 +98,16 @@ class TestComplex(JitTestCase):
                     if isinstance(res_python, Exception):
                         continue
 
-                    msg = f"Failed on {func_name} with input {a}. Python: {res_python}, Script: {res_script}"
+                    msg = ("Failed on {func_name} with input {a}. Python: {res_python}, Script: {res_script}"
+                           .format(func_name=func_name, a=a, res_python=res_python, res_script=res_script))
                     self.assertEqual(res_python, res_script, msg=msg)
 
         unary_ops = ['log', 'log10', 'sqrt', 'exp', 'sin', 'cos', 'asin', 'acos', 'atan', 'sinh', 'cosh',
-                     'tanh', 'asinh', 'acosh', 'atanh', 'phase']
+                     'tanh', 'asinh', 'acosh', 'atanh', 'phase', 'isinf', 'isnan', 'isfinite']
 
         # --- Unary ops ---
         for op in unary_ops:
-            checkCmath(op)
+            checkMath(op)
 
         def fn(x: complex):
             return abs(x)
@@ -111,29 +115,40 @@ class TestComplex(JitTestCase):
         for val in complex_vals:
             self.checkScript(fn, (val, ))
 
-        func_constants_template = dedent('''
-            def func():
-                return cmath.{func_or_const}
-            ''')
+    def test_cmath_constants(self):
+        def checkCmathConst(const_name):
+            funcs_template = dedent('''
+                def func():
+                    return cmath.{const}
+                ''')
+
+            funcs_str = funcs_template.format(const=const_name)
+            scope = {}
+            execWrapper(funcs_str, globals(), scope)
+            cu = torch.jit.CompilationUnit(funcs_str)
+            f_script = cu.func
+            f = scope['func']
+
+            res_python = f()
+            res_script = f_script()
+
+            if res_python != res_script:
+                msg = ("Failed on {const_name}. Python: {res_python}, Script: {res_script}"
+                       .format(const_name=const_name, res_python=res_python, res_script=res_script))
+                self.assertEqual(res_python, res_script, msg=msg)
+
         float_consts = ['pi', 'e', 'tau', 'inf', 'nan']
         complex_consts = ['infj', 'nanj']
         for x in (float_consts + complex_consts):
-            checkCmath(x, funcs_template=func_constants_template)
+            checkCmathConst(x)
 
+    def test_tensor_attributes(self):
+        def tensor_real(x):
+            return x.real
 
-    def test_infj_nanj_pickle(self):
-        class ComplexModule(torch.jit.ScriptModule):
-            def __init__(self):
-                super().__init__()
-                self.a = 3 + 5j
+        def tensor_imag(x):
+            return x.imag
 
-            @torch.jit.script_method
-            def forward(self, infj: int, nanj: int):
-                if infj == 2:
-                    return infj + cmath.infj
-                else:
-                    return nanj + cmath.nanj
-
-        loaded = self.getExportImportCopy(ComplexModule())
-        self.assertEqual(loaded(2, 3), 2 + cmath.infj)
-        self.assertEqual(loaded(3, 4), 4 + cmath.nanj)
+        t = torch.randn(2, 3, dtype=torch.cdouble)
+        self.checkScript(tensor_real, (t, ))
+        self.checkScript(tensor_imag, (t, ))
