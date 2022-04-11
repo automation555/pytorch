@@ -1,5 +1,3 @@
-#include <gtest/gtest.h>
-
 #include <test/cpp/tensorexpr/test_base.h>
 #include <torch/csrc/jit/frontend/code_template.h>
 #include <torch/csrc/jit/ir/ir.h>
@@ -19,73 +17,7 @@ namespace jit {
 using namespace torch::indexing;
 using namespace torch::jit::tensorexpr;
 
-class Kernel : public ::testing::Test {
- public:
-  void SetUp() {
-    getTEMustUseLLVMOnCPU() = false;
-  }
-};
-
-TEST_F(Kernel, InliningIntermediates) {
-  // here, each mul has only one use, so it should be completely inlined
-  {
-    const auto graph_string = R"IR(
-        graph(%0 : Float(5, 3, strides=[3, 1], device=cpu),
-              %1 : Float(5, 3, strides=[3, 1], device=cpu)):
-          %2 : Float(5, 3, strides=[3, 1]) = aten::mul(%0, %1)
-          %one : int = prim::Constant[value=1]()
-          %4 : Float(5, 3, strides=[3, 1]) = aten::mul(%0, %2)
-          %5: Float(5, 3, strides=[3, 1]) = aten::add(%4, %1, %one)
-          return (%5))IR";
-    KernelScope kernel_scope;
-    auto graph = std::make_shared<Graph>();
-    parseIR(graph_string, &*graph);
-    TensorExprKernel k(graph);
-    auto stmt = k.getCodeGenStmt();
-    std::ostringstream oss;
-    oss << *stmt;
-    torch::jit::testing::FileCheck().check_not("aten_mul")->run(oss.str());
-  }
-  {
-    const auto graph_template = R"IR(
-        graph(%0 : Float(5, 3, strides=[3, 1], device=${device}),
-              %1 : Float(5, 3, strides=[3, 1], device=${device})):
-          %2 : Float(5, 3, strides=[3, 1]) = aten::mul(%0, %1)
-          %one : int = prim::Constant[value=1]()
-          %3 : Float(5, 3, strides=[3, 1]) = aten::sub(%0, %2, %one)
-          %4 : Float(5, 3, strides=[3, 1]) = aten::add(%3, %0, %one)
-          %5 : Float(5, 3, strides=[3, 1]) = aten::div(%3, %0)
-          return (%4, %5))IR";
-    for (bool use_cuda : {false, true}) {
-      if (!torch::cuda::is_available() && use_cuda) {
-        continue;
-      }
-
-      KernelScope kernel_scope;
-      TemplateEnv env;
-      env.s("device", use_cuda ? "cuda:0" : "cpu");
-      const auto graph_string = format(graph_template, env);
-      auto graph = std::make_shared<Graph>();
-      parseIR(graph_string, &*graph);
-      auto device = use_cuda ? kCUDA : kCPU;
-      TensorExprKernel k(graph);
-      auto stmt = k.getCodeGenStmt();
-      std::ostringstream oss;
-      oss << *stmt;
-      // aten_mul only has one use, inlined completely
-      torch::jit::testing::FileCheck().check_not("aten_mul")->run(oss.str());
-
-      // aten_sub should be removed in cuda, exist in cpu
-      // 5 uses: allocate, initialize, free and two reads
-      size_t num_out1_uses = use_cuda ? 0 : 5;
-      torch::jit::testing::FileCheck()
-          .check_count("aten_sub", num_out1_uses, /*exactly*/ true)
-          ->run(oss.str());
-    }
-  }
-}
-
-TEST_F(Kernel, _1) {
+void testKernel_1() {
   KernelScope kernel_scope;
 
   const auto graph_string = R"IR(
@@ -124,7 +56,7 @@ TEST_F(Kernel, _1) {
   }
 }
 
-TEST_F(Kernel, _2) {
+void testKernel_2() {
   KernelScope kernel_scope;
 
   const auto graph_string = R"IR(
@@ -164,7 +96,7 @@ TEST_F(Kernel, _2) {
   }
 }
 
-TEST_F(Kernel, _3) {
+void testKernel_3() {
   KernelScope kernel_scope;
 
   const auto graph_string = R"IR(
@@ -204,9 +136,7 @@ TEST_F(Kernel, _3) {
   }
 }
 
-TEST_F(Kernel, DISABLED_Shape_Inference) {
-  // disabled: doesn't do stride propagation, and isn't being used currently
-
+void testKernel_4() {
   // Test TensorExpr shape inference capabilities: it should only require shapes
   // for the inputs
   {
@@ -448,12 +378,13 @@ TEST_F(Kernel, DISABLED_Shape_Inference) {
       TensorExprKernel k(graph);
       k.getCodeGenStmt();
     };
-    ASSERT_THROWS_WITH(compile(ir_dim_99), "Invalid index");
-    ASSERT_THROWS_WITH(compile(ir_dim_minus_6), "Invalid index");
+    ASSERT_THROWS_WITH(compile(ir_dim_99), "invalid 'dim' value in aten::cat");
+    ASSERT_THROWS_WITH(
+        compile(ir_dim_minus_6), "invalid 'dim' value in aten::cat");
   }
 }
 
-TEST_F(Kernel, CatInputTypesPromotion) {
+void testKernelCatInputTypesPromotion() {
   {
     // Test that we properly promote input types for aten::cat
     KernelScope kernel_scope;
@@ -464,7 +395,7 @@ TEST_F(Kernel, CatInputTypesPromotion) {
             %c : Double(5, 9, 2, strides=[18, 2, 1], device=cpu)):
         %dim : int = prim::Constant[value=1]()
         %inputs : Tensor[] = prim::ListConstruct(%a, %b, %c)
-        %r : Double(5, 19, 2, strides=[38, 2, 1]) = aten::cat(%inputs, %dim)
+        %r : Tensor = aten::cat(%inputs, %dim)               # new size: [5,19,2]
         return (%r))IR";
     auto graph = std::make_shared<Graph>();
     parseIR(graph_string, &*graph);
@@ -510,66 +441,6 @@ TEST_F(Kernel, CatInputTypesPromotion) {
   }
 }
 
-TEST_F(Kernel, CatWoConditionals) {
-  getCatWoConditionals() = true;
-  const auto graph_string = R"IR(
-      graph(%a : Float(5, 3, 2, strides=[6, 2, 1], device=cpu),
-            %b : Float(5, 7, 2, strides=[14, 2, 1], device=cpu),
-            %c : Float(5, 9, 2, strides=[18, 2, 1], device=cpu)):
-        %dim : int = prim::Constant[value=1]()
-        %inputs : Tensor[] = prim::ListConstruct(%a, %b, %c)
-        %r : Float(5, 19, 2, strides=[38, 2, 1]) = aten::cat(%inputs, %dim)
-        return (%r))IR";
-
-  auto graph = std::make_shared<Graph>();
-  parseIR(graph_string, &*graph);
-
-  TensorExprKernel k(graph);
-  Stmt* s = k.getCodeGenStmt();
-  std::ostringstream oss;
-  oss << *s;
-
-  const std::string& verification_pattern =
-      R"IR(
-# CHECK: for
-# CHECK-NEXT: for
-# CHECK-NEXT: for
-# CHECK-NEXT: aten_cat
-# CHECK: for
-# CHECK-NEXT: for
-# CHECK-NEXT: for
-# CHECK-NEXT: aten_cat
-# CHECK: for
-# CHECK-NEXT: for
-# CHECK-NEXT: for
-# CHECK-NEXT: aten_cat)IR";
-  torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
-
-  auto a = at::rand({5, 3, 2}, TensorOptions(kCPU).dtype(at::kFloat));
-  auto b = at::rand({5, 7, 2}, TensorOptions(kCPU).dtype(at::kFloat));
-  auto c = at::rand({5, 9, 2}, TensorOptions(kCPU).dtype(at::kFloat));
-  auto ref = at::cat({a, b, c}, 1);
-
-  std::vector<at::Tensor> inputs = {a, b, c};
-  std::vector<IValue> stack = fmap<IValue>(inputs);
-  k.run(stack);
-  auto o = stack[0].toTensor();
-
-  // Check sizes
-  CHECK_EQ(o.sizes().size(), ref.sizes().size());
-  CHECK_EQ(o.dtype(), ref.dtype());
-  size_t num_el = 1;
-  for (size_t idx = 0; idx < ref.sizes().size(); idx++) {
-    CHECK_EQ(o.sizes()[idx], ref.sizes()[idx]);
-    num_el *= ref.sizes()[idx];
-  }
-
-  // Check the contents
-  for (size_t i = 0; i < num_el; i++) {
-    CHECK_EQ(((float*)o.data_ptr())[i], ((float*)ref.data_ptr())[i]);
-  }
-}
-
 namespace {
 
 std::string dtypeConstant(ScalarType scalar_type) {
@@ -593,12 +464,7 @@ at::Tensor iotaTensor(IntArrayRef sizes, const at::TensorOptions& options) {
 
 } // namespace
 
-TEST_F(Kernel, DISABLED_SumAllAxes) {
-  // [zero-dim tensors]
-  // NNC does not yet handle zero-dim tensors. aten::sum with no axis
-  // input returns a zero-dim tensors, so these tests must be disabled
-  // until we add support for zero-dim tensors.
-
+void testKernelSumAllAxes() {
   // Test lowering of sum on all axes.
   const auto graph_template = R"IR(
       graph(%0 : Float(5, 3, strides=[3, 1], device=cpu)):
@@ -645,27 +511,14 @@ TEST_F(Kernel, DISABLED_SumAllAxes) {
   }
 }
 
-std::string li_to_str(at::ArrayRef<int64_t> li) {
-  std::stringstream out;
-  bool first = true;
-  for (auto elem : li) {
-    if (!first) {
-      out << ", ";
-    }
-    out << elem;
-    first = false;
-  }
-  return out.str();
-}
-
-TEST_F(Kernel, SumOneAxis) {
+void testKernelSumOneAxis() {
   // Test lowering of sum on one axis.
   const auto graph_template = R"IR(
       graph(%0 : Float(5, 3, strides=[3, 1], device=cpu)):
         %1 : int[] = prim::Constant[value=[${dim}]]()
         %2 : bool = prim::Constant[value=${keepdim}]()
         %3 : ${dtype}
-        %4 : ${out_dtype}(${size}, strides=[${strides}], device=cpu) = aten::sum(%0, %1, %2, %3)
+        %4 : Tensor = aten::sum(%0, %1, %2, %3)
         return (%4))IR";
   auto a = iotaTensor({5, 3}, TensorOptions(kCPU).dtype(at::kFloat));
 
@@ -677,23 +530,17 @@ TEST_F(Kernel, SumOneAxis) {
         env.d("dim", dim);
         env.d("keepdim", keepdim);
         env.s("dtype", dtypeConstant(scalar_type));
+        const auto graph_string = format(graph_template, env);
+
+        auto graph = std::make_shared<Graph>();
+        parseIR(graph_string, &*graph);
+
+        auto o = at::empty({}, TensorOptions(kCPU));
         c10::optional<c10::ScalarType> dtype;
         if (scalar_type != ScalarType::None) {
           dtype = static_cast<c10::ScalarType>(scalar_type);
         }
         auto ref = a.sum({dim}, /*keepdim=*/keepdim, /*dtype=*/dtype);
-        if (scalar_type == ScalarType::None) {
-          env.s("out_dtype", "Float");
-        } else {
-          env.s("out_dtype", "Double");
-        }
-        env.s("size", li_to_str(ref.sizes()));
-        env.s("strides", li_to_str(ref.strides()));
-        const auto graph_string = format(graph_template, env);
-        auto graph = std::make_shared<Graph>();
-        parseIR(graph_string, &*graph);
-
-        auto o = at::empty({}, TensorOptions(kCPU));
         TensorExprKernel k(graph);
         std::vector<at::Tensor> inputs = {a};
         Stmt* s = k.getCodeGenStmt();
@@ -721,7 +568,7 @@ TEST_F(Kernel, SumOneAxis) {
   }
 }
 
-TEST_F(Kernel, SumMultipleAxes) {
+void testKernelSumMultipleAxes() {
   // Test lowering of sum on multiple axes.
   const auto graph_template = R"IR(
       graph(%0 : Float(2, 3, 2, 3, strides=[18, 6, 3, 1], device=cpu)):
@@ -730,7 +577,7 @@ TEST_F(Kernel, SumMultipleAxes) {
         %3 : int[] = prim::ListConstruct(%1, %2)
         %4 : bool = prim::Constant[value=${keepdim}]()
         %5 : ${dtype}
-        %6 : Float(${size}, strides=[${strides}]) = aten::sum(%0, %3, %4, %5)
+        %6 : Tensor = aten::sum(%0, %3, %4, %5)
         return (%6))IR";
   auto a = iotaTensor({2, 3, 2, 3}, TensorOptions(kCPU).dtype(at::kFloat));
 
@@ -745,17 +592,13 @@ TEST_F(Kernel, SumMultipleAxes) {
         env.d("dim2", dim2);
         env.d("keepdim", keepdim);
         env.s("dtype", dtypeConstant(ScalarType::None));
-        auto o = at::empty({}, TensorOptions(kCPU));
-        auto ref = a.sum(IntArrayRef{dim1, dim2}, /*keepdim=*/keepdim);
-
-        env.s("size", li_to_str(ref.sizes()));
-        env.s("strides", li_to_str(ref.strides()));
-
         const auto graph_string = format(graph_template, env);
 
         auto graph = std::make_shared<Graph>();
         parseIR(graph_string, &*graph);
 
+        auto o = at::empty({}, TensorOptions(kCPU));
+        auto ref = a.sum(IntArrayRef{dim1, dim2}, /*keepdim=*/keepdim);
         TensorExprKernel k(graph);
         std::vector<at::Tensor> inputs = {a};
         Stmt* s = k.getCodeGenStmt();
@@ -787,12 +630,12 @@ TEST_F(Kernel, SumMultipleAxes) {
 // This test and the following ones testing Softmax only tests with dim set
 // to one of the valid input dimensions. It does not test with dim=None
 // because that is supposed to be deprecated.
-TEST_F(Kernel, Softmax2D) {
+void testKernelSoftmax2D() {
   const auto graph_template = R"IR(
       graph(%0 : Float(5, 3, strides=[3, 1], device=cpu)):
         %1 : int = prim::Constant[value=${dim}]()
         %2 : int = prim::Constant[value=7]()
-        %3 : Float(${size}, strides=[${strides}]) = aten::${op}(%0, %1, %2)
+        %3 : Tensor = aten::softmax(%0, %1, %2)
         return (%3))IR";
 
   auto a = at::rand({5, 3}, TensorOptions(kCPU).dtype(at::kFloat));
@@ -802,64 +645,58 @@ TEST_F(Kernel, Softmax2D) {
         # CHECK: for (int i${other_dim} = 0; i${other_dim} < ${other_dim_size}
         # CHECK: for (int i${softmax_dim} = 0; i${softmax_dim} < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_max
-        # CHECK: for (int i${other_dim}_1 = 0; i${other_dim}_1 < ${other_dim_size}
-        # CHECK: for (int i${softmax_dim}_1 = 0; i${softmax_dim}_1 < ${softmax_dim_size}
+        # CHECK: for (int i0_1 = 0; i0_1 < 5
+        # CHECK-NEXT: for (int i1_1 = 0; i1_1 < 3
+        # CHECK-NEXT: aten_softmax_exp
+        # CHECK: for (int i${other_dim}_2 = 0; i${other_dim}_2 < ${other_dim_size}
+        # CHECK: for (int i${softmax_dim}_2 = 0; i${softmax_dim}_2 < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_sum
-        # CHECK: for (int i0_2 = 0; i0_2 < 5
-        # CHECK-NEXT: for (int i1_2 = 0; i1_2 < 3
+        # CHECK: for (int i0_3 = 0; i0_3 < 5
+        # CHECK-NEXT: for (int i1_3 = 0; i1_3 < 3
         # CHECK-NEXT: aten_softmax)IR";
 
-  for (auto log_softmax : {false, true}) {
-    for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
-      auto softmax_dim_size = a.sizes()[softmax_dim];
-      auto other_dim = (softmax_dim + 1) % a.dim();
-      auto ref =
-          log_softmax ? a.log_softmax(softmax_dim) : a.softmax(softmax_dim);
-      KernelScope kernel_scope;
-      TemplateEnv env;
-      env.d("dim", softmax_dim);
-      env.s("op", log_softmax ? "log_softmax" : "softmax");
-      env.s("size", li_to_str(ref.sizes()));
-      env.s("strides", li_to_str(ref.strides()));
+  for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
+    auto softmax_dim_size = a.sizes()[softmax_dim];
+    auto other_dim = (softmax_dim + 1) % a.dim();
 
-      const auto graph_string = format(graph_template, env);
+    KernelScope kernel_scope;
+    TemplateEnv env;
+    env.d("dim", softmax_dim);
+    const auto graph_string = format(graph_template, env);
 
-      auto graph = std::make_shared<Graph>();
-      parseIR(graph_string, &*graph);
+    auto graph = std::make_shared<Graph>();
+    parseIR(graph_string, &*graph);
 
-      TensorExprKernel k(graph);
-      std::vector<at::Tensor> inputs = {a};
-      Stmt* s = k.getCodeGenStmt();
+    TensorExprKernel k(graph);
+    std::vector<at::Tensor> inputs = {a};
+    Stmt* s = k.getCodeGenStmt();
 
-      std::ostringstream oss;
-      oss << *s;
+    std::ostringstream oss;
+    oss << *s;
 
-      TemplateEnv ver_env;
-      ver_env.d("other_dim", other_dim);
-      ver_env.d("other_dim_size", a.sizes()[other_dim]);
-      ver_env.d("softmax_dim", softmax_dim);
-      ver_env.d("softmax_dim_size", softmax_dim_size);
-      const auto verification_pattern = format(verification_template, ver_env);
+    TemplateEnv ver_env;
+    ver_env.d("other_dim", other_dim);
+    ver_env.d("other_dim_size", a.sizes()[other_dim]);
+    ver_env.d("softmax_dim", softmax_dim);
+    ver_env.d("softmax_dim_size", softmax_dim_size);
+    const auto verification_pattern = format(verification_template, ver_env);
+    torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
 
-      // verication sting temporarily disabled until
-      // inlining of exp() is benchmarked and determined
-      // torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
-
-      std::vector<IValue> stack = fmap<IValue>(inputs);
-      k.run(stack);
-      auto output = stack[0].toTensor();
-      ASSERT_EQ(output.sizes(), ref.sizes());
-      ASSERT_TRUE(at::allclose(output, ref));
-    }
+    std::vector<IValue> stack = fmap<IValue>(inputs);
+    k.run(stack);
+    auto output = stack[0].toTensor();
+    auto ref = a.softmax(softmax_dim);
+    ASSERT_EQ(output.sizes(), ref.sizes());
+    ASSERT_TRUE(at::allclose(output, ref));
   }
 }
 
-TEST_F(Kernel, Softmax3D) {
+void testKernelSoftmax3D() {
   const auto graph_template = R"IR(
       graph(%0 : Float(3, 4, 5, strides=[20, 5, 1], device=cpu)):
         %1 : int = prim::Constant[value=${dim}]()
         %2 : int = prim::Constant[value=7]()
-        %3 : Float(${size}, strides=[${strides}]) = aten::${op}(%0, %1, %2)
+        %3 : Tensor = aten::softmax(%0, %1, %2)
         return (%3))IR";
 
   auto a = at::rand({3, 4, 5}, TensorOptions(kCPU).dtype(at::kFloat));
@@ -870,75 +707,69 @@ TEST_F(Kernel, Softmax3D) {
         # CHECK-NEXT: for (int i${dim2} = 0; i${dim2} < ${dim2_size}
         # CHECK: for (int i${softmax_dim} = 0; i${softmax_dim} < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_max
-        # CHECK: for (int i${dim1}_1 = 0; i${dim1}_1 < ${dim1_size}
-        # CHECK-NEXT: for (int i${dim2}_1 = 0; i${dim2}_1 < ${dim2_size}
-        # CHECK: for (int i${softmax_dim}_1 = 0; i${softmax_dim}_1 < ${softmax_dim_size}
+        # CHECK: for (int i0_1 = 0; i0_1 < 3
+        # CHECK-NEXT: for (int i1_1 = 0; i1_1 < 4
+        # CHECK-NEXT: for (int i2_1 = 0; i2_1 < 5
+        # CHECK-NEXT: aten_softmax_exp
+        # CHECK: for (int i${dim1}_2 = 0; i${dim1}_2 < ${dim1_size}
+        # CHECK-NEXT: for (int i${dim2}_2 = 0; i${dim2}_2 < ${dim2_size}
+        # CHECK: for (int i${softmax_dim}_2 = 0; i${softmax_dim}_2 < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_sum
-        # CHECK: for (int i0_2 = 0; i0_2 < 3
-        # CHECK-NEXT: for (int i1_2 = 0; i1_2 < 4
-        # CHECK-NEXT: for (int i2_2 = 0; i2_2 < 5
+        # CHECK: for (int i0_3 = 0; i0_3 < 3
+        # CHECK-NEXT: for (int i1_3 = 0; i1_3 < 4
+        # CHECK-NEXT: for (int i2_3 = 0; i2_3 < 5
         # CHECK-NEXT: aten_softmax)IR";
 
-  for (auto log_softmax : {false, true}) {
-    for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
-      auto softmax_dim_size = a.sizes()[softmax_dim];
-      std::vector<int> other_dims;
-      for (int i = 0; i < a.dim(); ++i) {
-        if (i != softmax_dim) {
-          other_dims.push_back(i);
-        }
+  for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
+    auto softmax_dim_size = a.sizes()[softmax_dim];
+    std::vector<int> other_dims;
+    for (int i = 0; i < a.dim(); ++i) {
+      if (i != softmax_dim) {
+        other_dims.push_back(i);
       }
-      auto ref =
-          log_softmax ? a.log_softmax(softmax_dim) : a.softmax(softmax_dim);
-
-      KernelScope kernel_scope;
-      TemplateEnv env;
-      env.d("dim", softmax_dim);
-      env.s("op", log_softmax ? "log_softmax" : "softmax");
-      env.s("size", li_to_str(ref.sizes()));
-      env.s("strides", li_to_str(ref.strides()));
-
-      const auto graph_string = format(graph_template, env);
-
-      auto graph = std::make_shared<Graph>();
-      parseIR(graph_string, &*graph);
-
-      TensorExprKernel k(graph);
-      std::vector<at::Tensor> inputs = {a};
-      Stmt* s = k.getCodeGenStmt();
-
-      std::ostringstream oss;
-      oss << *s;
-
-      TemplateEnv ver_env;
-      ver_env.d("dim1", other_dims[0]);
-      ver_env.d("dim1_size", a.sizes()[other_dims[0]]);
-      ver_env.d("dim2", other_dims[1]);
-      ver_env.d("dim2_size", a.sizes()[other_dims[1]]);
-      ver_env.d("softmax_dim", softmax_dim);
-      ver_env.d("softmax_dim_size", softmax_dim_size);
-      const auto verification_pattern = format(verification_template, ver_env);
-
-      // verication sting temporarily disabled until
-      // inlining of exp() is benchmarked and determined
-      // torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
-
-      std::vector<IValue> stack = fmap<IValue>(inputs);
-      k.run(stack);
-      auto output = stack[0].toTensor();
-
-      ASSERT_EQ(output.sizes(), ref.sizes());
-      ASSERT_TRUE(at::allclose(output, ref));
     }
+
+    KernelScope kernel_scope;
+    TemplateEnv env;
+    env.d("dim", softmax_dim);
+    const auto graph_string = format(graph_template, env);
+
+    auto graph = std::make_shared<Graph>();
+    parseIR(graph_string, &*graph);
+
+    TensorExprKernel k(graph);
+    std::vector<at::Tensor> inputs = {a};
+    Stmt* s = k.getCodeGenStmt();
+
+    std::ostringstream oss;
+    oss << *s;
+
+    TemplateEnv ver_env;
+    ver_env.d("dim1", other_dims[0]);
+    ver_env.d("dim1_size", a.sizes()[other_dims[0]]);
+    ver_env.d("dim2", other_dims[1]);
+    ver_env.d("dim2_size", a.sizes()[other_dims[1]]);
+    ver_env.d("softmax_dim", softmax_dim);
+    ver_env.d("softmax_dim_size", softmax_dim_size);
+    const auto verification_pattern = format(verification_template, ver_env);
+    torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
+
+    std::vector<IValue> stack = fmap<IValue>(inputs);
+    k.run(stack);
+    auto output = stack[0].toTensor();
+
+    auto ref = a.softmax(softmax_dim);
+    ASSERT_EQ(output.sizes(), ref.sizes());
+    ASSERT_TRUE(at::allclose(output, ref));
   }
 }
 
-TEST_F(Kernel, Softmax4D) {
+void testKernelSoftmax4D() {
   const auto graph_template = R"IR(
       graph(%0 : Float(2, 3, 2, 3, strides=[18, 6, 3, 1], device=cpu)):
         %1 : int = prim::Constant[value=${dim}]()
         %2 : int = prim::Constant[value=7]()
-        %3 : Float(${size}, strides=[${strides}]) = aten::${op}(%0, %1, %2)
+        %3 : Tensor = aten::softmax(%0, %1, %2)
         return (%3))IR";
 
   auto a = at::rand({2, 3, 2, 3}, TensorOptions(kCPU).dtype(at::kFloat));
@@ -950,74 +781,68 @@ TEST_F(Kernel, Softmax4D) {
         # CHECK-NEXT: for (int i${dim3} = 0; i${dim3} < ${dim3_size}
         # CHECK: for (int i${softmax_dim} = 0; i${softmax_dim} < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_max
-        # CHECK: for (int i${dim1}_1 = 0; i${dim1}_1 < ${dim1_size}
-        # CHECK-NEXT: for (int i${dim2}_1 = 0; i${dim2}_1 < ${dim2_size}
-        # CHECK-NEXT: for (int i${dim3}_1 = 0; i${dim3}_1 < ${dim3_size}
-        # CHECK: for (int i${softmax_dim}_1 = 0; i${softmax_dim}_1 < ${softmax_dim_size}
+        # CHECK: for (int i0_1 = 0; i0_1 < 2
+        # CHECK-NEXT: for (int i1_1 = 0; i1_1 < 3
+        # CHECK-NEXT: for (int i2_1 = 0; i2_1 < 2
+        # CHECK-NEXT: for (int i3_1 = 0; i3_1 < 3
+        # CHECK-NEXT: aten_softmax_exp
+        # CHECK: for (int i${dim1}_2 = 0; i${dim1}_2 < ${dim1_size}
+        # CHECK-NEXT: for (int i${dim2}_2 = 0; i${dim2}_2 < ${dim2_size}
+        # CHECK-NEXT: for (int i${dim3}_2 = 0; i${dim3}_2 < ${dim3_size}
+        # CHECK: for (int i${softmax_dim}_2 = 0; i${softmax_dim}_2 < ${softmax_dim_size}
         # CHECK-NEXT: aten_softmax_sum
-        # CHECK: for (int i0_2 = 0; i0_2 < 2
-        # CHECK-NEXT: for (int i1_2 = 0; i1_2 < 3
-        # CHECK-NEXT: for (int i2_2 = 0; i2_2 < 2
-        # CHECK-NEXT: for (int i3_2 = 0; i3_2 < 3
+        # CHECK: for (int i0_3 = 0; i0_3 < 2
+        # CHECK-NEXT: for (int i1_3 = 0; i1_3 < 3
+        # CHECK-NEXT: for (int i2_3 = 0; i2_3 < 2
+        # CHECK-NEXT: for (int i3_3 = 0; i3_3 < 3
         # CHECK-NEXT: aten_softmax)IR";
 
-  for (auto log_softmax : {false, true}) {
-    for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
-      auto softmax_dim_size = a.sizes()[softmax_dim];
-      std::vector<int> other_dims;
-      for (int i = 0; i < a.dim(); ++i) {
-        if (i != softmax_dim) {
-          other_dims.push_back(i);
-        }
+  for (int softmax_dim = 0; softmax_dim < a.dim(); ++softmax_dim) {
+    auto softmax_dim_size = a.sizes()[softmax_dim];
+    std::vector<int> other_dims;
+    for (int i = 0; i < a.dim(); ++i) {
+      if (i != softmax_dim) {
+        other_dims.push_back(i);
       }
-      auto ref =
-          log_softmax ? a.log_softmax(softmax_dim) : a.softmax(softmax_dim);
-
-      KernelScope kernel_scope;
-      TemplateEnv env;
-      env.d("dim", softmax_dim);
-      env.s("op", log_softmax ? "log_softmax" : "softmax");
-      env.s("size", li_to_str(ref.sizes()));
-      env.s("strides", li_to_str(ref.strides()));
-
-      const auto graph_string = format(graph_template, env);
-
-      auto graph = std::make_shared<Graph>();
-      parseIR(graph_string, &*graph);
-
-      TensorExprKernel k(graph);
-      std::vector<at::Tensor> inputs = {a};
-      Stmt* s = k.getCodeGenStmt();
-
-      std::ostringstream oss;
-      oss << *s;
-
-      TemplateEnv ver_env;
-      ver_env.d("dim1", other_dims[0]);
-      ver_env.d("dim1_size", a.sizes()[other_dims[0]]);
-      ver_env.d("dim2", other_dims[1]);
-      ver_env.d("dim2_size", a.sizes()[other_dims[1]]);
-      ver_env.d("dim3", other_dims[2]);
-      ver_env.d("dim3_size", a.sizes()[other_dims[2]]);
-      ver_env.d("softmax_dim", softmax_dim);
-      ver_env.d("softmax_dim_size", softmax_dim_size);
-      const auto verification_pattern = format(verification_template, ver_env);
-
-      // verication sting temporarily disabled until
-      // inlining of exp() is benchmarked and determined
-      // torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
-
-      std::vector<IValue> stack = fmap<IValue>(inputs);
-      k.run(stack);
-      auto output = stack[0].toTensor();
-      ASSERT_EQ(output.sizes(), ref.sizes());
-      ASSERT_TRUE(at::allclose(output, ref));
     }
+
+    KernelScope kernel_scope;
+    TemplateEnv env;
+    env.d("dim", softmax_dim);
+    const auto graph_string = format(graph_template, env);
+
+    auto graph = std::make_shared<Graph>();
+    parseIR(graph_string, &*graph);
+
+    TensorExprKernel k(graph);
+    std::vector<at::Tensor> inputs = {a};
+    Stmt* s = k.getCodeGenStmt();
+
+    std::ostringstream oss;
+    oss << *s;
+
+    TemplateEnv ver_env;
+    ver_env.d("dim1", other_dims[0]);
+    ver_env.d("dim1_size", a.sizes()[other_dims[0]]);
+    ver_env.d("dim2", other_dims[1]);
+    ver_env.d("dim2_size", a.sizes()[other_dims[1]]);
+    ver_env.d("dim3", other_dims[2]);
+    ver_env.d("dim3_size", a.sizes()[other_dims[2]]);
+    ver_env.d("softmax_dim", softmax_dim);
+    ver_env.d("softmax_dim_size", softmax_dim_size);
+    const auto verification_pattern = format(verification_template, ver_env);
+    torch::jit::testing::FileCheck().run(verification_pattern, oss.str());
+
+    std::vector<IValue> stack = fmap<IValue>(inputs);
+    k.run(stack);
+    auto output = stack[0].toTensor();
+    auto ref = a.softmax(softmax_dim);
+    ASSERT_EQ(output.sizes(), ref.sizes());
+    ASSERT_TRUE(at::allclose(output, ref));
   }
 }
 
-TEST_F(Kernel, DISABLED_InlineProducerIntoReduction) {
-  // see : [zero-dim tensors]
+void testKernelInlineProducerIntoReduction() {
   KernelScope kernel_scope;
 
   // Inline producer (mul) into reduction (sum).
@@ -1056,9 +881,7 @@ TEST_F(Kernel, DISABLED_InlineProducerIntoReduction) {
   ASSERT_TRUE(at::allclose(o, ref));
 }
 
-TEST_F(Kernel, DISABLED_InlineReductionIntoConsumer) {
-  // see : [zero-dim tensors]
-
+void testKernelInlineReductionIntoConsumer() {
   KernelScope kernel_scope;
 
   // Inline producer (mul %2) into reduction (sum %4) but DO NOT
@@ -1099,29 +922,6 @@ TEST_F(Kernel, DISABLED_InlineReductionIntoConsumer) {
   k.run(stack);
   auto o = stack[0].toTensor();
   auto ref = (a * b).sum(at::kFloat) * (a * b);
-  ASSERT_TRUE(at::allclose(o, ref));
-}
-
-TEST_F(Kernel, SanitizeNames_CUDA) {
-  const auto graph_string = R"IR(
-      graph(%0 : Float(5, 3, strides=[3, 1], device=cuda:0),
-            %1 : Float(5, 3, strides=[3, 1], device=cuda:0)):
-        %2 : Float(5, 3, strides=[3, 1]) = aten::mul(%0, %1)
-        %4 : Float(5, 3, strides=[3, 1]) = aten::mul(%0, %2)
-        return (%4))IR";
-  KernelScope kernel_scope;
-  auto graph = std::make_shared<Graph>();
-  parseIR(graph_string, &*graph);
-  graph->inputs().at(0)->setDebugName("aten::add:");
-  graph->inputs().at(1)->setDebugName("aten::add_");
-  TensorExprKernel k(graph);
-  auto a = at::rand({5, 3}, TensorOptions(kCUDA).dtype(at::kFloat));
-  auto b = at::rand({5, 3}, TensorOptions(kCUDA).dtype(at::kFloat));
-  auto ref = a * (a * b);
-  std::vector<at::Tensor> inputs = {a, b};
-  std::vector<IValue> stack = fmap<IValue>(inputs);
-  k.run(stack);
-  auto o = stack[0].toTensor();
   ASSERT_TRUE(at::allclose(o, ref));
 }
 
