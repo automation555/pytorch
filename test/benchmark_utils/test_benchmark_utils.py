@@ -1,4 +1,3 @@
-import collections
 import json
 import os
 import re
@@ -165,17 +164,6 @@ class TestBenchmarkUtils(TestCase):
                     x = x + 1.0""",
         ).timeit(5).median
         self.assertIsInstance(sample, float)
-
-    @slowTest
-    @unittest.skipIf(IS_SANDCASTLE, "C++ timing is OSS only.")
-    def test_timer_tiny_fast_snippet(self):
-        timer = benchmark_utils.Timer(
-            'auto x = 1;',
-            timer=timeit.default_timer,
-            language=benchmark_utils.Language.CPP,
-        )
-        median = timer.blocked_autorange().median
-        self.assertIsInstance(median, float)
 
     @slowTest
     @unittest.skipIf(IS_SANDCASTLE, "C++ timing is OSS only.")
@@ -516,25 +504,12 @@ class TestBenchmarkUtils(TestCase):
             }
         )
 
-        stats = timer.collect_callgrind(number=1000)
+        # Don't collect baseline to speed up unit test by ~30 seconds.
+        stats = timer.collect_callgrind(number=1000, collect_baseline=False)
         counts = stats.counts(denoise=False)
 
         self.assertIsInstance(counts, int)
         self.assertGreater(counts, 0)
-
-        # There is some jitter with the allocator, so we use a simpler task to
-        # test reproducibility.
-        timer = benchmark_utils.Timer(
-            "x += 1",
-            setup="x = torch.ones((1,))",
-        )
-
-        stats = timer.collect_callgrind(number=1000, repeats=20)
-        assert isinstance(stats, tuple)
-
-        # Check that the repeats are at least somewhat repeatable. (within 10 instructions per iter)
-        counts = collections.Counter([s.counts(denoise=True) // 10_000 * 10_000 for s in stats])
-        self.assertGreater(max(counts.values()), 1, f"Every instruction count total was unique: {counts}")
 
         from torch.utils.benchmark.utils.valgrind_wrapper.timer_interface import wrapper_singleton
         self.assertIsNone(
@@ -567,14 +542,6 @@ class TestBenchmarkUtils(TestCase):
             self.assertEqual(
                 s.counts(denoise=True), s.counts(denoise=False),
                 "De-noising should not apply to C++.")
-
-        stats = timer.collect_callgrind(number=1000, repeats=20)
-        assert isinstance(stats, tuple)
-
-        # NB: Unlike the example above, there is no expectation that all
-        #     repeats will be identical.
-        counts = collections.Counter([s.counts(denoise=True) // 10_000 * 10_000 for s in stats])
-        self.assertGreater(max(counts.values()), 1, repr(counts))
 
     def test_manipulate_callgrind_stats(self):
         stats_no_data, stats_with_data = load_callgrind_artifacts()
@@ -900,54 +867,54 @@ class TestBenchmarkUtils(TestCase):
         self.regularizeAndAssertExpectedInline(
             rstrip_lines(str(compare).strip()),
             """\
-            [------------------------------------------------- fn ------------------------------------------------]
-                                         |  (16, 16)  |  (16, 128)  |  (128, 128)  |  (4096, 1024)  |  (2048, 2048)
-            1 threads: --------------------------------------------------------------------------------------------
-                  overhead_optimized     |    1.3     |     3.0     |     17.4     |     4174.4     |     4174.4
-                  compute_optimized      |    3.1     |     4.0     |     11.2     |     2099.3     |     2099.3
-                  special_case (square)  |    1.1     |             |      7.5     |                |     1674.7
+            [----------------------------------------- fn ----------------------------------------]
+                                  | (16, 16) | (16, 128) | (128, 128) | (4096, 1024) | (2048, 2048)
+            ---------------------------------------------------------------------------------------
+            overhead_optimized    |     1.3  |      3.0  |      17.4  |      4174.4  |      4174.4
+            compute_optimized     |     3.1  |      4.0  |      11.2  |      2099.3  |      2099.3
+            special_case (square) |     1.1  |           |       7.5  |              |      1674.7
 
             Times are in microseconds (us)."""
         )
 
-        compare.trim_significant_figures()
+        compare = benchmark_utils.Compare(results, trim_significant_figures=True)
         self.regularizeAndAssertExpectedInline(
             rstrip_lines(str(compare).strip()),
             """\
-            [------------------------------------------------- fn ------------------------------------------------]
-                                         |  (16, 16)  |  (16, 128)  |  (128, 128)  |  (4096, 1024)  |  (2048, 2048)
-            1 threads: --------------------------------------------------------------------------------------------
-                  overhead_optimized     |     1      |     3.0     |      17      |      4200      |      4200
-                  compute_optimized      |     3      |     4.0     |      11      |      2100      |      2100
-                  special_case (square)  |     1      |             |       8      |                |      1700
+            [----------------------------------------- fn ----------------------------------------]
+                                  | (16, 16) | (16, 128) | (128, 128) | (4096, 1024) | (2048, 2048)
+            ---------------------------------------------------------------------------------------
+            overhead_optimized    |       1  |      3.0  |        17  |        4200  |        4200
+            compute_optimized     |       3  |      4.0  |        11  |        2100  |        2100
+            special_case (square) |       1  |           |         8  |              |        1700
 
             Times are in microseconds (us)."""
         )
 
-        compare.colorize()
+        compare = benchmark_utils.Compare(results, colorize=True, trim_significant_figures=True)
         columnwise_colored_actual = rstrip_lines(str(compare).strip())
         columnwise_colored_expected = textwrap.dedent(
             """\
-            [------------------------------------------------- fn ------------------------------------------------]
-                                         |  (16, 16)  |  (16, 128)  |  (128, 128)  |  (4096, 1024)  |  (2048, 2048)
-            1 threads: --------------------------------------------------------------------------------------------
-                  overhead_optimized     |     1      |  \x1b[92m\x1b[1m   3.0   \x1b[0m\x1b[0m  |  \x1b[2m\x1b[91m    17    \x1b[0m\x1b[0m  |      4200      |  \x1b[2m\x1b[91m    4200    \x1b[0m\x1b[0m
-                  compute_optimized      |  \x1b[2m\x1b[91m   3    \x1b[0m\x1b[0m  |     4.0     |      11      |  \x1b[92m\x1b[1m    2100    \x1b[0m\x1b[0m  |      2100
-                  special_case (square)  |  \x1b[92m\x1b[1m   1    \x1b[0m\x1b[0m  |             |  \x1b[92m\x1b[1m     8    \x1b[0m\x1b[0m  |                |  \x1b[92m\x1b[1m    1700    \x1b[0m\x1b[0m
+            [----------------------------------------- fn ----------------------------------------]
+                                  | (16, 16) | (16, 128) | (128, 128) | (4096, 1024) | (2048, 2048)
+            ---------------------------------------------------------------------------------------
+            overhead_optimized    |       \x1b[92m\x1b[1m1\x1b[0m\x1b[0m  |      \x1b[92m\x1b[1m3.0\x1b[0m\x1b[0m  |        \x1b[2m\x1b[91m17\x1b[0m\x1b[0m  |        \x1b[2m\x1b[91m4200\x1b[0m\x1b[0m  |        \x1b[2m\x1b[91m4200\x1b[0m\x1b[0m
+            compute_optimized     |       \x1b[2m\x1b[91m3\x1b[0m\x1b[0m  |      4.0  |        11  |        \x1b[92m\x1b[1m2100\x1b[0m\x1b[0m  |        2100
+            special_case (square) |       \x1b[92m\x1b[1m1\x1b[0m\x1b[0m  |           |         \x1b[92m\x1b[1m8\x1b[0m\x1b[0m  |              |        \x1b[34m\x1b[1m1700\x1b[0m\x1b[0m
 
             Times are in microseconds (us)."""  # noqa
         )
 
-        compare.colorize(rowwise=True)
+        compare = benchmark_utils.Compare(results, colorize=True, rowwise=True, trim_significant_figures=True)
         rowwise_colored_actual = rstrip_lines(str(compare).strip())
         rowwise_colored_expected = textwrap.dedent(
             """\
-            [------------------------------------------------- fn ------------------------------------------------]
-                                         |  (16, 16)  |  (16, 128)  |  (128, 128)  |  (4096, 1024)  |  (2048, 2048)
-            1 threads: --------------------------------------------------------------------------------------------
-                  overhead_optimized     |  \x1b[92m\x1b[1m   1    \x1b[0m\x1b[0m  |  \x1b[2m\x1b[91m   3.0   \x1b[0m\x1b[0m  |  \x1b[31m\x1b[1m    17    \x1b[0m\x1b[0m  |  \x1b[31m\x1b[1m    4200    \x1b[0m\x1b[0m  |  \x1b[31m\x1b[1m    4200    \x1b[0m\x1b[0m
-                  compute_optimized      |  \x1b[92m\x1b[1m   3    \x1b[0m\x1b[0m  |     4.0     |  \x1b[2m\x1b[91m    11    \x1b[0m\x1b[0m  |  \x1b[31m\x1b[1m    2100    \x1b[0m\x1b[0m  |  \x1b[31m\x1b[1m    2100    \x1b[0m\x1b[0m
-                  special_case (square)  |  \x1b[92m\x1b[1m   1    \x1b[0m\x1b[0m  |             |  \x1b[31m\x1b[1m     8    \x1b[0m\x1b[0m  |                |  \x1b[31m\x1b[1m    1700    \x1b[0m\x1b[0m
+            [----------------------------------------- fn ----------------------------------------]
+                                  | (16, 16) | (16, 128) | (128, 128) | (4096, 1024) | (2048, 2048)
+            ---------------------------------------------------------------------------------------
+            overhead_optimized    |       \x1b[92m\x1b[1m1\x1b[0m\x1b[0m  |        \x1b[2m\x1b[91m3\x1b[0m\x1b[0m  |        \x1b[31m\x1b[1m17\x1b[0m\x1b[0m  |        \x1b[31m\x1b[1m4200\x1b[0m\x1b[0m  |        \x1b[31m\x1b[1m4200\x1b[0m\x1b[0m
+            compute_optimized     |       \x1b[92m\x1b[1m3\x1b[0m\x1b[0m  |        4  |        \x1b[2m\x1b[91m11\x1b[0m\x1b[0m  |        \x1b[31m\x1b[1m2100\x1b[0m\x1b[0m  |        \x1b[31m\x1b[1m2100\x1b[0m\x1b[0m
+            special_case (square) |       \x1b[92m\x1b[1m1\x1b[0m\x1b[0m  |           |         \x1b[31m\x1b[1m8\x1b[0m\x1b[0m  |              |        \x1b[31m\x1b[1m1700\x1b[0m\x1b[0m
 
             Times are in microseconds (us)."""  # noqa
         )
