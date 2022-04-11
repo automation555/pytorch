@@ -36,6 +36,7 @@ REGISTER_CPU_OPERATOR(
 OPERATOR_SCHEMA(Log1p)
     .NumInputs(1)
     .NumOutputs(1)
+    .AllowInplace({{0, 0}})
     .IdenticalTypeAndShape()
     .SetDoc(R"DOC(
 Calculates Log1p of the given input tensor element-wise. This
@@ -49,16 +50,18 @@ Github Link:
     .Output(0, "output", "Output data blob with same shape as input")
     .InheritOnnxSchema();
 
-OPERATOR_SCHEMA(Log1pGradient)
-    .NumInputs(2)
-    .NumOutputs(1)
-    .IdenticalTypeAndShapeOfInput(0);
+OPERATOR_SCHEMA(Log1pGradient).NumInputs(2).NumOutputs(1).IdenticalTypeAndShape();
 
 namespace {
 
 class GetLog1pGradient : public GradientMakerBase {
   using GradientMakerBase::GradientMakerBase;
   std::vector<OperatorDef> GetGradientDefs() override {
+    CAFFE_ENFORCE(
+        I(0) != O(0),
+        "Cannot compute Log1p gradient "
+        "if you choose to do an in-place calculation.");
+
     return SingleGradientDef(
         "Log1pGradient",
         "",
