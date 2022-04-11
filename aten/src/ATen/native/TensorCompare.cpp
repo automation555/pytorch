@@ -5,8 +5,10 @@
 #include <ATen/NativeFunctions.h>
 #include <ATen/native/ReduceOpsUtils.h>
 #include <c10/util/Exception.h>
+#include <ATen/native/Resize.h>
 #include <ATen/native/TensorCompare.h>
 #include <ATen/NamedTensorUtils.h>
+#include <ATen/TensorIndexing.h>
 
 namespace at { namespace native {
 
@@ -17,6 +19,7 @@ DEFINE_DISPATCH(_aminmax_stub); // NOLINT(cppcoreguidelines-avoid-non-const-glob
 DEFINE_DISPATCH(isposinf_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(isneginf_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 DEFINE_DISPATCH(mode_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
+DEFINE_DISPATCH(isin_default_stub); // NOLINT(cppcoreguidelines-avoid-non-const-global-variables)
 
 bool allclose(const Tensor& self, const Tensor& other, double rtol, double atol, bool equal_nan) {
   return at::isclose(self, other, rtol, atol, equal_nan).all().item<uint8_t>();
@@ -243,6 +246,126 @@ Tensor wrapped_scalar_tensor(
 }
 
 } // anonymous namespace
+
+// Sorting-based algorithm for isin(); used when the number of test elements is large.
+// 1. Concatenate unique elements with unique test elements in 1D form. If
+//    assume_unique is true, skip calls to unique().
+// 2. Stable sort all elements, maintaining order indices to reverse the
+//    operation. Stable sort is necessary to keep elements before test
+//    elements within the sorted list.
+// 3. Create a mask for locations of adjacent duplicate values within the
+//    sorted list. Duplicate values are in both elements and test elements.
+// 4. Reorder the mask to match the pre-sorted element order.
+// 5. Index the mask to match the pre-unique element order. If
+//    assume_unique is true, just take the first N items of the mask,
+//    where N is the original number of elements.
+static void isin_sorting(const Tensor& elements, const Tensor& test_elements,
+    bool assume_unique, bool invert, Tensor& out) {
+  Tensor elements_flat, test_elements_flat, unique_order;
+  if (assume_unique) {
+    elements_flat = elements.ravel();
+    test_elements_flat = test_elements.ravel();
+  } else {
+    std::tie (elements_flat, unique_order) = at::_unique(
+        elements, /*sorted=*/ false, /*return_inverse=*/ true);
+    std::tie (test_elements_flat, std::ignore) = at::_unique(test_elements, /*sorted=*/ false);
+  }
+
+  Tensor all_elements = at::_cat({elements_flat, test_elements_flat});
+  Tensor sorted_elements, sorted_order;
+  std::tie (sorted_elements, sorted_order) = all_elements.sort(
+      /*stable=*/ true, /*dim=*/ 0, /*descending=*/ false);
+
+  Tensor duplicate_mask = at::empty(all_elements.sizes(),
+    TensorOptions(elements.device()).dtype(ScalarType::Bool));
+  auto iter = TensorIteratorConfig()
+    .add_output(duplicate_mask)
+    .add_input(sorted_elements)
+    .check_all_same_dtype(false)
+    .build();
+  AT_DISPATCH_ALL_TYPES(iter.dtype(1), "isin_sorting", [&]() {
+    iter.for_each([&](char** data, const int64_t* strides, int64_t n) {
+      auto* mask_bytes = data[0];
+      const auto* element_bytes = data[1];
+
+      for (int i = 0; i < n - 1; ++i) {
+        auto* mask_data = reinterpret_cast<bool*>(mask_bytes);
+        const scalar_t element_val = *(reinterpret_cast<const scalar_t*>(element_bytes));
+        const scalar_t next_element_val = *(reinterpret_cast<const scalar_t*>(element_bytes + strides[1]));
+        *mask_data = invert ? (element_val != next_element_val) : (element_val == next_element_val);
+
+        mask_bytes += strides[0];
+        element_bytes += strides[1];
+      }
+
+      // Last duplicate mask item is unconditionally true or false based on invert flag.
+      auto* mask_data = reinterpret_cast<bool*>(mask_bytes);
+      *mask_data = invert;
+    });
+  });
+
+  Tensor mask = at::empty(all_elements.sizes(), TensorOptions(elements.device()).dtype(ScalarType::Bool));
+  mask.index_copy_(0, sorted_order, duplicate_mask);
+
+  if (assume_unique) {
+    out.copy_(mask.slice(0, 0, elements.numel()).view_as(out));
+  } else {
+    out.copy_(at::index(mask, {c10::optional<Tensor>(unique_order)}));
+  }
+}
+
+Tensor& isin_out(const Tensor& elements, const Tensor& test_elements, bool assume_unique, bool invert, Tensor& out) {
+  TORCH_CHECK(out.device() == elements.device(),
+      "Expected output tensor and elements to be on the same device, but found different devices: ",
+      out.device(), " and ", elements.device());
+  resize_output(out, elements.sizes());
+  if (elements.numel() == 0) {
+    return out;
+  }
+
+  // Heuristic taken from numpy's implementation.
+  // See https://github.com/numpy/numpy/blob/fb215c76967739268de71aa4bda55dd1b062bc2e/numpy/lib/arraysetops.py#L575
+  // TODO: Remove the is_cuda() check when stable sort is supported for CUDA.
+  if (elements.device().is_cuda() || test_elements.numel() < static_cast<int64_t>(
+        10.0f * std::pow(static_cast<double>(elements.numel()), 0.145))) {
+    out.fill_(invert);
+    isin_default_stub(elements.device().type(), out, elements, test_elements, invert);
+  } else {
+    isin_sorting(elements, test_elements, assume_unique, invert, out);
+  }
+
+  return out;
+}
+
+Tensor& isin_out(const Tensor& elements, const c10::Scalar& test_element, bool assume_unique, bool invert, Tensor& out) {
+  Tensor test_elements = wrapped_scalar_tensor(test_element, elements.device());
+  at::isin_out(out, elements, test_elements, assume_unique, invert);
+  return out;
+}
+
+Tensor& isin_out(const c10::Scalar& element, const Tensor& test_elements, bool assume_unique, bool invert, Tensor& out) {
+  Tensor elements = wrapped_scalar_tensor(element, test_elements.device());
+  at::isin_out(out, elements, test_elements, assume_unique, invert);
+  return out;
+}
+
+Tensor isin(const Tensor& elements, const Tensor& test_elements, bool assume_unique, bool invert) {
+  Tensor out = at::empty({0}, TensorOptions(elements.device()).dtype(ScalarType::Bool));
+  at::isin_out(out, elements, test_elements, assume_unique, invert);
+  return out;
+}
+
+Tensor isin(const Tensor& elements, const c10::Scalar& test_element, bool assume_unique, bool invert) {
+  Tensor out = at::empty({0}, TensorOptions(elements.device()).dtype(ScalarType::Bool));
+  at::isin_out(out, elements, test_element, assume_unique, invert);
+  return out;
+}
+
+Tensor isin(const c10::Scalar& element, const Tensor& test_elements, bool assume_unique, bool invert) {
+  Tensor out = at::empty({0}, TensorOptions(test_elements.device()).dtype(ScalarType::Bool));
+  at::isin_out(out, element, test_elements, assume_unique, invert);
+  return out;
+}
 
 Tensor where(const Tensor& condition, const Tensor& self, const Tensor& other) {
   TORCH_CHECK(condition.device() == self.device() && self.device() == other.device(),

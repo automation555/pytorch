@@ -298,7 +298,34 @@ static void mode_kernel_impl(
 
         compare_base_kernel_core<scalar_t>(
             values, indices, self, dim, keepdim, loop);
-      });
+  });
+}
+
+// Default imperative implementation of isin(). Used when the number of test elements is small.
+static void isin_default_kernel_cpu(Tensor& out, const Tensor& elements, const Tensor& test_elements, bool invert) {
+  // Since test elements is not an input of the TensorIterator, type promotion
+  // and device checking must be done manually.
+  ScalarType common_type = promoteTypes(elements.scalar_type(), test_elements.scalar_type());
+  Tensor test_elements_flat = test_elements.to(common_type).ravel();
+  TORCH_CHECK(elements.device() == test_elements.device(),
+    "Expected all tensors to be on the same device, but "
+    "found two devices, ", elements.device(), " and ", test_elements.device(), "!");
+  auto iter = TensorIteratorConfig()
+    .add_output(out)
+    .add_input(elements.to(common_type))
+    .check_all_same_dtype(false)
+    .build();
+  AT_DISPATCH_ALL_TYPES(iter.dtype(1), "isin_default_cpu", [&]() {
+    cpu_kernel(iter, [&](scalar_t element_val) -> bool {
+      const auto* test_element_data = reinterpret_cast<scalar_t*>(test_elements_flat.data_ptr());
+      for (auto j = 0; j < test_elements_flat.numel(); ++j) {
+        if (element_val == test_element_data[j]) {
+          return !invert;
+        }
+      }
+      return invert;
+    });
+  });
 }
 
 } // anonymous namespace
@@ -310,5 +337,6 @@ REGISTER_DISPATCH(where_kernel, &where_kernel_impl);
 REGISTER_DISPATCH(isposinf_stub, &isposinf_kernel_impl);
 REGISTER_DISPATCH(isneginf_stub, &isneginf_kernel_impl);
 REGISTER_DISPATCH(mode_stub, &mode_kernel_impl);
+REGISTER_DISPATCH(isin_default_stub, &isin_default_kernel_cpu);
 
 }} // namespace at::native
