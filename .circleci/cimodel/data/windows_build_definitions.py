@@ -86,11 +86,10 @@ class WindowsJob:
                 props_dict["executor"] = "windows-with-nvidia-gpu"
 
         props_dict["cuda_version"] = (
-            miniutils.quote(str(self.cuda_version))
+            miniutils.quote(str(self.cuda_version.major))
             if self.cuda_version
             else "cpu"
         )
-
         props_dict["name"] = "_".join(name_parts)
 
         return [{key_name: props_dict}]
@@ -125,17 +124,17 @@ def FalsePred(_):
 def TruePred(_):
     return True
 
-_VC2019 = VcSpec(2019, ["14", "28", "29333"], hide_version=True)
+_VC2019 = VcSpec(2019)
 
 WORKFLOW_DATA = [
     # VS2019 CUDA-10.1
     WindowsJob(None, _VC2019, CudaVersion(10, 1)),
     WindowsJob(1, _VC2019, CudaVersion(10, 1)),
     WindowsJob(2, _VC2019, CudaVersion(10, 1)),
-    # VS2019 CUDA-11.1
-    WindowsJob(None, _VC2019, CudaVersion(11, 1)),
-    WindowsJob(1, _VC2019, CudaVersion(11, 1), master_only_pred=TruePred),
-    WindowsJob(2, _VC2019, CudaVersion(11, 1), master_only_pred=TruePred),
+    # VS2019 CUDA-11.0
+    WindowsJob(None, _VC2019, CudaVersion(11, 0)),
+    WindowsJob(1, _VC2019, CudaVersion(11, 0), master_only_pred=TruePred),
+    WindowsJob(2, _VC2019, CudaVersion(11, 0), master_only_pred=TruePred),
     # VS2019 CPU-only
     WindowsJob(None, _VC2019, None),
     WindowsJob(1, _VC2019, None, master_only_pred=TruePred),
