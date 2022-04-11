@@ -1,25 +1,26 @@
-"""Default set of benchmarks.
+"""Default set of benchmarks."""
+import functools
 
-Parser notes:
-    `parse_stmts`:
-        - Width for the left (Python) column MUST be 40 characters.
-        - The column separator is " | ", not "|". Whitespace matters.
-
-    `GroupedVariants`:
-        - `Setup` and `Global_Setup` (case insensitive) are reserved keywords
-          to populate `setup` and `global_setup` for every generated benchmark.
-        - To set a label for the succeeding block, add `# @YOUR_LABEL` (Python)
-          or `// @YOUR_LABEL` (C++).
-"""
-
-from core.api import GroupedModules, GroupedStmts, GroupedVariants
+from core.api_impl import GroupedModules, GroupedStmts
 from core.types import FlatIntermediateDefinition
-from core.utils import flatten, parse_stmts
+from core.utils import flatten, iter_parsed_lines, parse_stmts
 from definitions.setup import Setup
 
 
+# Convenience methods for small, simple benchmarks to reduce boilerplate.
+TrivialSetup_GroupedStmts = functools.partial(
+    GroupedStmts,
+    setup=Setup.TRIVIAL_2D.value,
+)
+
+GenericSetup_GroupedStmts = functools.partial(
+    GroupedStmts,
+    setup=Setup.GENERIC.value,
+)
+
+
 BENCHMARKS: FlatIntermediateDefinition = flatten({
-    "Empty": {
+    "empty": {
         "no allocation": GroupedStmts(
             r"torch.empty(())",
             r"torch::empty({0});",
@@ -29,171 +30,196 @@ BENCHMARKS: FlatIntermediateDefinition = flatten({
             r"torch.empty((1,))",
             r"torch::empty({1});",
         ),
+    },
 
-        "overloads": GroupedVariants(
-            cpp_block=r"""
-                // @Setup
-                auto options_empty = c10::TensorOptions();
-                auto options_full = c10::TensorOptions().dtype(at::kFloat).device(at::kCPU);
-                auto optional_float = c10::make_optional(at::kFloat);
+    ("Pointwise", "Math"): {
+        "add": {
+            "Tensor-Scalar": GenericSetup_GroupedStmts(
+                r"x += 1.0",
+                r"x += 1.0;",
+            ),
 
-                // @TensorOptions overload
-                at::empty({0}, options_empty);
-                at::empty({0}, options_full);
-                at::empty({0}, at::kFloat); // implicit conversion
+            "Tensor-Tensor": GenericSetup_GroupedStmts(
+                r"x += y_float",
+                r"x += y_float;",
+                signature=r"f(x, y_float) -> None",
+                torchscript=True,
+            ),
 
-                // @Faithful overload
-                at::empty({0}, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
-                at::empty({0}, at::kFloat, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
-                at::empty({0}, optional_float, c10::nullopt, c10::nullopt, c10::nullopt, c10::nullopt);
-            """
+            "Tensor-Tensor (type promotion)": GenericSetup_GroupedStmts(
+                r"x += y_int",
+                r"x += y_int;",
+            ),
+
+            "Tensor-Tensor (out of place)": GenericSetup_GroupedStmts(
+                r"x + y_float",
+                r"x + y_float;",
+            ),
+        },
+
+        "multiply": GenericSetup_GroupedStmts(
+            r"x * y_float",
+            r"x * y_float;",
+        ),
+
+        "equality": {
+            "Tensor-Tensor": GenericSetup_GroupedStmts(
+                r"x == y_float",
+                r"x == y_float;",
+            ),
+
+            "Tensor-Scalar": GenericSetup_GroupedStmts(
+                r"x == 1.0",
+                r"x == 1.0;",
+            ),
+        },
+    },
+
+    ("Pointwise", "Data movement"): {
+        "contiguous (trivial)": TrivialSetup_GroupedStmts(
+            r"x.contiguous()",
+            r"x.contiguous();",
+        ),
+
+        "contiguous (non-trivial)": TrivialSetup_GroupedStmts(
+            r"x.t().contiguous()",
+            r"x.t().contiguous();",
+        ),
+
+        "clone": TrivialSetup_GroupedStmts(
+            r"x.clone()",
+            r"x.clone();",
+        ),
+
+        "copy_": GenericSetup_GroupedStmts(
+            r"x.copy_(y_float)",
+            r"x.copy_(y_float);",
+        ),
+
+        "zero_": TrivialSetup_GroupedStmts(
+            r"x.zero_()",
+            r"x.zero_();",
+        ),
+
+        "RNG": TrivialSetup_GroupedStmts(
+            r"x.uniform_()",
+            r"x.uniform_();",
         ),
     },
 
-    "Pointwise": {
-        "Math": GroupedVariants(*parse_stmts(r"""
-            Python                                   | C++
-            ---------------------------------------- | ----------------------------------------
-            # @setup                                 | // @setup
-            torch.manual_seed(138_10_23)             | torch::manual_seed(1381023);
-            x = torch.rand((4, 4))                   | auto x = torch::rand({4, 4});
-            y_float = torch.ones((4, 4))             | auto y_float = torch::ones({4, 4});
-            y_vector = torch.ones((4, 1))            | auto y_vector = torch::ones({4, 1});
-            y_int = torch.ones(                      | auto y_int = torch::ones({4, 4}, at::kInt);
-                (4, 4), dtype=torch.int32)           |
-                                                     |
-            # @add                                   | // @add
-            x += 1.0                                 | x += 1;
-            x += y_float                             | x += y_float;
-            x += y_vector                            | x += y_vector;
-            x += y_int                               | x += y_int;
-            x + y_float                              | x + y_float;
-            torch.add(x, y_float)                    | torch::add(x, y_float);
-            torch.add(x, y_float, out=x)             | torch::add_out(/*out=*/x, x, y_float);
-                                                     |
-            # @multiply                              | // @multiply
-            x *= 1.0                                 | x *= 1;
-            x *= y_float                             | x *= y_float;
-            x *= y_vector                            | x *= y_vector;
-            x *= y_int                               | x *= y_int;
-            x * y_float                              | x * y_float;
-            torch.mul(x, y_float)                    | torch::mul(x, y_float);
-            torch.mul(x, y_float, out=x)             | torch::mul_out(/*out=*/x, x, y_float);
-                                                     |
-            # @equality                              | // @equality
-            x == y_float                             | x == y_float;
-            x == 1.0                                 | x == 1.0;
-        """)),
+    "Reduction": {
+        "Max": GenericSetup_GroupedStmts(
+            r"x.max()",
+            r"x.max();"
+        ),
 
-        "Data movement": GroupedVariants(*parse_stmts(r"""
-            Python                                   | C++
-            ---------------------------------------- | ----------------------------------------
-            # @setup                                 | // @setup
-            x = torch.ones((4, 4))                   | auto x = torch::ones({4, 4});
-            y = torch.ones((4, 4))                   | auto y = torch::ones({4, 4});
-            x_t = x.t()                              | auto x_t = x.t();
-                                                     |
-            # @contiguous (trivial)                  | // @contiguous (trivial)
-            x.contiguous()                           | x.contiguous();
-                                                     |
-            # @contiguous (non-trivial)              | // @contiguous (non-trivial)
-            x_t.contiguous()                         | x_t.contiguous();
-                                                     |
-            # @clone                                 | // @clone
-            x.clone()                                | x.clone();
-                                                     |
-            # @copy_                                 | // @copy_
-            x.copy_(y)                               | x.copy_(y);
-                                                     |
-            # @zero_                                 | // @zero_
-            x.zero_()                                | x.zero_();
-                                                     |
-            # @RNG                                   | // @RNG
-            x.uniform_()                             | x.uniform_();
-        """)),
+        "Sum": GenericSetup_GroupedStmts(
+            r"x.sum()",
+            r"x.sum();",
+        ),
+
+        "Variance": GenericSetup_GroupedStmts(
+            r"x.var(0)",
+            r"x.var(0);",
+        ),
     },
 
-    "Reduction": GroupedVariants(*parse_stmts(r"""
-        Python                                   | C++
-        ---------------------------------------- | ----------------------------------------
-        # @setup                                 | // @setup
-        x = torch.ones((4, 4))                   | auto x = torch::ones({4, 4});
-                                                 |
-        # @max                                   | // @max
-        x.max()                                  | x.max();
-                                                 |
-        # @sum                                   | // @sum
-        x.sum()                                  | x.sum();
-                                                 |
-        # @variance                              | // @variance
-        x.var(0)                                 | x.var(0);
-    """)),
+    "Indexing": {
+        py_index: GroupedStmts(
+            f"""
+                x{py_index} = 1
+                x{py_index} = y{py_index}
+            """,
+            f"""
+                x.index_put_({cpp_index}, 1);
+                x.index_put_({cpp_index}, y.index({cpp_index}));
+            """,
+            Setup.INDEXING.value,
+        )
 
-    "Indexing": GroupedVariants(*parse_stmts(r"""
-        Python                                   | C++
-        ---------------------------------------- | ----------------------------------------
-        # @setup                                 | // @setup
-                                                 | using namespace torch::indexing;
-        torch.manual_seed(6626_10_34)            | torch::manual_seed(66261034);
-                                                 |
-        x = torch.randn(1, 1, 1)                 | auto x = torch::randn({1, 1, 1});
-        y = torch.randn(1, 1, 1)                 | auto y = torch::randn({1, 1, 1});
-                                                 |
-        # @Tensor-Scalar                         | // @Tensor-Scalar
-        x[0] = 1                                 | x.index_put_({0}, 1);
-        x[0, 0] = 1                              | x.index_put_({0, 0}, 1);
-        x[0, 0, 0] = 1                           | x.index_put_({0, 0, 0}, 1);
-                                                 |
-        # @Tensor-Scalar (Advanced)              | // @Tensor-Scalar (Advanced)
-        x[...] = 1                               | x.index_put_({"..."}, 1);
-        x[:] = 1                                 | x.index_put_({Slice(None, None, None)}, 1);
-        x[None] = 1                              | x.index_put_({None}, 1);
-        x[False] = 1                             | x.index_put_({false}, 1);
-        x[True] = 1                              | x.index_put_({true}, 1);
-                                                 |
-        # @Tensor-Tensor                         | // @Tensor-Tensor
-        x[0] = y[0]                              | x.index_put_({0}, y.index({0}));
-        x[0, 0] = y[0, 0]                        | x.index_put_({0, 0}, y.index({0, 0}));
-        x[0, 0, 0] = y[0, 0, 0]                  | x.index_put_({0, 0, 0}, y.index({0, 0, 0}));
-                                                 |
-        # @Tensor-Tensor (Advanced)              | // @Tensor-Tensor (Advanced)
-        x[...] = y[...]                          | x.index_put_({"..."}, y.index({"..."}));
-        x[:] = y[:]                              | x.index_put_({Slice(None, None, None)}, y.index({Slice(None, None, None)}));
-        x[None] = y[None]                        | x.index_put_({None}, y.index({None}));
-        x[False] = y[False]                      | x.index_put_({false}, y.index({false}));
-        x[True] = y[True]                        | x.index_put_({true}, y.index({true}));
-    """)),
+        for py_index, cpp_index in iter_parsed_lines(r"""
+            Python                                   | C++
+            ---------------------------------------- | ----------------------------------------
+            [0]                                      | {0}
+            [0, 0]                                   | {0, 0}
+            [0, 0, 0]                                | {0, 0, 0}
+            [...]                                    | {"..."}
+            [:]                                      | {Slice(None, None, None)}
+            [None]                                   | {None}
+            [False]                                  | {false}
+            [True]                                   | {true}
+        """)
+    },
 
-    "Metadata and views": GroupedVariants(*parse_stmts(r"""
-        Python                                   | C++
-        ---------------------------------------- | ----------------------------------------
-        # @setup                                 | // @setup
-        x = torch.ones((4, 4))                   | auto x = torch::ones({4, 4});
-                                                 |
-        # @size                                  | // @size
-        x.size()[0]                              | x.sizes()[0];
-                                                 |
-        # @stride                                | // @stride
-        x.stride(0)                              | x.stride(0);
-                                                 |
-        # @as_strided                            | // @as_strided
-        torch.as_strided(x, (2, 3), (4, 1), 2)   | torch::as_strided(x, {2, 3}, {4, 1}, 2);
-                                                 |
-        # @select                                | // @select
-        x.select(1, 1)                           | x.select(1, 1);
-                                                 |
-        # @unsqueeze                             | // @unsqueeze
-        x.unsqueeze(0)                           | x.unsqueeze(0);
-                                                 |
-        # @view                                  | // @view
-        x.view(-1, 1)                            | x.view({-1, 1});
-                                                 |
-        # @transpose                             | // @transpose
-        x.t()                                    | x.t();
-                                                 |
-        # @reshape                               | // @reshape
-        x.reshape((16, 1))                       | x.reshape({16, 1});
-    """)),
+    ("Indexing", "Tensor index"): GroupedStmts(
+        r"a[b, None, ...] = 1",
+        r"a.index_put_({b, None, Ellipsis}, 1);",
+        Setup.INDEXING.value,
+        signature=r"f(a, b) -> None",
+        torchscript=True,
+    ),
+
+    "Metadata and views": {
+        "size": TrivialSetup_GroupedStmts(
+            r"x.size()[0]",
+            r"x.sizes()[0];",
+        ),
+
+        "stride": TrivialSetup_GroupedStmts(
+            r"x.stride(0)",
+            r"x.stride(0);",
+        ),
+
+        "as_strided": GenericSetup_GroupedStmts(
+            r"torch.as_strided(x, (2, 3), (4, 1), 2)",
+            r"torch::as_strided(x, {2, 3}, {4, 1}, 2);",
+        ),
+
+        "select": TrivialSetup_GroupedStmts(
+            r"x.select(1, 1)",
+            r"x.select(1, 1);",
+        ),
+
+        "unsqueeze": TrivialSetup_GroupedStmts(
+            r"x.unsqueeze(0)",
+            r"x.unsqueeze(0);",
+        ),
+
+        "view": TrivialSetup_GroupedStmts(
+            r"x.view(-1, 1)",
+            r"x.view({-1, 1});",
+        ),
+    },
+
+    "Misc": {
+        "resize_": TrivialSetup_GroupedStmts(
+            r"""
+                x.resize_(0)
+                x.resize_((4, 4))
+            """,
+            r"""
+                x.resize_(0);
+                x.resize_({4, 4});
+            """,
+        ),
+
+        "Sort": GenericSetup_GroupedStmts(
+            r"torch.sort(x)",
+            r"torch::sort(x);",
+        ),
+    },
+
+    "MatMul": {
+        "Broadcasting (matmul)": GenericSetup_GroupedStmts(
+            r"z = torch.matmul(x, y_float)",
+            r"auto z = torch::matmul(x, y_float);",
+        ),
+
+        "Non-broadcasting (mm)": GenericSetup_GroupedStmts(
+            r"z = torch.mm(x, y_float)",
+            r"auto z = torch::mm(x, y_float);",
+        ),
+    },
 
     "nn Modules": {
         py_constructor.split("(")[0]: GroupedModules(
@@ -221,6 +247,32 @@ BENCHMARKS: FlatIntermediateDefinition = flatten({
             # TODO: LSTM can't be TorchScript'd
             (Setup.TRIVIAL_3D, False, ("LSTM(4, 2)",) * 2),
         )
+    },
+
+    "Mesoscale": {
+        "MatMul-Bias-ReLU": GroupedStmts(
+            *parse_stmts(r"""
+                Python                                   | C++
+                ---------------------------------------- | ----------------------------------------
+                z0 = torch.mm(x, y) + bias               | auto z0 = torch::mm(x, y) + bias;
+                z1 = torch.nn.functional.relu(z0)        | auto z1 = torch::nn::functional::relu(z0);
+            """),
+            Setup.MESOSCALE.value,
+            signature=r"f(x, y, bias) -> z1",
+            torchscript=True,
+        ),
+
+        "Off diagonal indices": GroupedStmts(
+            *parse_stmts(r"""
+                Python                                   | C++
+                ---------------------------------------- | ----------------------------------------
+                indices = torch.arange(eye_4.numel())    | auto indices = torch::arange(eye_4.numel());
+                z = indices[eye_4.flatten() == 0]        | auto z = indices.index({eye_4.flatten() == 0});
+            """),
+            Setup.MESOSCALE.value,
+            signature=r"f(eye_4) -> z",
+            torchscript=True,
+        ),
     },
 
     "training": {
