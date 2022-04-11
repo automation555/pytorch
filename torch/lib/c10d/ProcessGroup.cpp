@@ -1,88 +1,8 @@
-#include <ATen/ThreadLocalState.h>
 #include <c10d/ProcessGroup.hpp>
 
 #include <c10/util/Logging.h>
 
 namespace c10d {
-
-std::string opTypeToString(OpType opType) {
-  switch (opType) {
-    case OpType::BROADCAST:
-      return "BROADCAST";
-    case OpType::ALLREDUCE:
-      return "ALLREDUCE";
-    case OpType::ALLREDUCE_COALESCED:
-      return "ALLREDUCE_COALESCED";
-    case OpType::REDUCE:
-      return "REDUCE";
-    case OpType::ALLGATHER:
-      return "ALLGATHER";
-    case OpType::ALLGATHER_BASE:
-      return "ALLGATHER_BASE";
-    case OpType::ALLGATHER_COALESCED:
-      return "ALLGATHER_COALESCED";
-    case OpType::GATHER:
-      return "GATHER";
-    case OpType::SCATTER:
-      return "SCATTER";
-    case OpType::REDUCE_SCATTER:
-      return "REDUCE_SCATTER";
-    case OpType::ALLTOALL_BASE:
-      return "ALLTOALL_BASE";
-    case OpType::ALLTOALL:
-      return "ALLTOALL";
-    case OpType::SEND:
-      return "SEND";
-    case OpType::RECV:
-      return "RECV";
-    case OpType::RECVANYSOURCE:
-      return "RECVANYSOURCE";
-    case OpType::BARRIER:
-      return "BARRIER";
-    case OpType::UNKNOWN:
-      return "UNKNOWN";
-    default:
-      TORCH_INTERNAL_ASSERT("Unknown op type!");
-  }
-  return "UNKNOWN";
-}
-
-bool isP2POp(OpType opType) {
-  return opType == OpType::SEND || opType == OpType::RECV ||
-      opType == OpType::RECVANYSOURCE;
-}
-
-ProcessGroup::Work::Work(
-    int rank,
-    OpType opType,
-    const char* profilingTitle,
-    const c10::optional<std::vector<at::Tensor>>& inputTensors)
-    : rank_(rank), opType_(opType) {
-  if (profilingTitle != nullptr) {
-    auto recordingFunction =
-        std::make_shared<at::RecordFunction>(at::RecordScope::USER_SCOPE);
-    if (recordingFunction->isActive()) {
-      // Passing input tensor to recordFunction allows for shape information in
-      // profiling output.
-      std::vector<c10::IValue> inputs;
-      if (inputTensors) {
-        inputs.reserve(inputTensors->size());
-        for (const auto& tensor : *inputTensors) {
-          inputs.push_back(tensor);
-        }
-      }
-      recordingFunction->before(profilingTitle, inputs);
-      std::function<void()> end_handler = [this, recordingFunction]() {
-        recordingFunction->end();
-      };
-      recordFunctionEndCallback_ = at::wrapPropagateTLSState(end_handler);
-    }
-  }
-}
-
-OpType ProcessGroup::Work::retrieveOpType() {
-  return opType_;
-}
 
 ProcessGroup::Work::~Work() {}
 
@@ -107,7 +27,7 @@ int ProcessGroup::Work::sourceRank() const {
       "that correspond to a recv or recv-from-any call.");
 }
 
-std::vector<at::Tensor> ProcessGroup::Work::result() {
+std::vector<at::Tensor> ProcessGroup::Work::result() const {
   throw std::runtime_error("result() not implemented.");
 }
 
@@ -136,21 +56,13 @@ bool ProcessGroup::Work::wait(std::chrono::milliseconds timeout) {
 }
 
 void ProcessGroup::Work::abort() {
-  TORCH_CHECK(false, "ProcessGroup::Work::abort not implemented.");
-}
-
-c10::intrusive_ptr<c10::ivalue::Future> ProcessGroup::Work::getFuture() {
-  TORCH_CHECK(false, "ProcessGroup::Work::getFuture not implemented.")
+  TORCH_CHECK(false, "ProcessGroup::Work::abort not implemented.")
 }
 
 void ProcessGroup::Work::finish(std::exception_ptr exception) {
   std::unique_lock<std::mutex> lock(mutex_);
   completed_ = true;
   exception_ = exception;
-  if (recordFunctionEndCallback_) {
-    recordFunctionEndCallback_();
-    recordFunctionEndCallback_ = nullptr;
-  }
   lock.unlock();
   cv_.notify_all();
 }
@@ -159,10 +71,6 @@ void ProcessGroup::Work::finishAndThrow(std::exception_ptr exception) {
   std::unique_lock<std::mutex> lock(mutex_);
   completed_ = true;
   exception_ = exception;
-  if (recordFunctionEndCallback_) {
-    recordFunctionEndCallback_();
-    recordFunctionEndCallback_ = nullptr;
-  }
   if (exception_) {
     std::rethrow_exception(exception_);
   }
@@ -176,12 +84,78 @@ ProcessGroup::~ProcessGroup() {}
 
 // This is introduced so that implementors of ProcessGroup would not need to
 // have this implmentation.
-c10::intrusive_ptr<ProcessGroup::Work> ProcessGroup::allgather_coalesced(
+std::shared_ptr<ProcessGroup::Work> ProcessGroup::allgather_coalesced(
     std::vector<std::vector<at::Tensor>>& /* usused */,
     std::vector<at::Tensor>& /* usused */,
     const AllgatherOptions& /* usused */) {
   throw std::runtime_error(
       "no support for allgather_coalesced in this process group");
+}
+
+void ProcessGroup::checkSplitSizes(
+    const std::vector<int64_t>& split_sizes,
+    const at::Tensor& tensor,
+    int group_size) {
+  if (split_sizes.size() == 0) {
+    TORCH_CHECK(
+        tensor.size(0) % group_size == 0,
+        "Tensor's dim 0 does not divide equally across group size");
+  } else {
+    TORCH_CHECK(
+        split_sizes.size() == group_size,
+        "Number of tensor splits not equal to group size");
+    int sum = std::accumulate(split_sizes.begin(), split_sizes.end(), 0);
+    TORCH_CHECK(
+        sum == tensor.size(0), "Split sizes doesn't match total dim 0 size");
+  }
+}
+
+int64_t ProcessGroup::computeLengthsAndOffsets(
+    const std::vector<int64_t>& split_sizes,
+    const at::Tensor& tensor,
+    std::vector<int>* lengths,
+    std::vector<int>* offsets) {
+  int64_t group_size = lengths->size();
+  bool equal_splits = false;
+  int64_t dim0_size = tensor.size(0);
+  int64_t row_size = (dim0_size ? tensor.numel() / dim0_size : 1);
+  int64_t split_size = 0;
+  int64_t offset = 0;
+
+  if (split_sizes.size() == 0) {
+    equal_splits = true;
+    split_size = tensor.size(0) / group_size;
+  }
+  for (int i = 0; i < group_size; i++) {
+    int64_t length = row_size * (equal_splits ? split_size : split_sizes[i]);
+    TORCH_INTERNAL_ASSERT(
+        length <= std::numeric_limits<int>::max() &&
+            offset <= std::numeric_limits<int>::max(),
+        "Length or offset larger than INT_MAX not supported");
+    (*lengths)[i] = length;
+    (*offsets)[i] = offset;
+    offset += length;
+  }
+  return offset;
+}
+
+int64_t ProcessGroup::computeLengthsAndOffsets(
+    const std::vector<at::Tensor>& tensors,
+    std::vector<int>* lengths,
+    std::vector<int>* offsets) {
+  int64_t group_size = lengths->size();
+  int64_t offset = 0;
+  for (int i = 0; i < group_size; i++) {
+    int64_t length = tensors[i].numel();
+    TORCH_INTERNAL_ASSERT(
+        length <= std::numeric_limits<int>::max() &&
+            offset <= std::numeric_limits<int>::max(),
+        "Length or offset larger than INT_MAX not supported");
+    (*lengths)[i] = length;
+    (*offsets)[i] = offset;
+    offset += length;
+  }
+  return offset;
 }
 
 } // namespace c10d
