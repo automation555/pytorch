@@ -782,11 +782,11 @@ const std::vector<std::string> functions = {
                 return grad_output / other, None
             return self / other, backward
 
-        def div_2(self, other, *, rounding_mode: Optional[str]):
+        def div_2(self, other, *, rounding_mode: str):
             result = torch.div(self, other, rounding_mode=rounding_mode)
             self_size, other_size = AD_sizes_if_not_equal_multi_0(self, other, result)
             def backward(grad_output):
-                if rounding_mode is None:
+                if rounding_mode == "true":
                     grad_self = (grad_output / other)._grad_sum_to_size(self_size)
                     grad_other = (-grad_output * self / (other * other))._grad_sum_to_size(other_size)
                 else:
@@ -797,10 +797,10 @@ const std::vector<std::string> functions = {
 
             return result, backward
 
-        def div_3(self, other: number, *, rounding_mode: Optional[str]):
+        def div_3(self, other: number, *,  rounding_mode: str):
             result = torch.div(self, other, rounding_mode=rounding_mode)
             def backward(grad_output):
-                if rounding_mode is None:
+                if rounding_mode == "true":
                     grad_self = (grad_output / other)
                 else:
                     grad_self = torch.zeros_like(self, memory_format=1)
@@ -1059,64 +1059,19 @@ const std::vector<std::string> functions = {
 
             return output, backward
 
-        # disable the layernorm AD temporarily because of bug in https://github.com/pytorch/pytorch/issues/19769
-        def layer_norm_disabled(input : Tensor,
+        def layer_norm(input : Tensor,
                        normalized_shape : List[int],
                        weight : Optional[Tensor],
                        bias : Optional[Tensor],
                        eps : float,
                        cudnn_enable : bool):
 
-            input_ndim = input.dim()
-            normalized_ndim = len(normalized_shape)
-            n = 1
-            for i in range(input_ndim - normalized_ndim):
-                n *= input.size(i)
-
-            input_reshape = input.contiguous().view(1, n, -1)
-
-            bn_out, save1, save2, reserve, impl_idx = torch._batch_norm_impl_index(
-                input_reshape, None, None, None, None, True,
-                0.0, eps, cudnn_enable)
-
-            bn_out = bn_out.view(input.size())
-            if weight is not None and bias is not None:
-                output = bias.addcmul(bn_out, weight, value=1)
-            elif weight is not None:
-                output = bn_out.mul(weight)
-            elif bias is not None:
-                output = bn_out.add(bias)
-            else:
-                output = bn_out
+            output, mean, rstd = torch.native_layer_norm(input, normalized_shape, weight, bias, eps)
 
             def backward(grad_output):
-                if weight is not None and bias is not None:
-                    grad_bn_out = grad_output * weight
-                    grad_weight = (grad_output * bn_out)._grad_sum_to_size(weight.size())
-                    grad_bias = grad_output._grad_sum_to_size(bias.size())
-                elif weight is not None:
-                    grad_bn_out = grad_output * weight
-                    grad_weight = (grad_output * bn_out)._grad_sum_to_size(weight.size())
-                    grad_bias = None
-                elif bias is not None:
-                    grad_bn_out = grad_output
-                    grad_weight= None
-                    grad_bias = grad_output._grad_sum_to_size(bias.size())
-                else:
-                    grad_bn_out = grad_output
-                    grad_weight= None
-                    grad_bias = None
-
-
-                grad_bn_out = grad_bn_out.contiguous().view(1, n, -1)
-
-                grad_input, _, _ = torch._batch_norm_impl_index_backward(
-                    impl_idx, input_reshape, grad_bn_out, None, None, None,
-                    save1, save2, True, eps, [True, False, False], reserve)
-
-                grad_input = grad_input.view(input.size())
+                output_mask = [True, weight is not None, bias is not None]
+                grad_input, grad_weight, grad_bias = torch.native_layer_norm_backward(grad_output, input, normalized_shape, mean, rstd, weight, bias, output_mask)
                 return grad_input, None, grad_weight, grad_bias, None, None
-
             return output, backward
 
         def AD_fused_dropout_backward(grad,
@@ -1191,17 +1146,6 @@ const std::vector<std::string> functions = {
             return result, backward
     )",
     R"(
-        def AD_adaptive_avg_pool3d_backward(grad,
-                                            self,
-                                            output_size: List[int]):
-            if output_size[0] == 1 and output_size[1] == 1 and output_size[2] == 1:
-                self_size = self.size()
-                grad_self = grad.expand(self.size()) / (self_size[-1] * self_size[-2] * self_size[-3])
-            else:
-                grad_self = torch._adaptive_avg_pool3d_backward(grad, self)
-
-            return grad_self
-
         def AD_adaptive_avg_pool2d_backward(grad,
                                             self,
                                             output_size: List[int]):
@@ -1239,7 +1183,7 @@ const std::vector<std::string> functions = {
         def adaptive_avg_pool3d(self,
                                 output_size: List[int]):
             def backward(grad_output):
-                grad_self = AD_adaptive_avg_pool3d_backward(grad_output, self, output_size)
+                grad_self = torch.adaptive_avg_pool3d_backward(grad_output, self)
                 return grad_self, None
 
             return torch.adaptive_avg_pool3d(self, output_size), backward
