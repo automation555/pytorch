@@ -1,21 +1,17 @@
 #!/usr/bin/env python3
 import os
+import shutil
+import sys
+import tempfile
 import unittest
 from enum import Flag, auto
 from typing import Dict, List, Type
 
 from torch.testing._internal.common_distributed import MultiProcessTestCase
-from torch.testing._internal.common_utils import (
-    TEST_WITH_ASAN,
-    TEST_WITH_TSAN,
-    find_free_port,
-)
+from torch.testing._internal.common_utils import TEST_WITH_ASAN, TEST_WITH_TSAN
 from torch.testing._internal.distributed.ddp_under_dist_autograd_test import (
     DdpComparisonTest,
     DdpUnderDistAutogradTest,
-)
-from torch.testing._internal.distributed.pipe_with_ddp_test import (
-    PipeWithDDPTest,
 )
 from torch.testing._internal.distributed.nn.api.remote_module_test import (
     RemoteModuleTest,
@@ -23,7 +19,6 @@ from torch.testing._internal.distributed.nn.api.remote_module_test import (
 from torch.testing._internal.distributed.rpc.dist_autograd_test import (
     DistAutogradTest,
     FaultyAgentDistAutogradTest,
-    TensorPipeDistAutogradTest
 )
 from torch.testing._internal.distributed.rpc.dist_optimizer_test import (
     DistOptimizerTest,
@@ -44,26 +39,7 @@ from torch.testing._internal.distributed.rpc.rpc_test import (
     RpcTest,
     TensorPipeAgentRpcTest,
 )
-from torch.testing._internal.distributed.rpc.examples.parameter_server_test import ParameterServerTest
-from torch.testing._internal.distributed.rpc.examples.reinforcement_learning_rpc_test import (
-    ReinforcementLearningRpcTest,
-)
 
-
-def _check_and_set_tcp_init():
-    # if we are running with TCP init, set main address and port
-    # before spawning subprocesses, since different processes could find
-    # different ports.
-    use_tcp_init = os.environ.get("RPC_INIT_WITH_TCP", None)
-    if use_tcp_init == "1":
-        os.environ["MASTER_ADDR"] = '127.0.0.1'
-        os.environ["MASTER_PORT"] = str(find_free_port())
-
-def _check_and_unset_tcp_init():
-    use_tcp_init = os.environ.get("RPC_INIT_WITH_TCP", None)
-    if use_tcp_init == "1":
-        del os.environ["MASTER_ADDR"]
-        del os.environ["MASTER_PORT"]
 
 # The tests for the RPC module need to cover multiple possible combinations:
 # - different aspects of the API, each one having its own suite of tests;
@@ -77,29 +53,63 @@ def _check_and_unset_tcp_init():
 # the agent, which then gets mixed-in with each test suite and each mp method.
 
 
-@unittest.skipIf(TEST_WITH_TSAN, "TSAN and fork() is broken")
-class ForkHelper(MultiProcessTestCase):
+class RpcMultiProcessTestCase(MultiProcessTestCase, RpcAgentTestFixture):
     def setUp(self):
         super().setUp()
-        _check_and_set_tcp_init()
+        self.output_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.output_dir.cleanup)
+        self.subprocess_init_data["output_dir"] = self.output_dir.name
+
+    def subprocess_init(self, data):
+        with open(
+            os.path.join(data["output_dir"], f"rank_{self.rank}_stdout"), "wt"
+        ) as f:
+            os.dup2(f.fileno(), 1)
+        sys.stdout = os.fdopen(1, "wt")
+        with open(
+            os.path.join(data["output_dir"], f"rank_{self.rank}_stderr"), "wt"
+        ) as f:
+            os.dup2(f.fileno(), 2)
+        sys.stderr = os.fdopen(2, "wt")
+
+    def subprocess_env_vars(self):
+        env_vars = self.get_env_vars()
+        return env_vars
+
+    def on_test_failure(self):
+        for rank in range(self.world_size):
+            try:
+                with open(
+                    os.path.join(self.output_dir.name, f"rank_{rank}_stdout"), "rt"
+                ) as f:
+                    print(f"Process {rank} stdout:")
+                    print(f.read())
+            except Exception as err:
+                print(f"Process {rank} didn't produce stdout ({err})")
+            try:
+                with open(
+                    os.path.join(self.output_dir.name, f"rank_{rank}_stderr"), "rt"
+                ) as f:
+                    print(f"Process {rank} stderr:")
+                    print(f.read())
+            except Exception as err:
+                print(f"Process {rank} didn't produce stderr ({err})")
+
+
+@unittest.skipIf(TEST_WITH_TSAN, "TSAN and fork() is broken")
+class ForkHelper(RpcMultiProcessTestCase):
+    def setUp(self):
+        super().setUp()
         self._fork_processes()
 
-    def tearDown(self):
-        _check_and_unset_tcp_init()
-        super().tearDown()
 
 @unittest.skipIf(
     TEST_WITH_ASAN, "Skip ASAN as torch + multiprocessing spawn have known issues"
 )
-class SpawnHelper(MultiProcessTestCase):
+class SpawnHelper(RpcMultiProcessTestCase):
     def setUp(self):
         super().setUp()
-        _check_and_set_tcp_init()
         self._spawn_processes()
-
-    def tearDown(self):
-        _check_and_unset_tcp_init()
-        super().tearDown()
 
 
 class MultiProcess(Flag):
@@ -120,7 +130,6 @@ MP_HELPERS_AND_SUFFIXES = {
 # for each agent (except the faulty agent, which is special).
 GENERIC_TESTS = [
     RpcTest,
-    ParameterServerTest,
     DistAutogradTest,
     DistOptimizerTest,
     JitRpcTest,
@@ -128,8 +137,6 @@ GENERIC_TESTS = [
     RemoteModuleTest,
     DdpUnderDistAutogradTest,
     DdpComparisonTest,
-    PipeWithDDPTest,
-    ReinforcementLearningRpcTest,
 ]
 
 
@@ -145,8 +152,7 @@ PROCESS_GROUP_TESTS = [
 # These suites should be standalone, and separate from the ones in the generic
 # list (not subclasses of those!).
 TENSORPIPE_TESTS = [
-    TensorPipeAgentRpcTest,
-    TensorPipeDistAutogradTest
+    TensorPipeAgentRpcTest
 ]
 
 
