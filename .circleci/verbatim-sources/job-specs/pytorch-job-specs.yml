@@ -260,8 +260,8 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Install VS2019 toolchain
-          no_output_timeout: 10m
+          name: Install VS2019
+          no_output_timeout: 8m
           command: |
               powershell .circleci/scripts/vs_install.ps1
       - run:
@@ -329,8 +329,8 @@ jobs:
       - attach_workspace:
           at: c:/users/circleci/workspace
       - run:
-          name: Install VS2019 toolchain
-          no_output_timeout: 10m
+          name: Install VS2019
+          no_output_timeout: 8m
           command: |
               powershell .circleci/scripts/vs_install.ps1
       - run:

@@ -16,30 +16,24 @@ $VS_INSTALL_ARGS = @("--nocache","--quiet","--wait", "--add Microsoft.VisualStud
 
 curl.exe --retry 3 -kL $VS_DOWNLOAD_LINK --output vs_installer.exe
 if ($LASTEXITCODE -ne 0) {
-    echo "Download of the VS 2019 Version 16.8.5 installer failed"
+    echo "Download of the VS 2019 Version 16.7 installer failed"
     exit 1
 }
 
-if (Test-Path "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe") {
-    $existingPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -products "Microsoft.VisualStudio.Product.BuildTools" -version "[16, 17)" -property installationPath
-    if ($existingPath -ne $null) {
-        echo "Found existing BuildTools installation in $existingPath"
-        $VS_UNINSTALL_ARGS = @("uninstall", "--installPath", "`"$existingPath`"", "--quiet","--wait")
-        $process = Start-Process "${PWD}\vs_installer.exe" -ArgumentList $VS_UNINSTALL_ARGS -NoNewWindow -Wait -PassThru
-        $exitCode = $process.ExitCode
-        if (($exitCode -ne 0) -and ($exitCode -ne 3010)) {
-            echo "Original BuildTools uninstall failed with code $exitCode"
-            exit 1
-        }
-        echo "Original BuildTools uninstalled"
-    }
-}
+$VS_UNINSTALL_ARGS = @("uninstall", "--installPath", "`"C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools`"", "--quiet","--wait")
 
+if (Test-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools") {
+    echo "start uninstalling"
+    Start-Process "${PWD}\vs_installer.exe"   -ArgumentList $VS_UNINSTALL_ARGS -NoNewWindow -Wait -PassThru
+}
+if ( -Not (Test-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC") ) {
+    echo "Original BuildTools uninstalled"
+}
 $process = Start-Process "${PWD}\vs_installer.exe" -ArgumentList $VS_INSTALL_ARGS -NoNewWindow -Wait -PassThru
 Remove-Item -Path vs_installer.exe -Force
 $exitCode = $process.ExitCode
 if (($exitCode -ne 0) -and ($exitCode -ne 3010)) {
-    echo "VS 2017 installer exited with code $exitCode, which should be one of [0, 3010]."
+    echo "VS 2019 installer exited with code $exitCode, which should be one of [0, 3010]."
     curl.exe --retry 3 -kL $COLLECT_DOWNLOAD_LINK --output Collect.exe
     if ($LASTEXITCODE -ne 0) {
         echo "Download of the VS Collect tool failed."
@@ -50,3 +44,13 @@ if (($exitCode -ne 0) -and ($exitCode -ne 3010)) {
     Copy-Item -Path "C:\Users\circleci\AppData\Local\Temp\vslogs.zip" -Destination "C:\w\build-results\"
     exit 1
 }
+
+if (Test-Path "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Tools\MSVC\14.28.29333") {
+    echo "Install Successfully"
+}
+else {
+    echo "Installation Failed"
+    exit 1
+}
+
+
