@@ -32,7 +32,7 @@ std::vector<int64_t> get_offsets(const Tensor& indices, const IntArrayRef& sizes
 
       If
         offsets = get_offsets(A._indices(), A.sizes(), -1)
-        data = A.to_dense().resize((nnz,))
+        data = A.to_dense().resize((nse,))
       then
         data[offsets[n]] == A._values()[n]
 
@@ -62,8 +62,8 @@ std::vector<int64_t> get_offsets(const Tensor& indices, const IntArrayRef& sizes
 
   */
   auto ndim = indices.size(0);
-  auto nnz = indices.size(1);
-  std::vector<int64_t> offsets(nnz);
+  auto nse = indices.size(1);
+  std::vector<int64_t> offsets(nse);
   std::vector<int64_t> strides(ndim, 1);
   auto indices_accessor = indices.accessor<int64_t, 2>();
 
@@ -73,7 +73,7 @@ std::vector<int64_t> get_offsets(const Tensor& indices, const IntArrayRef& sizes
     }
   }
 
-  for (int64_t i=0; i < nnz; i++) {
+  for (int64_t i=0; i < nse; i++) {
     int64_t acc = 0;
     for (int64_t j=0; j < ndim; j++) {
       auto indices_row = indices_accessor[j];
@@ -104,14 +104,14 @@ std::vector<std::vector<int64_t>> get_pools(const Tensor& indices, const IntArra
     that participate in the same softmax computation:
 
     - pools[i] intersection with pools[j] is empty iff i != j
-    - union of all pools is set(range(nnz))
+    - union of all pools is set(range(nse))
     - X.values[k], k in pools[i], does not affect the result of softmax(X)[n], n in pools[j], iff i != j
 
   */
   std::vector<std::vector<int64_t>> pools;
 
   auto ndim = indices.size(0);
-  auto nnz = indices.size(1);
+  auto nse = indices.size(1);
   std::vector<int64_t> strides(ndim, 1);
   auto indices_accessor = indices.accessor<int64_t, 2>();
 
@@ -121,7 +121,7 @@ std::vector<std::vector<int64_t>> get_pools(const Tensor& indices, const IntArra
     }
   }
 
-  for (int64_t i=0; i < nnz; i++) {
+  for (int64_t i=0; i < nse; i++) {
     int64_t pool_index = 0;
     for (int64_t j=0; j < ndim; j++) {
       if (j != dim) {
@@ -198,12 +198,12 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
 
     For the example sparse tensor X, we have:
 
-      S_0._indices() == S_1._indices() == X._indices()
+      S_0.indices() == S_1.indices() == X.indices()
 
       maxX_0 = [11, 22, -inf, 24, 15]
       maxX_1 = [15, 24]
 
-      S_0._values() = [exp(11 - maxX_0[0]) / exp(11 - maxX_0[0]),
+      S_0.values() = [exp(11 - maxX_0[0]) / exp(11 - maxX_0[0]),
                        exp(14 - maxX_0[3]) / (exp(14 - maxX_0[3]) + exp(24 - maxX_0[3])),
                        exp(15 - maxX_0[4]) / exp(15 - maxX_0[4]),
                        exp(22 - maxX_0[1]) / exp(22 - maxX_0[1]),
@@ -212,7 +212,7 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
 
       (note that `maxX_0[2] == -inf` not used to obtain S_0)
 
-      S_1._values() = [exp(11 - maxX_1[0]) / (exp(11 - maxX_1[0]) + exp(14 - maxX_1[0]) + exp(15 - maxX_1[0])),
+      S_1.values() = [exp(11 - maxX_1[0]) / (exp(11 - maxX_1[0]) + exp(14 - maxX_1[0]) + exp(15 - maxX_1[0])),
                        exp(14 - maxX_1[0]) / (exp(11 - maxX_1[0]) + exp(14 - maxX_1[0]) + exp(15 - maxX_1[0])),
                        exp(15 - maxX_1[0]) / (exp(11 - maxX_1[0]) + exp(14 - maxX_1[0]) + exp(15 - maxX_1[0])),
                        exp(22 - maxX_1[1]) / (exp(22 - maxX_1[1]) + exp(24 - maxX_1[1])),
@@ -224,12 +224,12 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
                        1 / (exp(-2) + 1)]
 
     To obtain the above via the for-loop over
-    `nnz(=len(X._values()))`, we introduce the indices mapping `pool`
+    `nse(=len(X.values()))`, we introduce the indices mapping `pool`
     as follows:
 
-      indices = X._indices()
-      for i in range(nnz):
-          for j in range(nnz):
+      indices = X.indices()
+      for i in range(nse):
+          for j in range(nse):
               if indices[d, i] == indices[d, j]:
                   assert pool_d[i] == pool_d[j]
               else:
@@ -238,14 +238,14 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
     that is, the entries with values indices i and j are in the same
     pool iff their locations in the grid of tensor indices align with
     the direction along which the softmax is calculated. The `pool`
-    mapping maps the X._values() indices to the corresponding pool
+    mapping maps the X.values() indices to the corresponding pool
     index.
 
     To save memory and processor resources, we pre-compute the entries
     of maxX tensor and the sums of exponents as follows:
 
-      mx_d = [max(values[i] for i in range(nnz) if pool_0[i] == k) for k in pool_d]
-      exp_sum_d = [sum(exp(values[i] - mx_d[k]) for i in range(nnz) if pool_d[i] == k) for k in pool_d]
+      mx_d = [max(values[i] for i in range(nse) if pool_0[i] == k) for k in pool_d]
+      exp_sum_d = [sum(exp(values[i] - mx_d[k]) for i in range(nse) if pool_d[i] == k) for k in pool_d]
 
     For example, if
 
@@ -261,7 +261,7 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
 
     and
 
-      S_0._values() = [exp(11 - mx_0[pool_0[0]]) / exp_sum_0[pool_0[0]]
+      S_0.values() = [exp(11 - mx_0[pool_0[0]]) / exp_sum_0[pool_0[0]]
                        exp(14 - mx_0[pool_0[1]]) / exp_sum_0[pool_0[1]]
                        exp(15 - mx_0[pool_0[2]]) / exp_sum_0[pool_0[2]]
                        exp(22 - mx_0[pool_0[3]]) / exp_sum_0[pool_0[3]]
@@ -269,7 +269,7 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
 
     or in general,
 
-      S_d._values() = [exp(values[i] - mx_d[pool_d[i]]) / exp_sum_d[pool_d[i] for i in range(nnz)]
+      S_d.values() = [exp(values[i] - mx_d[pool_d[i]]) / exp_sum_d[pool_d[i] for i in range(nse)]
 
     The above algorithm can be easily extended for cases with
     non-scalar dense part of the sparse tensor where all scalar
@@ -300,15 +300,15 @@ void cpu_sparse_coo_softmax(Tensor output, const Tensor& input, const int64_t di
     return;
   }
 
-  auto nnz = values.size(0);
+  auto nse = values.size(0);
   auto sizes = input.sizes();
   auto nvalues = get_nvalues(sizes, sparse_dim);
 
   /* Prepare accessors */
-  auto values_2 = values.view({nnz, nvalues});
+  auto values_2 = values.view({nse, nvalues});
   auto values_accessor = values_2.accessor<scalar_t, 2>();
 
-  auto out_values_2 = out_values.view({nnz, nvalues});
+  auto out_values_2 = out_values.view({nse, nvalues});
   auto out_values_accessor = out_values_2.accessor<scalar_t, 2>();
 
   /* Compute independent pools of indices */
@@ -400,8 +400,8 @@ void cpu_sparse_coo_softmax_backward(Tensor& grad_input, const Tensor& grad, con
   auto out_values = output._values().contiguous();
   auto values = grad_input._values();
   auto indices = grad_input._indices();
-  auto out_nnz = out_values.size(0);
-  auto grad_nnz = grad_values.size(0);
+  auto out_nse = out_values.size(0);
+  auto grad_nse = grad_values.size(0);
 
   values.resize_as_(out_values);
   values.zero_();
@@ -422,10 +422,10 @@ void cpu_sparse_coo_softmax_backward(Tensor& grad_input, const Tensor& grad, con
         values.set_(r);
       }
     } else {
-      for(int64_t i=0; i<out_nnz; i++) {
+      for(int64_t i=0; i<out_nse; i++) {
         auto low = std::lower_bound(grad_offsets.begin(), grad_offsets.end(), out_offsets[i]);
         auto j = low - grad_offsets.begin();
-        if (j < grad_nnz && out_offsets[i] == grad_offsets[j]) {
+        if (j < grad_nse && out_offsets[i] == grad_offsets[j]) {
           if (LogSoftMax) {
             auto r = log_softmax_backward_cpu(grad_values[j], out_values[i], dim - sparse_dim, unused);
             values[i].copy_(r);
@@ -439,16 +439,16 @@ void cpu_sparse_coo_softmax_backward(Tensor& grad_input, const Tensor& grad, con
     return;
   }
 
-  auto nnz = values.size(0);
+  auto nse = values.size(0);
   auto nvalues = get_nvalues(sizes, sparse_dim);
 
-  auto values_2 = values.view({nnz, nvalues});
+  auto values_2 = values.view({nse, nvalues});
   auto values_accessor = values_2.accessor<scalar_t, 2>();
 
-  auto out_values_2 = out_values.view({out_nnz, nvalues});
+  auto out_values_2 = out_values.view({out_nse, nvalues});
   auto out_values_accessor = out_values_2.accessor<scalar_t, 2>();
 
-  auto grad_values_2 = grad_values.view({grad_nnz, nvalues});
+  auto grad_values_2 = grad_values.view({grad_nse, nvalues});
   auto grad_values_accessor = grad_values_2.accessor<scalar_t, 2>();
 
   /* Compute independent pools of indices */
@@ -472,7 +472,7 @@ void cpu_sparse_coo_softmax_backward(Tensor& grad_input, const Tensor& grad, con
           auto low = std::lower_bound(grad_offsets.begin(), grad_offsets.end(), out_offsets[i]);
           auto j = low - grad_offsets.begin();
 
-          if (j < grad_nnz && (out_offsets[i] == grad_offsets[j])) {
+          if (j < grad_nse && (out_offsets[i] == grad_offsets[j])) {
             auto grad_values_row = grad_values_accessor[j];
             for (int64_t k=0; k<nvalues; k++) {
               if (LogSoftMax) {
@@ -491,7 +491,7 @@ void cpu_sparse_coo_softmax_backward(Tensor& grad_input, const Tensor& grad, con
           auto low = std::lower_bound(grad_offsets.begin(), grad_offsets.end(), out_offsets[i]);
           auto j = low - grad_offsets.begin();
 
-          if (j < grad_nnz && (out_offsets[i] == grad_offsets[j])) {
+          if (j < grad_nse && (out_offsets[i] == grad_offsets[j])) {
             auto grad_values_row = grad_values_accessor[j];
             for (int64_t k=0; k<nvalues; k++) {
               if (LogSoftMax) {
@@ -635,7 +635,7 @@ Tensor _sparse_log_softmax(const Tensor& input_, const int64_t dim_, c10::option
   namedinference::propagate_names(result, input_);
   return result;
 }
-
+  
 Tensor _sparse_log_softmax(const Tensor& self, Dimname dim, optional<ScalarType> dtype) {
   return at::_sparse_log_softmax(self, dimname_to_position(self, dim), dtype);
 }
