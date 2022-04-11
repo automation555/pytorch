@@ -12,9 +12,7 @@ on an NVIDIA GPU with compute capability >= 3.0.
 import os
 import sys
 import platform
-import textwrap
 import ctypes
-import warnings
 
 if sys.version_info < (3,):
     raise Exception("Python 2 has reached end-of-life and is no longer supported by PyTorch.")
@@ -22,14 +20,10 @@ if sys.version_info < (3,):
 from ._utils import _import_dotted_name
 from ._utils_internal import get_file_path, prepare_multiprocessing_environment, \
     USE_RTLD_GLOBAL_WITH_LIBTORCH, USE_GLOBAL_DEPS
-# TODO(torch_deploy) figure out how to freeze version.py in fbcode build
-if sys.executable == 'torch_deploy':
-    __version__ = "torch-deploy-1.8"
-else:
-    from .version import __version__ as __version__
+from .version import __version__
 from ._six import string_classes as _string_classes
 
-from typing import Set, Type, TYPE_CHECKING
+from typing import Set, Type
 
 __all__ = [
     'typename', 'is_tensor', 'is_storage', 'set_default_tensor_type',
@@ -40,9 +34,7 @@ __all__ = [
     'ShortStorage', 'CharStorage', 'ByteStorage', 'BoolStorage',
     'DoubleTensor', 'FloatTensor', 'LongTensor', 'IntTensor',
     'ShortTensor', 'CharTensor', 'ByteTensor', 'BoolTensor', 'Tensor',
-    'lobpcg', 'use_deterministic_algorithms', 'set_deterministic',
-    'are_deterministic_algorithms_enabled', 'is_deterministic',
-    'set_warn_always', 'is_warn_always_enabled',
+    'lobpcg', 'set_deterministic', 'is_deterministic'
 ]
 
 ################################################################################
@@ -99,28 +91,28 @@ if sys.platform == 'win32':
             res = kernel32.AddDllDirectory(dll_path)
             if res is None:
                 err = ctypes.WinError(ctypes.get_last_error())
-                err.strerror += f' Error adding "{dll_path}" to the DLL directories.'
+                err.strerror += ' Error adding "{}" to the DLL directories.'.format(dll_path)
                 raise err
 
-    try:
-        ctypes.CDLL('vcruntime140.dll')
-        ctypes.CDLL('msvcp140.dll')
-        if cuda_version not in ('9.2', '10.0'):
-            ctypes.CDLL('vcruntime140_1.dll')
-    except OSError:
-        print('''Microsoft Visual C++ Redistributable is not installed, this may lead to the DLL load failure.
-                 It can be downloaded at https://aka.ms/vs/16/release/vc_redist.x64.exe''')
+    def load_library_with_flags(dll, flags=None):
+        global path_patched
 
-    dlls = glob.glob(os.path.join(th_dll_path, '*.dll'))
-    path_patched = False
-    for dll in dlls:
+        if flags is None:
+            if os.path.isabs(dll):
+                # LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                # LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR only applies to absolute paths
+                flags = 0x00001100
+            else:
+                # LOAD_LIBRARY_SEARCH_DEFAULT_DIRS
+                flags = 0x00001000
+
         is_loaded = False
         if with_load_library_flags:
-            res = kernel32.LoadLibraryExW(dll, None, 0x00001100)
+            res = kernel32.LoadLibraryExW(dll, None, flags)
             last_error = ctypes.get_last_error()
             if res is None and last_error != 126:
                 err = ctypes.WinError(last_error)
-                err.strerror += f' Error loading "{dll}" or one of its dependencies.'
+                err.strerror += ' Error loading "{}" or one of its dependencies.'.format(dll)
                 raise err
             elif res is not None:
                 is_loaded = True
@@ -131,15 +123,35 @@ if sys.platform == 'win32':
             res = kernel32.LoadLibraryW(dll)
             if res is None:
                 err = ctypes.WinError(ctypes.get_last_error())
-                err.strerror += f' Error loading "{dll}" or one of its dependencies.'
+                err.strerror += ' Error loading "{}" or one of its dependencies.'.format(dll)
                 raise err
+
+    try:
+        load_library_with_flags('vcruntime140.dll')
+        load_library_with_flags('msvcp140.dll')
+        if cuda_version not in ('9.2', '10.0'):
+            load_library_with_flags('vcruntime140_1.dll')
+    except OSError:
+        print('''Microsoft Visual C++ Redistributable is not installed, which may lead to the DLL load failure.
+                 It can be downloaded at https://aka.ms/vs/16/release/vc_redist.x64.exe''')
+
+    try:
+        load_library_with_flags('libiomp5md.dll')
+    except OSError:
+        print('''Intel OpenMP is not installed, which may lead to the DLL load failure. 
+                 Please install it using `pip install intel-openmp`.''')
+
+    dlls = glob.glob(os.path.join(th_dll_path, '*.dll'))
+    path_patched = False
+    for dll in dlls:
+        load_library_with_flags(dll)
 
     kernel32.SetErrorMode(prev_error_mode)
 
 
 # See Note [Global dependencies]
 def _load_global_deps():
-    if platform.system() == 'Windows' or sys.executable == 'torch_deploy':
+    if platform.system() == 'Windows':
         return
 
     lib_name = 'libtorch_global_deps' + ('.dylib' if platform.system() == 'Darwin' else '.so')
@@ -198,50 +210,12 @@ else:
 
 # Appease the type checker; ordinarily this binding is inserted by the
 # torch._C module initialization code in C
-if TYPE_CHECKING:
+if False:
     import torch._C as _C
-
-# Check to see if we can load C extensions, and if not provide some guidance
-# on what the problem might be.
-try:
-    # _initExtension is chosen (arbitrarily) as a sentinel.
-    from torch._C import _initExtension
-except ImportError:
-    import torch._C as _C_for_compiled_check
-
-    # The __file__ check only works for Python 3.7 and above.
-    if sys.version_info >= (3, 7) and _C_for_compiled_check.__file__ is None:
-        raise ImportError(textwrap.dedent('''
-            Failed to load PyTorch C extensions:
-                It appears that PyTorch has loaded the `torch/_C` folder
-                of the PyTorch repository rather than the C extensions which
-                are expected in the `torch._C` namespace. This can occur when
-                using the `install` workflow. e.g.
-                    $ python setup.py install && python -c "import torch"
-
-                This error can generally be solved using the `develop` workflow
-                    $ python setup.py develop && python -c "import torch"  # This should succeed
-                or by running Python from a different directory.
-            ''').strip()) from None
-    raise  # If __file__ is not None the cause is unknown, so just re-raise.
-
 
 __all__ += [name for name in dir(_C)
             if name[0] != '_' and
             not name.endswith('Base')]
-
-if not TYPE_CHECKING:
-    # issue 38137 and python issue 43367. Submodules of a C extension are
-    # non-standard, and attributes of those submodules cannot be pickled since
-    # pickle expect to be able to import them as "from _C.sub import attr"
-    # which fails with "_C is not a package
-    for attr in dir(_C):
-        candidate = getattr(_C, attr)
-        if type(candidate) is type(_C):
-            # submodule
-            if f'torch._C.{attr}' not in sys.modules:
-                sys.modules[f'torch._C.{attr}'] = candidate
-
 
 ################################################################################
 # Define basic utilities
@@ -345,83 +319,11 @@ def set_default_dtype(d):
     """
     _C._set_default_dtype(d)
 
-def use_deterministic_algorithms(d):
-    r""" Sets whether PyTorch operations must use "deterministic"
-    algorithms. That is, algorithms which, given the same input, and when
-    run on the same software and hardware, always produce the same output.
-    When True, operations will use deterministic algorithms when available,
-    and if only nondeterministic algorithms are available they will throw a
-    :class:RuntimeError when called.
-
-    .. warning::
-        This feature is in beta, and its design and implementation may change
-        in the future.
-
-    The following normally-nondeterministic operations will act
-    deterministically when `d=True`:
-
-        * :class:`torch.nn.Conv1d` when called on CUDA tensor
-        * :class:`torch.nn.Conv2d` when called on CUDA tensor
-        * :class:`torch.nn.Conv3d` when called on CUDA tensor
-        * :class:`torch.nn.ConvTranspose1d` when called on CUDA tensor
-        * :class:`torch.nn.ConvTranspose2d` when called on CUDA tensor
-        * :class:`torch.nn.ConvTranspose3d` when called on CUDA tensor
-        * :func:`torch.bmm` when called on sparse-dense CUDA tensors
-        * :func:`torch.__getitem__` backward when `self` is a CPU tensor and
-          ``indices`` is a list of tensors
-        * :func:`torch.index_put` with ``accumulate=True`` when called on a CPU
-          tensor
-        * :func:`torch.put` with ``accumulate=True`` when called on a CPU
-          tensor
-
-    The following normally-nondeterministic operations will throw a
-    :class:`RuntimeError` when `d=True`:
-
-        * :class:`torch.nn.AvgPool3d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.AdaptiveAvgPool2d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.AdaptiveAvgPool3d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.MaxPool3d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.AdaptiveMaxPool2d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.FractionalMaxPool2d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.FractionalMaxPool3d` when called on a CUDA tensor that requires grad
-        * :func:`torch.nn.functional.interpolate` when called on a CUDA tensor that requires grad
-          and one of the following modes is used:
-
-          - `linear`
-          - `bilinear`
-          - `bicubic`
-          - `trilinear`
-
-        * :class:`torch.nn.ReflectionPad1d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.ReflectionPad2d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.ReplicationPad1d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.ReplicationPad2d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.ReplicationPad3d` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.NLLLoss` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.CTCLoss` when called on a CUDA tensor that requires grad
-        * :class:`torch.nn.EmbeddingBag` when called on a CUDA tensor that requires grad
-        * :func:`torch.scatter_add_` when called on a CUDA tensor
-        * :func:`torch.index_add_` when called on a CUDA tensor
-        * :func:`torch.index_copy`
-        * :func:`torch.put` when ``accumulate=False``
-        * :func:`torch.put` when ``accumulate=True`` and called on a CUDA tensor
-        * :func:`torch.index_select` when called on a CUDA tensor that requires grad
-        * :func:`torch.repeat_interleave` when called on a CUDA tensor that requires grad
-        * :func:`torch.histc` when called on a CUDA tensor
-        * :func:`torch.bincount` when called on a CUDA tensor
-        * :func:`torch.kthvalue` with called on a CUDA tensor
-        * :func:`torch.median` with indices output when called on a CUDA tensor
-
-    A handful of CUDA operations are nondeterministic if the CUDA version is
-    10.2 or greater, unless the environment variable `CUBLAS_WORKSPACE_CONFIG=:4096:8`
-    or `CUBLAS_WORKSPACE_CONFIG=:16:8` is set. See the CUDA documentation for more
-    details: `<https://docs.nvidia.com/cuda/cublas/index.html#cublasApi_reproducibility>`_
-    If one of these environment variable configurations is not set, a :class:`RuntimeError`
-    will be raised from these operations when called with CUDA tensors:
-
-        * :func:`torch.mm`
-        * :func:`torch.mv`
-        * :func:`torch.bmm`
+def set_deterministic(d):
+    r"""Sets a global flag to force all operations to use a deterministic
+    implementation if available. If an operation that does not have a
+    deterministic implementation is called while this setting is True, the
+    operation will throw a RuntimeError.
 
     Note that deterministic operations tend to have worse performance than
     non-deterministic operations.
@@ -430,57 +332,19 @@ def use_deterministic_algorithms(d):
         d (:class:`bool`): If True, force operations to be deterministic.
                            If False, allow non-deterministic operations.
     """
-    _C._set_deterministic_algorithms(d)
-
-def set_deterministic(d):
-    r"""This function is deprecated and will be removed in a future release.
-    Please use :func:`torch.use_deterministic_algorithms` instead.
-    """
-    warnings.warn((
-        "torch.set_deterministic is deprecated and will be removed in a future "
-        "release. Please use torch.use_deterministic_algorithms instead"))
-
-    use_deterministic_algorithms(d)
-
-def are_deterministic_algorithms_enabled():
-    r"""Returns True if the global deterministic flag is turned on. Refer to
-    :func:`torch.use_deterministic_algorithms` documentation for more details.
-    """
-    return _C._get_deterministic_algorithms()
+    _C._set_deterministic(d)
 
 def is_deterministic():
-    r"""This function is deprecated and will be removed in a future release.
-    Please use :func:`torch.are_deterministic_algorithms_enabled` instead.
+    r"""Returns True if the global deterministic flag is turned on and
+    operations are being forced to use a deterministic implementation.
     """
-    warnings.warn((
-        "torch.is_deterministic is deprecated and will be removed in a future "
-        "release. Please use torch.are_deterministic_algorithms_enabled instead"))
-    return are_deterministic_algorithms_enabled()
-
-
-def set_warn_always(b):
-    r"""When this flag is False (default) then some PyTorch warnings may only
-    appear once per process. This helps avoid excessive warning information.
-    Setting it to True causes these warnings to always appear, which may be
-    helpful when debugging.
-
-    Args:
-        b (:class:`bool`): If True, force warnings to always be emitted
-                           If False, set to the default behaviour
-    """
-    _C._set_warnAlways(b)
-
-def is_warn_always_enabled():
-    r"""Returns True if the global warn_always flag is turned on. Refer to
-    :func:`torch.set_warn_always` documentation for more details.
-    """
-    return _C._get_warnAlways()
+    return _C._get_deterministic()
 
 ################################################################################
 # Define Storage and Tensor classes
 ################################################################################
 
-from ._tensor import Tensor
+from .tensor import Tensor
 from .storage import _StorageBase
 
 
@@ -538,13 +402,11 @@ class QInt8Storage(_C.QInt8StorageBase, _StorageBase):
 class QInt32Storage(_C.QInt32StorageBase, _StorageBase):
     pass
 
-class QUInt4x2Storage(_C.QUInt4x2StorageBase, _StorageBase):
-    pass
 
 _storage_classes = {
     DoubleStorage, FloatStorage, LongStorage, IntStorage, ShortStorage,
     CharStorage, ByteStorage, HalfStorage, BoolStorage, QUInt8Storage, QInt8Storage,
-    QInt32Storage, BFloat16Storage, ComplexFloatStorage, ComplexDoubleStorage, QUInt4x2Storage
+    QInt32Storage, BFloat16Storage, ComplexFloatStorage, ComplexDoubleStorage
 }
 
 # The _tensor_classes set is initialized by the call to _C._initialize_tensor_type_bindings()
@@ -560,7 +422,7 @@ from ._tensor_str import set_printoptions
 ################################################################################
 
 def manager_path():
-    if platform.system() == 'Windows' or sys.executable == 'torch_deploy':
+    if platform.system() == 'Windows':
         return b""
     path = get_file_path('torch', 'bin', 'torch_shm_manager')
     prepare_multiprocessing_environment(get_file_path('torch'))
@@ -577,11 +439,8 @@ del manager_path
 # Note that we will see "too many" functions when reexporting this way; there
 # is not a good way to fix this problem.  Perhaps, try to redesign VariableFunctions
 # so that this import is good enough
-if TYPE_CHECKING:
-    # Some type signatures pulled in from _VariableFunctions here clash with
-    # signatures already imported. For now these clashes are ignored; see
-    # PR #43339 for details.
-    from torch._C._VariableFunctions import *  # type: ignore
+if False:
+    from torch._C._VariableFunctions import *
 
 for name in dir(_C._VariableFunctions):
     if name.startswith('__'):
@@ -613,66 +472,39 @@ del QUInt8StorageBase
 del BFloat16StorageBase
 del ComplexDoubleStorageBase
 del ComplexFloatStorageBase
-del QUInt4x2StorageBase
-
-################################################################################
-# Define _assert
-################################################################################
-
-# needs to be before the submodule imports to avoid circular dependencies
-def _assert(condition, message):
-    r"""A wrapper around Python's assert which is symbolically traceable.
-    """
-    from .overrides import has_torch_function, handle_torch_function
-
-    if type(condition) is not torch.Tensor and has_torch_function((condition,)):
-        return handle_torch_function(_assert, (condition,), condition, message)
-    assert condition, message
 
 ################################################################################
 # Import most common subpackages
 ################################################################################
 
-# Use the redundant form so that type checkers know that these are a part of
-# the public API. The "regular" import lines are there solely for the runtime
-# side effect of adding to the imported module's members for other users.
-
-from torch import cuda as cuda
-from torch import autograd as autograd
-from torch.autograd import (
-    no_grad as no_grad,
-    enable_grad as enable_grad,
-    set_grad_enabled as set_grad_enabled,
-)
-from torch import fft as fft
-from torch import futures as futures
-from torch import nn as nn
+import torch.cuda
+import torch.autograd
+from torch.autograd import no_grad, enable_grad, set_grad_enabled
+# import torch.fft  # TODO: enable once torch.fft() is removed
+import torch.futures
+import torch.nn
 import torch.nn.intrinsic
-import torch.nn.quantizable
 import torch.nn.quantized
-from torch import optim as optim
-import torch.optim._multi_tensor
-from torch import multiprocessing as multiprocessing
-from torch import sparse as sparse
-from torch import special as special
+import torch.optim
+import torch.multiprocessing
+import torch.sparse
 import torch.utils.backcompat
-from torch import onnx as onnx
-from torch import jit as jit
-from torch import linalg as linalg
-from torch import hub as hub
-from torch import random as random
-from torch import distributions as distributions
-from torch import testing as testing
+import torch.onnx
+import torch.jit
+import torch.linalg
+import torch.hub
+import torch.random
+import torch.distributions
+import torch.testing
 import torch.backends.cuda
 import torch.backends.mkl
 import torch.backends.mkldnn
 import torch.backends.openmp
 import torch.backends.quantized
-from torch import quantization as quantization
+import torch.quantization
 import torch.utils.data
-from torch import __config__ as __config__
-from torch import __future__ as __future__
-from torch import profiler as profiler
+import torch.__config__
+import torch.__future__
 
 _C._init_names(list(torch._storage_classes))
 
@@ -691,7 +523,7 @@ from torch._ops import ops
 from torch._classes import classes
 
 # Import the quasi random sampler
-from torch import quasirandom as quasirandom
+import torch.quasirandom
 
 # If you are seeing this, it means that this call site was not checked if
 # the memory format could be preserved, and it was switched to old default
@@ -705,12 +537,12 @@ del register_after_fork
 
 # Import tools that require fully imported torch (for applying
 # torch.jit.script as a decorator, for instance):
-from ._lobpcg import lobpcg as lobpcg
+from ._lobpcg import lobpcg
 
-from ._vmap_internals import vmap as vmap
+from ._vmap_internals import vmap
 
 # These were previously defined in native_functions.yaml and appeared on the
 # `torch` namespace, but we moved them to c10 dispatch to facilitate custom
-# class usage. We add these lines here to preserve backward compatibility.
+# class usage. We add these lines here to preserve backward compatbility.
 quantized_lstm = torch.ops.aten.quantized_lstm
 quantized_gru = torch.ops.aten.quantized_gru
