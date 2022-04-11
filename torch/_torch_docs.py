@@ -3361,6 +3361,46 @@ greater_equal(input, other, *, out=None) -> Tensor
 Alias for :func:`torch.ge`.
 """)
 
+add_docstr(torch.gradient, r"""
+gradient(input, spacing=None, axis=None, edge_order=1) -> Tensor
+
+The goal of this function is to estimate the gradient of a function
+which we are given values only in the specific points of domain. Values
+of the function is explicitly provided in the input argument, however
+points from domain that these values are computed are given implicitly
+in the spacing argument. The gradient is estimated on the second order
+with the help of Taylor expansion in interior points, and in boundary
+points we estimate on the first order.
+
+Args:
+    input (Tensor): values of the underlying function.
+    spacing (Tensor or float, optional): when spacing is given with
+                1-dimensional tensor, each element of this tensor
+                corresponds to unit step size in that coordinate. In default
+                case, when this number not provided, then take unit step size
+                to be 1 in all directions. However, when spacing is given
+                as 2-dimensional tensor, any 1-dimensional tensor in any coordinate
+                corresponds to the coorfinates of underlying tensor in that direction.
+    axis (int or list(ints), optional): this parameter shows the dimensions
+                (directions) we are interested in to compute the gradient. If
+                it's a single integer that means we are lookin for gradient
+                in that direction. If it's list of integer it shows the set
+                of directions we are looking for gradient. It's crucial to note that
+                when axis is provided, number of available directions in spacing
+                parameter also should be in the same size.
+    edge_order (int, optional): Edge_order is assumed to be equal to one always.
+
+Example:
+
+    >>> f = torch.tensor([1, 2, 4, 7, 11, 16], dtype=float)
+    >>> torch.gradient(f)
+    tensor([1. , 1.5, 2.5, 3.5, 4.5, 5. ])
+    >>> x = torch.tensor([0., 1., 1.5, 3.5, 4., 6.], dtype=float)
+    >>> torch.gradient(f, x)
+    tensor([1. ,  3. ,  3.5,  6.7,  6.9,  2.5])
+
+""")
+
 add_docstr(torch.geqrf,
            r"""
 geqrf(input, *, out=None) -> (Tensor, Tensor)

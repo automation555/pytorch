@@ -317,6 +317,7 @@ Tensor class reference
     Tensor.fmax
     Tensor.fmin
     Tensor.diff
+    Tensor.gradient
     Tensor.digamma
     Tensor.digamma_
     Tensor.dim

@@ -857,7 +857,35 @@ def sample_inputs_diff(op_info, device, dtype, requires_grad, **kwargs):
 
     return tuple(sample_inputs)
 
-def sample_inputs_index_select(op_info, device, dtype, requires_grad, **kwargs):
+def sample_inputs_gradient(op_info, device, dtype, requires_grad):
+    test_cases = (
+        ((S,), None, None),
+        ((S,), 2.0, None),
+        ((S, S), None, None),
+        ((S, S), [2.0, 2.1], None),
+        ((S, S), [2.0, 2.1], (0, 1)),
+        ((4, 4, 4), [2.0, 1.0], (0, 1)),
+        ((3, 3, 3), [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0), (7.0, 8.0, 9.0)], (0, 1, -1)),
+    )
+
+    sample_inputs = []
+    for size, spacing, axis in test_cases:
+        t = make_tensor(size, device, dtype, low=None, high=None, requires_grad=requires_grad)
+        kwargs_dict = dict()
+        if axis is not None:
+            kwargs_dict['axis'] = axis
+        if isinstance(spacing, list):
+            spacing_list = []
+            for space in spacing:
+                a = torch.tensor(space, dtype=torch.float16, device=device)
+                spacing_list.append(a)
+            sample_inputs.append(SampleInput(t, args=(spacing_list,), kwargs=kwargs_dict))
+        else:
+            sample_inputs.append(SampleInput(t, args=(spacing,), kwargs=kwargs_dict))
+
+    return tuple(sample_inputs)
+
+def sample_inputs_index_select(op_info, device, dtype, requires_grad):
     return (
         SampleInput(
             make_tensor((S, S, S), device, dtype, low=None, high=None, requires_grad=requires_grad),
@@ -2978,6 +3006,14 @@ op_db: List[OpInfo] = [
                        SkipInfo('TestUnaryUfuncs', 'test_reference_numerics_extremal',
                                 active_if=IS_WINDOWS),
                    )),
+    OpInfo('gradient',
+           dtypes=all_types_and_complex_and(torch.float16, torch.bfloat16),
+           skips=(
+               SkipInfo('TestOpInfo', 'test_supported_dtypes', dtypes=[torch.uint8]),
+           ),
+           supports_out=False,
+           supports_inplace_autograd=False,
+           sample_inputs_func=sample_inputs_gradient),
     OpInfo('linalg.householder_product',
            aten_name='linalg_householder_product',
            op=torch.linalg.householder_product,

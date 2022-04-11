@@ -599,6 +599,98 @@ Tensor& diff_out(const Tensor& self, int64_t n, int64_t dim, const c10::optional
   }
 }
 
+void axis_check(IntArrayRef& axis, int64_t bound) {
+  std::unordered_set<int64_t> dimensions;
+  for (const auto i : c10::irange(axis.size())) {
+    int64_t pos_axis  = axis[i] >= 0 ? axis[i] : axis.size()+axis[i];
+    TORCH_CHECK( dimensions.find(pos_axis) == dimensions.end(), "torch.gradient requires axis to be unique");
+    TORCH_CHECK( (axis[i] < bound) && (axis[i] >= (-1*bound)), "torch.gradient's axis " + std::to_string(axis[i]) +" is out of bounds for array of dimension " + std::to_string(bound)  );
+    dimensions.insert( pos_axis);
+  }
+}
+
+std::vector<Tensor> gradient(const Tensor& self,
+                             TensorList spacing,
+                             IntArrayRef axis,
+                             int64_t edge_order) {
+  axis_check(axis, self.dim());
+  TORCH_CHECK(self.scalar_type() != ScalarType::Byte, "torch.gradient does not support uint8 as input.");
+  TORCH_CHECK( spacing.size() == axis.size(), "torch.gradient should receive axis and spacing size to be equal.");
+  TORCH_CHECK( edge_order == 1, "torch.gradient supports edge_order value only to be equal to 1.");
+
+  std::vector<Tensor> result;
+  for (const auto i : c10::irange(axis.size())) {
+    TORCH_CHECK( spacing[i].dim() < 2, "torch.gradient's argument spacing argument receive eiter scalar or 1d tensor");
+    int64_t direction = maybe_wrap_dim(axis[i], self.dim());
+
+    if (spacing[i].dim()==1) {
+      std::vector<int64_t> shape(self.dim(),1);
+      shape[ direction ] = -1;
+      auto ax_dx = spacing[i].diff(1,0);
+      auto dx1 = at::slice(ax_dx, 0, 0, -1);
+      auto dx2 = at::slice(ax_dx, 0, 1);
+      auto a = (   -dx2    / (dx1*(dx1+dx2)) ).reshape(shape);
+      auto b = ( (dx2-dx1) / (dx1*dx2)       ).reshape(shape);
+      auto c = (    dx1    / (dx2*(dx1+dx2)) ).reshape(shape);
+
+      auto center  = a*at::slice(self, direction, 0, -2) + b*at::slice(self, direction , 1, -1) + c*at::slice(self, direction ,2);
+      auto prepend = (at::slice(self, direction, 1, 2  ) - at::slice(self, direction, 0, 1   )) / ax_dx[0]  ;
+      auto append  = (at::slice(self, direction, -1    ) - at::slice(self, direction, -2, -1 )) / ax_dx[-1] ;
+      result.push_back(prepend_append_on_dim(center, prepend, append, direction));
+    } else {
+      auto ax_dx = spacing[i];
+      auto center  = (at::slice(self,direction, 2   ) - at::slice(self, direction, 0, -2 ) ) / (2.0 *ax_dx);
+      auto prepend = (at::slice(self,direction, 1, 2) - at::slice(self, direction, 0, 1  ) ) / ax_dx  ;
+      auto append  = (at::slice(self,direction, -1  ) - at::slice(self, direction, -2, -1) ) / ax_dx ;
+      result.push_back(prepend_append_on_dim(center, prepend, append, direction));
+    }
+  }
+  return result;
+}
+
+std::vector<Tensor> gradient(const Tensor& self,
+                             TensorList spacing,
+                             c10::optional<int64_t> dim,
+                             int64_t edge_order) {
+
+  std::vector<int64_t> axis;
+  if (!dim.has_value()) {
+    for (const auto i : c10::irange(spacing.size())) {
+      axis.push_back(i);
+    }
+    return self.gradient(spacing, IntArrayRef(axis), edge_order);
+  }
+  axis.push_back(dim.value());
+  return self.gradient(spacing, IntArrayRef(axis), edge_order);
+}
+
+std::vector<Tensor> gradient(const Tensor& self,
+                             double unit_size,
+                             IntArrayRef axis,
+                             int64_t edge_order) {
+  std::vector<Tensor> spacing(axis.size());
+  for (const auto i : c10::irange(spacing.size())) {
+    Tensor tensor_for_unit_size = at::zeros(1, self.options().dtype(at::kFloat));
+    tensor_for_unit_size[0] = unit_size;
+    spacing[i] = tensor_for_unit_size[0];
+  }
+  return self.gradient(spacing, axis, edge_order);
+}
+
+std::vector<Tensor> gradient(const Tensor& self,
+                             c10::optional<double> unit_size,
+                             c10::optional<int64_t> dim,
+                             int64_t edge_order) {
+  double unit_size_value = !unit_size.has_value() ? 1.0 : unit_size.value();
+  std::vector<Tensor> spacing(dim.has_value() ? 1 : self.dim() );
+  for (const auto i : c10::irange(spacing.size())) {
+    Tensor tensor_for_unit_size = at::zeros(1, self.options().dtype(at::kFloat));
+    tensor_for_unit_size[0] = unit_size_value;
+    spacing[i] = tensor_for_unit_size[0];
+  }
+  return self.gradient(spacing, dim, edge_order);
+}
+
 // ALL REDUCE #################################################################
 
 inline ScalarType get_dtype_from_result(Tensor& result, optional<ScalarType> dtype) {

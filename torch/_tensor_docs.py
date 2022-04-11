@@ -1489,6 +1489,12 @@ greater_equal(other) -> Tensor
 See :func:`torch.greater_equal`.
 """)
 
+add_docstr_all('gradient', r"""
+gradient(input, spacing=None, axis=None, edge_order=1) -> Tensor
+
+See :func:`torch.gradient`.
+""")
+
 add_docstr_all('greater_equal_', r"""
 greater_equal_(other) -> Tensor
 
