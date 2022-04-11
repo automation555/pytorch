@@ -9,7 +9,6 @@
 #include <torch/csrc/jit/runtime/interpreter.h>
 #include <torch/csrc/jit/runtime/variable_tensor_list.h>
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 C10_DECLARE_bool(torch_jit_enable_new_executor);
 
 namespace torch {
@@ -86,8 +85,6 @@ struct TORCH_API GraphExecutor {
 
   static size_t getDefaultNumBailOuts();
 
-  void debugFlushCompilationCache();
-
  private:
   std::shared_ptr<GraphExecutorImplBase> pImpl;
 };
@@ -106,8 +103,12 @@ TORCH_API bool getFusionGroupInlining();
 TORCH_API void debugSetAutodiffSubgraphInlining(bool state);
 TORCH_API std::shared_ptr<Graph> lastExecutedOptimizedGraph();
 
+enum class PROFILING_DATA_AGGREGATION_STRATEGY { SYMBOLIC_MERGE, TOP_ONE };
+
 TORCH_API std::atomic<bool>& getProfilingMode();
 TORCH_API std::atomic<bool>& getExecutorMode();
+TORCH_API std::atomic<PROFILING_DATA_AGGREGATION_STRATEGY>&
+getProfilingDataAggregationStrategy();
 TORCH_API std::atomic<size_t>& getNumProfiledRuns();
 TORCH_API std::atomic<size_t>& getBailoutDepth();
 TORCH_API bool IsNewExecutorEnabled();
@@ -128,8 +129,6 @@ struct TORCH_API GraphOptimizerEnabledGuard {
 namespace detail {
 
 GraphExecutor* getGradExecutor(Operation& op);
-
-GraphExecutor* getDifferentiableGraphOpExecutor(Operation& op);
 
 // for debugging information we expose a way to get the last actually
 // run graph. Previous approaches allowed querying the GraphExecutor
