@@ -5,11 +5,8 @@ These **needs** to be in global scope since Py2 doesn't support serializing
 static methods.
 """
 
-import collections
-import queue
-
 import torch
-from torch._six import string_classes
+from torch._six import queue, container_abcs, string_classes
 from . import MP_STATUS_CHECK_INTERVAL
 from torch._utils import ExceptionWrapper
 
@@ -50,13 +47,29 @@ def pin_memory(data):
         return data.pin_memory()
     elif isinstance(data, string_classes):
         return data
-    elif isinstance(data, collections.abc.Mapping):
+    elif isinstance(data, container_abcs.Mapping):
         return {k: pin_memory(sample) for k, sample in data.items()}
     elif isinstance(data, tuple) and hasattr(data, '_fields'):  # namedtuple
         return type(data)(*(pin_memory(sample) for sample in data))
-    elif isinstance(data, collections.abc.Sequence):
+    elif isinstance(data, container_abcs.Sequence):
         return [pin_memory(sample) for sample in data]
     elif hasattr(data, "pin_memory"):
         return data.pin_memory()
+    else:
+        return data
+
+
+def move_to_device(data, device):
+    r"""Attempts to send tensors contained in data to device."""
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    elif isinstance(data, string_classes):
+        return data
+    elif isinstance(data, container_abcs.Mapping):
+        return {k: move_to_device(sample, device) for k, sample in data.items()}
+    elif isinstance(data, tuple) and hasattr(data, '_fields'):  # namedtuple
+        return type(data)(*(move_to_device(sample, device) for sample in data))
+    elif isinstance(data, container_abcs.Sequence):
+        return [move_to_device(sample, device) for sample in data]
     else:
         return data
