@@ -354,7 +354,7 @@ PlanDef shouldStopWithCancelPlan() {
     op->set_type("Noop");
   }
   should_stop_net->set_name("should_stop_net");
-  should_stop_net->set_type("async_scheduling");
+  should_stop_net->set_type("deferrable_async_scheduling");
 
   auto* error_net = plan_def.add_network();
   error_net->set_name("error_net");
