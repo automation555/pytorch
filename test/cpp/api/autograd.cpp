@@ -129,29 +129,6 @@ TEST(AutogradAPITests, GradUnreachableTest) {
   ASSERT_THROWS_WITH(grad({x * 2}, {x, y}, {}, {}, false, false), "Set allow_unused=True");
 }
 
-TEST(CustomAutogradTest, GradUnreachableDiscoveryTest) {
-  // Test that certain nodes are not erroneously executed when an input
-  // is unreachable. See #39784
-  struct MyFunction : public Function<MyFunction> {
-    static Variable forward(AutogradContext *ctx, Variable var) {
-      return var;
-    }
-
-    static variable_list backward(AutogradContext *ctx, variable_list grad_output) {
-      ADD_FAILURE() << "This node should not be executed!";
-      return grad_output;
-    }
-  };
-
-  auto x = torch::randn(1, torch::requires_grad());
-  auto x1 = torch::randn(1);
-  auto x2 = MyFunction::apply(x + x1);
-
-  auto y = torch::randn(1, torch::requires_grad());
-  auto grad_res = torch::autograd::grad({x2}, {y}, {}, {}, false, true);
-  ASSERT_FALSE(grad_res[0].defined());
-}
-
 TEST(AutogradAPITests, RetainGrad) {
   auto input = torch::rand({1, 3}, torch::requires_grad());
   auto h1 = input * 3;
@@ -194,11 +171,11 @@ TEST(AutogradAPITests, AnomalyMode) {
   {
     WarningCapture warnings;
     // Double backward
-    auto x = torch::tensor({0.0}, torch::requires_grad());
+    auto x = torch::zeros({8}, torch::dtype(torch::kDouble).requires_grad(true));
     auto y = x.pow(1.5);
     auto gr =
-        grad({y}, {x}, {}, /*retain_graph=*/true, /*create_backward=*/true);
-    ASSERT_THROWS_WITH(grad({gr[0]}, {x}, {torch::tensor({0.0})});, "returned nan");
+        grad({y}, {x}, {torch::tensor({1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0})}, /*retain_graph=*/true, /*create_backward=*/true);
+    ASSERT_THROWS_WITH(grad({gr[0]}, {x}, {torch::tensor({0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0})});, "returned nan");
     auto msgs = warnings.messages();
     ASSERT_EQ(msgs.size(), 2);
     ASSERT_TRUE(
