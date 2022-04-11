@@ -5,7 +5,7 @@
 
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/dispatch/OperatorOptions.h>
-#include <ATen/core/op_registration/op_allowlist.h>
+#include <ATen/core/op_registration/op_whitelist.h>
 #include <ATen/core/stack.h>
 #include <c10/util/Exception.h>
 #include <torch/csrc/jit/frontend/function_schema_parser.h>
@@ -36,7 +36,7 @@ using OperationCreator = Operation (*)(const Node*);
 /*
  * Note: JIT relies on Operator instances having static lifetime, because
  * it for example stores a non-owning FunctionSchema* pointer in the Node class,
- * which points to the function schema stored in the Operator instance.
+ * which points to the function shema stored in the Operator instance.
  * Also, jit::Operator is meant to store more operator related information like
  * symbolic derivatives, which also requires them to have static lifetime
  * so that changes to symbolic derivatives are remembered.
@@ -73,7 +73,11 @@ struct TORCH_API Operator {
  public:
   Operator(c10::OperatorHandle opHandle, Operation operation)
       : op_(c10::make_left<C10Operator, JitOnlyOperator>(
-            C10Operator{opHandle, std::move(operation)})) {}
+            C10Operator{std::move(opHandle),
+                        ([operation = std::move(operation), opHandle](Stack* stack) {
+                          std::cout << "Calling opHandle " << opHandle.schema() << std::endl;
+                          operation(stack);
+                        })})) {}
 
   Operator(
       std::string schema,
@@ -81,8 +85,26 @@ struct TORCH_API Operator {
       c10::AliasAnalysisKind alias_analysis)
       : op_(c10::make_right<C10Operator, JitOnlyOperator>(JitOnlyOperator{
             c10::make_right<FunctionSchema, UnparsedFunctionSchema>(
-                UnparsedFunctionSchema{std::move(schema), alias_analysis}),
-            c10::make_left<Operation, OperationCreator>(std::move(op))})) {}
+                UnparsedFunctionSchema{schema, alias_analysis}),
+            c10::make_left<Operation, OperationCreator>([op = std::move(op), schema](Stack* stack) {
+              std::cout << "Calling op " << schema << std::endl;
+              op(stack);
+            })
+        })) {}
+
+  C10_DEPRECATED_MESSAGE(
+      "Please define your operator as taking a `Stack*` argument instead of `Stack&` and as returning `void` instead of `int`.")
+  Operator(
+      std::string schema,
+      std::function<int(Stack&)> op,
+      c10::AliasAnalysisKind alias_analysis)
+      : Operator(
+            std::move(schema),
+            [op = std::move(op), schema](Stack* stack) {
+              std::cout << "Calling &op" << schema << std::endl;
+              op(*stack);
+            },
+            alias_analysis) {}
 
   Operator(
       std::string schema,
@@ -91,7 +113,8 @@ struct TORCH_API Operator {
       : op_(c10::make_right<C10Operator, JitOnlyOperator>(JitOnlyOperator{
             c10::make_right<FunctionSchema, UnparsedFunctionSchema>(
                 UnparsedFunctionSchema{std::move(schema), alias_analysis}),
-            c10::make_right<Operation, OperationCreator>(op_creator)})) {}
+            c10::make_right<Operation, OperationCreator>(
+                std::move(op_creator))})) {}
 
   // Helper constructor to register `op` to run
   // run for _every_ IR Node where n.kind() == name, regardless of arguments.
@@ -104,7 +127,8 @@ struct TORCH_API Operator {
       : op_(c10::make_right<C10Operator, JitOnlyOperator>(JitOnlyOperator{
             c10::make_left<FunctionSchema, UnparsedFunctionSchema>(
                 varArgSchemaWithName(name, alias_analysis)),
-            c10::make_right<Operation, OperationCreator>(op_creator)})) {}
+            c10::make_right<Operation, OperationCreator>(
+                std::move(op_creator))})) {}
 
   Operation getOperation(const Node* node = nullptr) const {
     return op_.fold<Operation>(
