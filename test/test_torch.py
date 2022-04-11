@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import torch
 import numpy as np
 
@@ -4260,6 +4259,23 @@ class TestTorchDeviceType(TestCase):
                 RuntimeError,
                 'expected scalar_type Double but found Float'):
             torch.logcumsumexp(b, axis, out=inplace_out)
+
+    @dtypes(*(torch.testing.get_all_fp_dtypes(include_half=False, include_bfloat16=False)))
+    @dtypesIfCUDA(*(torch.testing.get_all_fp_dtypes()))
+    def test_log_matmul(self, device, dtype):
+        A = torch.randn(3, 1, 5, 4, device=device, dtype=dtype)
+        B = torch.randn(2, 1, 3, 4, 6, device=device, dtype=dtype)
+
+        expected = (A.double().exp() @ B.double().exp()).log().to(dtype)
+        result = torch.log_matmul(A, B)
+
+        rtol, atol = torch.testing._get_default_tolerance(expected, result)
+        if dtype == torch.half:
+            atol = 1e-3
+        elif dtype == torch.bfloat16:
+            atol = 1e-2
+            rtol = 1e-2
+        self.assertEqual(result, expected, atol=atol, rtol=rtol)
 
     def _test_diff_numpy(self, t, dims=None):
         # Helper for test_diff to compare with NumPy reference implementation
