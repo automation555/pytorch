@@ -17,9 +17,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.FloatBuffer;
-import org.pytorch.Device;
 import org.pytorch.IValue;
-import org.pytorch.MemoryFormat;
 import org.pytorch.Module;
 import org.pytorch.PyTorchAndroid;
 import org.pytorch.Tensor;
@@ -48,9 +46,9 @@ public class MainActivity extends AppCompatActivity {
                 @Override
                 public void run() {
                   handleResult(result);
-                  if (mBackgroundHandler != null) {
-                    mBackgroundHandler.post(mModuleForwardRunnable);
-                  }
+                  //if (mBackgroundHandler != null) {
+                  //  mBackgroundHandler.post(mModuleForwardRunnable);
+                  //}
                 }
               });
         }
@@ -125,25 +123,43 @@ public class MainActivity extends AppCompatActivity {
       for (int i = 0; i < shape.length; i++) {
         numElements *= shape[i];
       }
-      mInputTensorBuffer = Tensor.allocateFloatBuffer((int) numElements);
-      mInputTensor =
-          Tensor.fromBlob(
-              mInputTensorBuffer, BuildConfig.INPUT_TENSOR_SHAPE, MemoryFormat.CHANNELS_LAST);
+
+      //mInputTensorBuffer = Tensor.allocateFloatBuffer((int) numElements);
+      //for (int i = 0; i < numElements; i++) {
+      //  mInputTensorBuffer.put(i, 0.2f);
+      //}
+      //mInputTensor = Tensor.fromBlob(mInputTensorBuffer, BuildConfig.INPUT_TENSOR_SHAPE);
+
       PyTorchAndroid.setNumThreads(1);
-      mModule =
-          BuildConfig.USE_VULKAN_DEVICE
-              ? PyTorchAndroid.loadModuleFromAsset(
-                  getAssets(), BuildConfig.MODULE_ASSET_NAME, Device.VULKAN)
-              : PyTorchAndroid.loadModuleFromAsset(getAssets(), BuildConfig.MODULE_ASSET_NAME);
+      mModule = PyTorchAndroid.loadModuleFromAsset(getAssets(), BuildConfig.MODULE_ASSET_NAME);
     }
 
-    final long startTime = SystemClock.elapsedRealtime();
-    final long moduleForwardStartTime = SystemClock.elapsedRealtime();
-    final Tensor outputTensor = mModule.forward(IValue.from(mInputTensor)).toTensor();
-    final long moduleForwardDuration = SystemClock.elapsedRealtime() - moduleForwardStartTime;
-    final float[] scores = outputTensor.getDataAsFloatArray();
-    final long analysisDuration = SystemClock.elapsedRealtime() - startTime;
-    return new Result(scores, moduleForwardDuration, analysisDuration);
+    for (int ii = 0; ii < 20; ii++) {
+      float[] inputTensorArr = new float[3 * 112 * 112];
+      java.util.Arrays.fill(inputTensorArr, 0.2f);
+      Tensor tensor = Tensor.fromBlob(inputTensorArr, new long[]{1, 3, 112, 112});
+
+      //final Tensor outputTensor = mModule.forward(IValue.from(mInputTensor)).toTensor();
+      final Tensor outputTensor = mModule.forward(IValue.from(tensor)).toTensor();
+      final float[] scores = outputTensor.getDataAsFloatArray();
+
+      int n = scores.length;
+      android.util.Log.i("XXX", "scores.length:" + n);
+      final int B = 32;
+      int BN = n / B;
+      if (n % BN != 0) {
+        BN = BN + 1;
+      }
+      for (int i = 0; i < BN; i++) {
+        int to = java.lang.Math.min(n, (i + 1) * BN);
+        StringBuilder sb = new StringBuilder();
+        for (int j = 0; j < to; j++) {
+          sb.append(scores[i*BN + j]).append(' ');
+        }
+        android.util.Log.i("XXX", i + ": " + sb.toString());
+      }
+    }
+    return new Result(new float[]{}, 0, 0);
   }
 
   static class Result {
