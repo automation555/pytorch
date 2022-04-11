@@ -25,7 +25,6 @@
 #include <ostream>
 #include <string>
 #include <unordered_map>
-#include <utility>
 #include <vector>
 
 // This file contains classes which assist in desugaring Python style
@@ -88,13 +87,13 @@ using ModuleLookup = std::function<Module(const std::vector<std::string>&)>;
 struct TORCH_API Module : public Object {
   explicit Module(c10::QualifiedName class_name);
   Module(std::shared_ptr<CompilationUnit> cu, const c10::ClassTypePtr& type);
-  Module() = default;
+  Module() {}
   Module(
       c10::QualifiedName,
       std::shared_ptr<CompilationUnit> cu,
       bool shouldMangle = false);
   Module(ModulePtr module_value) : Object(std::move(module_value)) {}
-  ~Module() = default;
+  ~Module() {}
 
   void set_optimized(bool o) {
     TORCH_WARN(
@@ -134,7 +133,7 @@ struct TORCH_API Module : public Object {
 
   void register_attribute(
       const std::string& name,
-      const TypePtr& t,
+      const TypePtr t,
       IValue v,
       bool is_param = false,
       bool is_buffer = false) {
@@ -173,7 +172,8 @@ struct TORCH_API Module : public Object {
   std::string dump_to_str(
       bool print_method_bodies,
       bool print_attr_values,
-      bool print_param_values) const;
+      bool print_param_values,
+      int level) const;
 
   /// Enables "training" mode.
   void train(bool on = true);
@@ -221,13 +221,11 @@ struct TORCH_API Module : public Object {
 
   void _save_for_mobile(
       std::ostream& out,
-      const ExtraFilesMap& extra_files = ExtraFilesMap(),
-      bool save_mobile_debug_info = false) const;
+      const ExtraFilesMap& extra_files = ExtraFilesMap()) const;
 
   void _save_for_mobile(
       const std::string& filename,
-      const ExtraFilesMap& extra_files = ExtraFilesMap(),
-      bool save_mobile_debug_info = false) const;
+      const ExtraFilesMap& extra_files = ExtraFilesMap()) const;
 
   Module copy() const;
 
@@ -240,8 +238,6 @@ struct TORCH_API Module : public Object {
   Module clone(bool inplace = false) const;
 
   void clone_method(const Module& orig, const std::string& name);
-
-  IValue operator()(std::vector<IValue> inputs);
 
   template <typename... Types>
   IValue create_class(const c10::QualifiedName& name, Types&&... args) const {
@@ -266,7 +262,7 @@ struct TORCH_API Module : public Object {
       const std::unordered_map<TypePtr, TypePtr>& type_remap);
 
   c10::QualifiedName getNameForMethod(std::string basename) const {
-    return QualifiedName(*type()->name(), std::move(basename));
+    return QualifiedName(*type()->name(), basename);
   }
 
   void to_impl(
@@ -274,13 +270,6 @@ struct TORCH_API Module : public Object {
       const c10::optional<at::ScalarType>& dtype,
       bool non_blocking);
 };
-
-// C++ equivalent api of `torch.jit.freeze`. See documentation there for
-// details.
-TORCH_API Module freeze(
-    const Module& module,
-    c10::optional<std::vector<std::string>> preserved_attrs = c10::nullopt,
-    bool optimize_numerics = true);
 
 namespace detail {
 
@@ -449,7 +438,7 @@ struct slot_list_impl {
   }
 
   slot_list_impl(Module module, bool recurse, bool return_module)
-      : module_(module),
+      : module_(std::move(module)),
         recurse_(recurse),
         return_module_(return_module),
         size_(c10::nullopt) {
@@ -516,7 +505,7 @@ struct TORCH_API BufferPolicy {
   }
   static bool valid(const ClassTypePtr& typ, size_t i, const IValue& v) {
     return typ->getAttribute(i)->isSubtypeOf(TensorType::get()) &&
-        typ->is_buffer(i);
+        !typ->is_parameter(i);
   }
   static CONSTEXPR_EXCEPT_WIN_CUDA bool all_slots = false;
 };
@@ -556,7 +545,7 @@ struct NamedPolicy {
       }
       name = ss.str();
     }
-    return value_type{std::move(name), Policy::create(cursors, std::move(v))};
+    return value_type{std::move(name), Policy::create(cursors, v)};
   }
   static bool valid(const ClassTypePtr& t, size_t i, const IValue& v) {
     return Policy::valid(t, i, v);
