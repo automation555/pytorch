@@ -1,5 +1,4 @@
 import torch
-from torch._six import with_metaclass
 
 
 class VariableMeta(type):
@@ -7,8 +6,7 @@ class VariableMeta(type):
         return isinstance(other, torch.Tensor)
 
 
-# mypy doesn't understand torch._six.with_metaclass
-class Variable(with_metaclass(VariableMeta, torch._C._LegacyVariableBase)):  # type: ignore
+class Variable(torch._C._LegacyVariableBase, metaclass=VariableMeta):  # type: ignore
     pass
 
 

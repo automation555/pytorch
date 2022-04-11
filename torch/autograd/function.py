@@ -2,7 +2,6 @@ import torch
 import torch._C as _C
 from torch._C import _functions
 import torch.utils.hooks as hooks
-from torch._six import with_metaclass
 import functools
 import warnings
 from collections import OrderedDict
@@ -117,8 +116,8 @@ class FunctionMeta(type):
 
         return super(FunctionMeta, cls).__init__(name, bases, attrs)
 
-# mypy doesn't understand `with_metaclass` from torch._six
-class Function(with_metaclass(FunctionMeta, _C._FunctionBase, _ContextMethodMixin, _HookMixin)):  # type: ignore
+
+class Function(_C._FunctionBase, _ContextMethodMixin, _HookMixin, metaclass=FunctionMeta):  # type: ignore
     r"""Records operation history and defines formulas for differentiating ops.
 
     See the Note on extending the autograd engine for more details on how to use
@@ -173,8 +172,8 @@ class Function(with_metaclass(FunctionMeta, _C._FunctionBase, _ContextMethodMixi
         It must accept a context ctx as the first argument, followed by any
         number of arguments (tensors or other types).
 
-        The context can be used to store arbitrary data that can be then
-        retrieved during the backward pass.
+        The context can be used to store tensors that can be then retrieved
+        during the backward pass.
         """
         raise NotImplementedError("You must implement the forward function for custom"
                                   " autograd.Function.")
@@ -186,13 +185,10 @@ class Function(with_metaclass(FunctionMeta, _C._FunctionBase, _ContextMethodMixi
         This function is to be overridden by all subclasses.
 
         It must accept a context :attr:`ctx` as the first argument, followed by
-        as many outputs as the :func:`forward` returned (None will be passed in
-        for non tensor outputs of the forward function),
-        and it should return as many tensors, as there were inputs to
-        :func:`forward`. Each argument is the gradient w.r.t the given output,
-        and each returned value should be the gradient w.r.t. the
-        corresponding input. If an input is not a Tensor or is a Tensor not
-        requiring grads, you can just pass None as a gradient for that input.
+        as many outputs did :func:`forward` return, and it should return as many
+        tensors, as there were inputs to :func:`forward`. Each argument is the
+        gradient w.r.t the given output, and each returned value should be the
+        gradient w.r.t. the corresponding input.
 
         The context can be used to retrieve tensors saved during the forward
         pass. It also has an attribute :attr:`ctx.needs_input_grad` as a tuple
