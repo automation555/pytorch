@@ -33,7 +33,7 @@ class TORCH_API Reducer {
   Reducer(ExprHandle init, RI interaction) : init_(init.node()) {
     interaction_ = interaction;
   }
-  virtual ~Reducer() = default;
+  virtual ~Reducer() {}
 
   const Expr* initializer() const {
     return init_;
@@ -125,16 +125,25 @@ class TORCH_API Reducer {
 // to be reduced and interaction.
 //
 // This is intended to be expanded in the loopnest and not make it to codegen.
-class TORCH_API ReduceOp : public ExprNode<ReduceOp> {
+class ReduceOp : public ExprNode<ReduceOp> {
  public:
   ReduceOp(
+      const Buf* accum,
       const Expr* body,
-      std::vector<const Var*> reduce_args,
+      const std::vector<const Expr*>& output_args,
+      const std::vector<const Var*>& reduce_args,
       const Reducer& reducer)
       : ExprNodeBase(body->dtype()),
+        accumulator_(accum),
         body_(body),
-        reduce_args_(std::move(reduce_args)),
+        output_args_(output_args),
+        reduce_args_(reduce_args),
         reducer_(reducer) {}
+
+  // return the accumulation load expression.
+  const Buf* accumulator() const {
+    return accumulator_;
+  }
 
   // return the body expression which obtains the value to be reduced.
   const Expr* body() const {
@@ -146,13 +155,20 @@ class TORCH_API ReduceOp : public ExprNode<ReduceOp> {
     return reducer_;
   }
 
+  // returns variables associated with the output Tensor.
+  const std::vector<const Expr*>& output_args() const {
+    return output_args_;
+  }
+
   // returns variables associated with the axes of reduction.
   const std::vector<const Var*>& reduce_args() const {
     return reduce_args_;
   }
 
  private:
+  const Buf* accumulator_;
   const Expr* body_;
+  std::vector<const Expr*> output_args_;
   std::vector<const Var*> reduce_args_;
   const Reducer reducer_;
 };
@@ -164,31 +180,6 @@ class Sum : public Reducer {
           return a + b;
         }) {}
 };
-
-inline ExprHandle maximumVal(ScalarType type) {
-  switch (type) {
-#define MAX_BY_TYPE_CASE(Type, Name) \
-  case ScalarType::Name:             \
-    return ExprHandle(std::numeric_limits<Type>::max());
-    AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, MAX_BY_TYPE_CASE)
-#undef MAX_BY_TYPE_CASE
-    default:
-      throw unsupported_dtype();
-  }
-  return ExprHandle();
-}
-
-inline ExprHandle minimumVal(ScalarType type) {
-  switch (type) {
-#define MAX_BY_TYPE_CASE(Type, Name) \
-  case ScalarType::Name:             \
-    return ExprHandle(std::numeric_limits<Type>::min());
-    AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, MAX_BY_TYPE_CASE)
-#undef MAX_BY_TYPE_CASE
-    default:
-      throw unsupported_dtype();
-  }
-}
 
 class Maximum : public Reducer {
  public:

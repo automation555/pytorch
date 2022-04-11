@@ -1,11 +1,8 @@
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
-
 #include <ATen/record_function.h>
-#include <c10/util/FunctionRef.h>
 #include <torch/csrc/jit/codegen/fuser/interface.h>
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/jit_log.h>
-#include <torch/csrc/jit/jit_opt_limit.h>
 #include <torch/csrc/jit/passes/common_subexpression_elimination.h>
 #include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
@@ -18,11 +15,6 @@
 #include <torch/csrc/jit/tensorexpr/kernel.h>
 #include <torch/csrc/utils/memory.h>
 
-// NOLINTNEXTLINE
-C10_DEFINE_bool(
-    torch_jit_disable_cat,
-    false,
-    "disable aten::cat in TE fusion groups");
 namespace torch {
 namespace jit {
 
@@ -56,11 +48,15 @@ Value* broadcastSizes(at::ArrayRef<Value*> sizes, AliasDb* db) {
 }
 
 namespace tensorexpr {
+bool isSupported(Node* node) {
+  // For Block codegen we allow limited ops.
+  if (tensorexpr::getTEGenerateBlockCode()) {
+    return isSupportedForBlock(node);
+  }
 
-static const OperatorSet& supported_eltwise_set() {
   // clang-format off
   // breaks up the schema strings so they are no longer discoverable with ctrl-F
-    static const OperatorSet supported_eltwise_set{
+  static const OperatorSet supported_operator_set{
       "aten::add.Tensor(Tensor self, Tensor other, *, Scalar alpha=1) -> Tensor",
       "aten::add.Scalar(Tensor self, Scalar other, Scalar alpha=1) -> Tensor",
       "aten::_cast_Float(Tensor self, bool non_blocking) -> Tensor",
@@ -118,7 +114,6 @@ static const OperatorSet& supported_eltwise_set() {
       "aten::cosh(Tensor self) -> Tensor",
       "aten::sinh(Tensor self) -> Tensor",
       "aten::tanh(Tensor self) -> Tensor",
-      "aten::hardtanh(Tensor self, Scalar min_val=-1, Scalar max_val=1) -> Tensor",
       "aten::sqrt(Tensor self) -> Tensor",
       "aten::rsqrt(Tensor self) -> Tensor",
       "aten::abs(Tensor self) -> Tensor",
@@ -127,16 +122,19 @@ static const OperatorSet& supported_eltwise_set() {
       "aten::round(Tensor self) -> Tensor",
       "aten::trunc(Tensor self) -> Tensor",
       "aten::threshold(Tensor self, Scalar threshold, Scalar value) -> Tensor",
-      // "aten::masked_fill.Scalar(Tensor self, Tensor mask, Scalar value) -> Tensor",
-      // "aten::masked_fill.Tensor(Tensor self, Tensor mask, Tensor value) -> Tensor", TODO: requires 0-dim Tensor
+      "aten::masked_fill.Scalar(Tensor self, Tensor mask, Scalar value) -> Tensor",
+      "aten::masked_fill.Tensor(Tensor self, Tensor mask, Tensor value) -> Tensor",
+      "aten::nan_to_num(Tensor self, float? nan=None, float? posinf=None, float? neginf=None) -> Tensor",
       "aten::remainder.Scalar(Tensor self, Scalar other) -> Tensor",
       "aten::remainder.Tensor(Tensor self, Tensor other) -> Tensor",
+      "aten::cat(Tensor[] tensors, int dim=0) -> Tensor",
       "aten::sigmoid(Tensor self) -> Tensor",
       "aten::relu(Tensor self) -> Tensor",
       "aten::addcmul(Tensor self, Tensor tensor1, Tensor tensor2, *, Scalar value=1) -> Tensor",
       "aten::neg(Tensor self) -> Tensor",
       "aten::reciprocal(Tensor self) -> Tensor",
       "aten::expm1(Tensor self) -> Tensor",
+      "aten::unsqueeze(Tensor(a) self, int dim) -> Tensor(a)",
       "aten::frac(Tensor self) -> Tensor",
       // TODO: uncomment once we can handle rand+broadcasts
       // "aten::rand_like(Tensor self, *, ScalarType? dtype=None, Layout? layout=None, Device? device=None, bool? pin_memory=None, MemoryFormat? memory_format=None) -> Tensor",
@@ -154,40 +152,24 @@ static const OperatorSet& supported_eltwise_set() {
       "aten::where.ScalarSelf(Tensor condition, Scalar self, Tensor other) -> Tensor",
       "aten::where.ScalarOther(Tensor condition, Tensor self, Scalar other) -> Tensor",
       "aten::where.Scalar(Tensor condition, Scalar self, Scalar other) -> Tensor",
-      "aten::batch_norm(Tensor input, Tensor? weight, Tensor? bias, Tensor? running_mean, Tensor? running_var, bool training, float momentum, float eps, bool cudnn_enabled) -> Tensor",
       // TODO: enable other min/max variants, operators that can be both
       // elementwise or reductions:
       "aten::min.other(Tensor self, Tensor other) -> Tensor",
       "aten::max.other(Tensor self, Tensor other) -> Tensor",
       // TODO: enable slice, shape inference is not implemented for this op yet
-
-      "aten::conv2d(Tensor input, Tensor weight, Tensor? bias=None, int[2] stride=1, int[2] padding=0, int[2] dilation=1, int groups=1) -> Tensor",
   };
-  // clang-format on
-
-  return supported_eltwise_set;
-}
-
-bool isSupported(Node* node) {
-  // For Block codegen we allow limited ops.
-  if (tensorexpr::getTEGenerateBlockCode()) {
-    return isSupportedForBlock(node);
-  }
-
+  static const OperatorSet cuda_only_operator_set{
+      "aten::pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor",
+  };
   static const OperatorSet supported_reduction_set{
       "aten::sum(Tensor self, *, ScalarType? dtype=None) -> Tensor",
       "aten::sum.dim_IntList(Tensor self, int[1] dim, bool keepdim=False, *, ScalarType? dtype=None) -> Tensor",
       "aten::softmax.int(Tensor self, int dim , ScalarType? dtype=None) -> Tensor",
       "aten::log_softmax.int(Tensor self, int dim, ScalarType? dtype=None) -> Tensor",
   };
-  static const OperatorSet supported_misc_set{
-      "aten::cat(Tensor[] tensors, int dim=0) -> Tensor",
-      "aten::unsqueeze(Tensor(a) self, int dim) -> Tensor(a)",
-  };
   // clang-format on
 
-  if (node->isMemberOf(supported_eltwise_set()) ||
-      node->isMemberOf(supported_misc_set) ||
+  if (node->isMemberOf(supported_operator_set) ||
       (texpr_reductions_enabled && node->isMemberOf(supported_reduction_set))) {
     // We only insert guards on Tensor types, so we rely on the output
     // of a node being uniquely determined by its input types.
@@ -201,6 +183,25 @@ bool isSupported(Node* node) {
       }
     }
 
+    // Operator is only supported on CUDA.
+    if (node->isMemberOf(cuda_only_operator_set)) {
+      auto device = tensorexpr::pickDeviceType(node->inputs());
+      if (!device) {
+        device = tensorexpr::pickDeviceType(node->outputs());
+      }
+      if (!device || device->is_cpu()) {
+        return false;
+      }
+    }
+
+    if (node->kind() == aten::nan_to_num) {
+      for (Value* v : node->inputs()) {
+        if (v->type()->cast<OptionalType>()) {
+          return false;
+        }
+      }
+    }
+
     // non-const dtype / device
     for (auto arg_name : {"dtype", "device"}) {
       if (auto index = node->schema().argumentIndexWithName(arg_name)) {
@@ -208,10 +209,6 @@ bool isSupported(Node* node) {
           return false;
         }
       }
-    }
-
-    if (FLAGS_torch_jit_disable_cat && node->kind() == aten::cat) {
-      return false;
     }
 
     return true;
@@ -333,103 +330,6 @@ void RemoveTensorTypeSpecializations(std::shared_ptr<Graph>& graph) {
   removeTensorTypeSpecializations(graph->block());
 }
 
-void insertTypeGuard(
-    Node* guarded_node,
-    tensor_type_converter_t type_converter,
-    Symbol kind) {
-  GRAPH_DEBUG("Inserting a typecheck guard for a node", *guarded_node);
-  auto subgraph = SubgraphUtils::getSubgraph(guarded_node);
-
-  // Fixup types of the subgraph inputs
-  std::vector<Value*> inputs_to_check;
-  std::vector<TypePtr> guard_types;
-  for (Value* input : guarded_node->inputs()) {
-    // We only check inputs of the guarded nodes and expect user to infer
-    // intermediates and outputs shapes
-    if (!input->type()->cast<TensorType>()) {
-      continue;
-    }
-
-    // fusion outputs are already guarded
-    if (input->node()->kind() == prim::Constant ||
-        input->node()->kind() == prim::FusionGroup) {
-      continue;
-    }
-    inputs_to_check.push_back(input);
-    guard_types.push_back(type_converter(input->type()->expect<TensorType>()));
-  }
-  if (!inputs_to_check.size()) {
-    return;
-  }
-
-  // Add prim::TypeCheck node
-  //
-  // TypeCheck nodes  look like the following:
-  //   %out1 : Float(2, 3), %out2 : Int(10, 30), %types_match : bool =
-  //   prim::TypeCheck(%inp1 : Tensor, %inp2 : Tensor)
-  //
-  // They have N inputs whose types we are going to check and N+1 outputs. The
-  // first N outputs specify expected types and N+1-th output holds the result
-  // of the check (bool).
-  Node* typecheck_node =
-      guarded_node->owningGraph()
-          ->create(kind, inputs_to_check, inputs_to_check.size() + 1)
-          ->insertBefore(guarded_node);
-  typecheck_node->tys_(attr::types, guard_types);
-  Value* typecheck_result = typecheck_node->output(inputs_to_check.size());
-
-  std::unordered_map<Value*, Value*> typechecked_inputs;
-  for (size_t i = 0; i < typecheck_node->inputs().size(); ++i) {
-    typechecked_inputs[typecheck_node->input(i)] = typecheck_node->output(i);
-  }
-
-  // Fixup types of the typecheck node outputs, which are used by the op in
-  // execution
-  typecheck_node->output(inputs_to_check.size())->setType(BoolType::get());
-  for (size_t i = 0; i < typecheck_node->inputs().size(); ++i) {
-    typecheck_node->output(i)->setType(typecheck_node->input(i)->type());
-  }
-
-  // Insert if
-  auto versioning_if =
-      guarded_node->owningGraph()
-          ->create(prim::If, {typecheck_result}, guarded_node->outputs().size())
-          ->insertAfter(typecheck_node);
-  for (size_t idx = 0; idx < guarded_node->outputs().size(); ++idx) {
-    versioning_if->output(idx)->setType(guarded_node->output(idx)->type());
-    guarded_node->output(idx)->replaceAllUsesWith(versioning_if->output(idx));
-  }
-  auto true_block = versioning_if->addBlock();
-  auto false_block = versioning_if->addBlock();
-
-  // Fill in the false block. It should contain the unoptimized
-  // copy of the fused subgraph.
-  WithInsertPoint guard(false_block->return_node());
-  const auto subgraph_outputs = insertGraph(
-      *guarded_node->owningGraph(), *subgraph, guarded_node->inputs());
-  for (Value* output : subgraph_outputs) {
-    false_block->registerOutput(output);
-  }
-
-  // types get copied to the fallback graph, so remove specializations before
-  // replacing
-  removeTensorTypeSpecializations(false_block);
-  replaceBlockWithFallbackGraph(false_block, guarded_node->inputs());
-
-  // Fill in the true block. It has all inputs type-checked and its
-  // body should be the fusion group node.
-  guarded_node->moveBefore(true_block->return_node());
-  for (size_t idx = 0; idx < guarded_node->inputs().size(); ++idx) {
-    if (typechecked_inputs.count(guarded_node->input(idx))) {
-      guarded_node->replaceInput(
-          idx, typechecked_inputs.at(guarded_node->input(idx)));
-    }
-  }
-  for (Value* output : guarded_node->outputs()) {
-    true_block->registerOutput(output);
-  }
-}
-
 class TensorExprFuser {
  public:
   TensorExprFuser(
@@ -483,6 +383,18 @@ class TensorExprFuser {
     }
 
     for (Node* n : subgraph->nodes()) {
+      // XXX: Use of shape_of.emplace is crucial to the output shape
+      // optimization!
+      if (n->kind() == aten::cat) {
+        // This is a bit more involved, because we have to account for the case
+        // when inputs have different shapes, but fortunately those tensors are
+        // always outputs, and so we can simply avoid replacing their queries,
+        // because it won't help us.
+        continue;
+      }
+      if (n->kind() == prim::Constant) {
+        continue;
+      }
       if (n->kind() == prim::ConstantChunk) {
         Node* sizes_node = graph->insertNode(
             graph->create(prim::ChunkSizes, shape_of.at(n->input()), 2));
@@ -502,13 +414,6 @@ class TensorExprFuser {
         shape_of.emplace(outputs.at(outputs.size() - 1), last_size);
         continue;
       }
-
-      // we only support shape calculations for elementwise and
-      // a few exceptions (e.g. prim::ConstantChunk, etc) listed above
-      if (!n->isMemberOf(tensorexpr::supported_eltwise_set())) {
-        continue;
-      }
-
       auto tensor_inputs = filter(n->inputs(), [](Value* v) {
         return v->type()->isSubtypeOf(TensorType::get());
       });
@@ -607,10 +512,7 @@ class TensorExprFuser {
   // until there is nothing we can pull in.
   std::pair<graph_node_list::iterator, bool> createFusionGroup(
       Node* fusion_node) {
-    // Allow single-node groups containing conv2d, since we'll only select
-    // those in cases where the tensorexpr implementation is faster than the
-    // aten implementation.
-    if (min_group_size_ == 1 || fusion_node->kind() == aten::conv2d) {
+    if (min_group_size_ == 1) {
       fusion_node = getOrCreateTensorExprSubgraph(fusion_node);
     }
 
@@ -739,25 +641,13 @@ class TensorExprFuser {
     return num;
   }
 
-  bool hasConv(Block* block) {
-    for (Node* n : block->nodes()) {
-      if (n->kind() == aten::conv2d) {
-        return true;
-      }
-    }
-    return false;
-  }
-
   bool inlineIfTooSmall(Node* n) {
     if (n->kind() != prim::TensorExprGroup) {
       return false;
     }
     auto subgraph = SubgraphUtils::getSubgraph(n);
-    size_t num_nodes = blockSize(subgraph->block());
-    // Allow small subgraphs containing conv2d, since we'll only select those
-    // in cases where the tensorexpr implementation is faster than the aten
-    // implementation.
-    if (num_nodes < min_group_size_ && !hasConv(subgraph->block())) {
+    size_t num_modes = blockSize(subgraph->block());
+    if (num_modes < min_group_size_) {
       GRAPH_UPDATE("Fusion group is too small, unmerging: ", *n);
       SubgraphUtils::unmergeSubgraph(n);
       return true;
@@ -820,7 +710,7 @@ class TensorExprFuser {
       if (!v->isCompleteTensor()) {
         return false;
       }
-      if (*v->type()->castRaw<TensorType>()->dim() == 0) {
+      if (*v->type()->cast<TensorType>()->dim() == 0) {
         return false;
       }
     }
@@ -854,20 +744,12 @@ class TensorExprFuser {
       return canFuseOnCPU();
     } else if (device->is_cuda()) {
       return canFuseOnGPU();
-    } else if (device->is_xpu()) {
-      return false;
-    } else {
-      TORCH_CHECK_NOT_IMPLEMENTED(false, "Unknown device for tensorexpr fuser")
     }
+    throw std::runtime_error("Unknown device");
   }
 
   bool isFusableOnDevice(Node* node) {
     for (const auto& input : node->inputs()) {
-      if (input->node()->kind() == prim::ListConstruct) {
-        if (!isFusableOnDevice(input->node())) {
-          return false;
-        }
-      }
       if (!canFuseOnDevice(input)) {
         return false;
       }
@@ -890,15 +772,8 @@ class TensorExprFuser {
       "aten::__rshift__.Scalar(Tensor self, Scalar other) -> Tensor",
       "aten::__rshift__.Tensor(Tensor self, Tensor other) -> Tensor",
     };
-    static const OperatorSet cuda_only_operator_set{
-      "aten::pow.Tensor_Scalar(Tensor self, Scalar exponent) -> Tensor",
-    };
-    static const OperatorSet cpu_only_operator_set{
-      "aten::conv2d(Tensor input, Tensor weight, Tensor? bias=None, int[2] stride=1, int[2] padding=0, int[2] dilation=1, int groups=1) -> Tensor"
-    };
     // clang-format on
 
-    // Check types of input values.
     for (const Value* v : node->inputs()) {
       if (auto const& tt = v->type()->cast<TensorType>()) {
         auto const& st = tt->scalarType();
@@ -935,29 +810,6 @@ class TensorExprFuser {
         }
       }
     }
-
-    // Operator is only supported on CUDA.
-    if (node->isMemberOf(cuda_only_operator_set)) {
-      auto device = tensorexpr::pickDeviceType(node->inputs());
-      if (!device) {
-        device = tensorexpr::pickDeviceType(node->outputs());
-      }
-      if (!device || device->is_cpu()) {
-        return false;
-      }
-    }
-
-    // Operator is only supported on CPU.
-    if (node->isMemberOf(cpu_only_operator_set)) {
-      auto device = tensorexpr::pickDeviceType(node->inputs());
-      if (!device) {
-        device = tensorexpr::pickDeviceType(node->outputs());
-      }
-      if (!device || !device->is_cpu()) {
-        return false;
-      }
-    }
-
     if (node->kind() == aten::to) {
       // only support same-device conversion
       auto device = tensorexpr::pickDeviceType(node->inputs());
@@ -986,12 +838,7 @@ class TensorExprFuser {
         }
       }
     }
-    if (node->kind() == aten::conv2d) {
-      if (!tensorexpr::conv2dIsSupported(node)) {
-        GRAPH_DEBUG("Params of conv2d are not supported");
-        return false;
-      }
-    }
+
     return true;
   }
 
@@ -1028,20 +875,8 @@ class TensorExprFuser {
       REQ(tensorexpr::pickDeviceType(node->inputs()));
     }
 
-    // Only fuse aten::batch_norm when the parameter 'training' is false
-    if (node->kind() == aten::batch_norm) {
-      REQ(node->input(5)->node()->kind() == prim::Constant);
-      REQ(!toIValue(node->input(5)).value().toBool());
-    }
-
     REQ(tensorexpr::isSupported(node));
     REQ(typesAreSupported(node));
-
-    // A hook to optimizations limitter to allow bisecting the pass
-    if (!JIT_OPT_ALLOWED) {
-      return false;
-    }
-
     return true;
   }
 
@@ -1126,6 +961,99 @@ class TensorExprFuser {
   }
 #undef REQ
 
+  void guardFusionGroup(Node* fusion_group) {
+    GRAPH_DEBUG("Inserting a typecheck guard for a node", *fusion_group);
+    auto subgraph = SubgraphUtils::getSubgraph(fusion_group);
+
+    // Fixup types of the subgraph inputs
+    std::vector<Value*> inputs_to_check;
+    for (Value* input : fusion_group->inputs()) {
+      // We only check inputs of the fusion group and expect NNC to infer
+      // intermediates and outputs shapes
+      if (!input->type()->cast<TensorType>()) {
+        continue;
+      }
+
+      // fusion outputs are already guarded
+      if (input->node()->kind() == prim::Constant ||
+          input->node()->kind() == prim::FusionGroup) {
+        continue;
+      }
+      inputs_to_check.push_back(input);
+    }
+    if (!inputs_to_check.size()) {
+      return;
+    }
+
+    // Add prim::TypeCheck node
+    //
+    // TypeCheck nodes  look like the following:
+    //   %out1 : Float(2, 3), %out2 : Int(10, 30), %types_match : bool =
+    //   prim::TypeCheck(%inp1 : Tensor, %inp2 : Tensor)
+    //
+    // They have N inputs whose types we are going to check and N+1 outputs. The
+    // first N outputs specify expected types and N+1-th output holds the result
+    // of the check (bool).
+    Node* typecheck_node =
+        fusion_group->owningGraph()
+            ->create(
+                prim::TypeCheck, inputs_to_check, inputs_to_check.size() + 1)
+            ->insertBefore(fusion_group);
+    Value* typecheck_result = typecheck_node->output(inputs_to_check.size());
+
+    std::unordered_map<Value*, Value*> typechecked_inputs;
+    for (size_t i = 0; i < typecheck_node->inputs().size(); ++i) {
+      typechecked_inputs[typecheck_node->input(i)] = typecheck_node->output(i);
+    }
+
+    // Fixup types of the typecheck node outputs, which are used by the op in
+    // execution
+    typecheck_node->output(inputs_to_check.size())->setType(BoolType::get());
+    for (size_t i = 0; i < typecheck_node->inputs().size(); ++i) {
+      typecheck_node->output(i)->setType(typecheck_node->input(i)->type());
+    }
+
+    // Insert if
+    auto versioning_if =
+        fusion_group->owningGraph()
+            ->create(
+                prim::If, {typecheck_result}, fusion_group->outputs().size())
+            ->insertAfter(typecheck_node);
+    for (size_t idx = 0; idx < fusion_group->outputs().size(); ++idx) {
+      versioning_if->output(idx)->setType(fusion_group->output(idx)->type());
+      fusion_group->output(idx)->replaceAllUsesWith(versioning_if->output(idx));
+    }
+    auto true_block = versioning_if->addBlock();
+    auto false_block = versioning_if->addBlock();
+
+    // Fill in the false block. It should contain the unoptimized
+    // copy of the fused subgraph.
+    WithInsertPoint guard(false_block->return_node());
+    const auto subgraph_outputs = insertGraph(
+        *fusion_group->owningGraph(), *subgraph, fusion_group->inputs());
+    for (Value* output : subgraph_outputs) {
+      false_block->registerOutput(output);
+    }
+
+    // types get copied to the fallback graph, so remove specializations before
+    // replacing
+    removeTensorTypeSpecializations(false_block);
+    replaceBlockWithFallbackGraph(false_block, fusion_group->inputs());
+
+    // Fill in the true block. It has all inputs type-checked and its
+    // body should be the fusion group node.
+    fusion_group->moveBefore(true_block->return_node());
+    for (size_t idx = 0; idx < fusion_group->inputs().size(); ++idx) {
+      if (typechecked_inputs.count(fusion_group->input(idx))) {
+        fusion_group->replaceInput(
+            idx, typechecked_inputs.at(fusion_group->input(idx)));
+      }
+    }
+    for (Value* output : fusion_group->outputs()) {
+      true_block->registerOutput(output);
+    }
+  }
+
   // TODO: support constant tensors instead of setting them as input
   void liftTensorConstantsFromFusionGroups(Node* fusion_group) {
     auto subgraph = SubgraphUtils::getSubgraph(fusion_group);
@@ -1160,10 +1088,7 @@ class TensorExprFuser {
     for (Node* fusion_group : fusion_groups) {
       removeOutputsUsedOnlyInSize(fusion_group);
       liftTensorConstantsFromFusionGroups(fusion_group);
-      insertTypeGuard(
-          fusion_group,
-          [](const TensorTypePtr& t) { return t; },
-          prim::TypeCheck);
+      guardFusionGroup(fusion_group);
     }
   }
 
