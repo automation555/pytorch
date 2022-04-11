@@ -230,127 +230,6 @@ void lapackSvd(char jobz, int m, int n, scalar_t *a, int lda,
 template<class scalar_t>
 void lapackLuSolve(char trans, int n, int nrhs, scalar_t *a, int lda, int *ipiv, scalar_t *b, int ldb, int *info);
 
-template<class scalar_t>
-void lapackGels(char trans, int m, int n, int nrhs,
-    scalar_t *a, int lda, scalar_t *b, int ldb,
-    scalar_t *work, int lwork, int *info);
-
-template<class scalar_t, class value_t = scalar_t>
-void lapackGelsd(int m, int n, int nrhs,
-    scalar_t *a, int lda, scalar_t *b, int ldb,
-    value_t *s, value_t rcond, int *rank,
-    scalar_t* work, int lwork,
-    value_t *rwork, int* iwork, int *info);
-
-template<class scalar_t, class value_t = scalar_t>
-void lapackGelsy(int m, int n, int nrhs,
-    scalar_t *a, int lda, scalar_t *b, int ldb,
-    int *jpvt, value_t rcond, int *rank,
-    scalar_t *work, int lwork, value_t* rwork, int *info);
-
-template<class scalar_t, class value_t = scalar_t>
-void lapackGelss(int m, int n, int nrhs,
-    scalar_t *a, int lda, scalar_t *b, int ldb,
-    value_t *s, value_t rcond, int *rank,
-    scalar_t *work, int lwork,
-    value_t *rwork, int *info);
-
-enum class LapackLstsqDriverType : int64_t { Gels, Gelsd, Gelsy, Gelss};
-
-template<LapackLstsqDriverType, class scalar_t, class value_t = scalar_t>
-struct lapackLstsq_impl;
-
-template<class scalar_t, class value_t>
-struct lapackLstsq_impl<LapackLstsqDriverType::Gels, scalar_t, value_t> {
-  static void call(
-      char trans, int m, int n, int nrhs,
-      scalar_t *a, int lda, scalar_t *b, int ldb,
-      scalar_t *work, int lwork, int *info, // Gels flavor
-      int *jpvt, value_t rcond, int *rank, value_t* rwork, // Gelsy flavor
-      value_t *s, // Gelss flavor
-      int *iwork // Gelsd flavor
-      ) {
-    lapackGels<scalar_t>(
-        trans, m, n, nrhs,
-        a, lda, b, ldb,
-        work, lwork, info);
-  }
-};
-
-template<class scalar_t, class value_t>
-struct lapackLstsq_impl<LapackLstsqDriverType::Gelsy, scalar_t, value_t> {
-  static void call(
-      char trans, int m, int n, int nrhs,
-      scalar_t *a, int lda, scalar_t *b, int ldb,
-      scalar_t *work, int lwork, int *info, // Gels flavor
-      int *jpvt, value_t rcond, int *rank, value_t* rwork, // Gelsy flavor
-      value_t *s, // Gelss flavor
-      int *iwork // Gelsd flavor
-      ) {
-    lapackGelsy<scalar_t, value_t>(
-        m, n, nrhs,
-        a, lda, b, ldb,
-        jpvt, rcond, rank,
-        work, lwork, rwork, info);
-  }
-};
-
-template<class scalar_t, class value_t>
-struct lapackLstsq_impl<LapackLstsqDriverType::Gelsd, scalar_t, value_t> {
-  static void call(
-      char trans, int m, int n, int nrhs,
-      scalar_t *a, int lda, scalar_t *b, int ldb,
-      scalar_t *work, int lwork, int *info, // Gels flavor
-      int *jpvt, value_t rcond, int *rank, value_t* rwork, // Gelsy flavor
-      value_t *s, // Gelss flavor
-      int *iwork // Gelsd flavor
-      ) {
-    lapackGelsd<scalar_t, value_t>(
-        m, n, nrhs,
-        a, lda, b, ldb,
-        s, rcond, rank,
-        work, lwork,
-        rwork, iwork, info);
-  }
-};
-
-template<class scalar_t, class value_t>
-struct lapackLstsq_impl<LapackLstsqDriverType::Gelss, scalar_t, value_t> {
-  static void call(
-      char trans, int m, int n, int nrhs,
-      scalar_t *a, int lda, scalar_t *b, int ldb,
-      scalar_t *work, int lwork, int *info, // Gels flavor
-      int *jpvt, value_t rcond, int *rank, value_t* rwork, // Gelsy flavor
-      value_t *s, // Gelss flavor
-      int *iwork // Gelsd flavor
-      ) {
-    lapackGelss<scalar_t, value_t>(
-        m, n, nrhs,
-        a, lda, b, ldb,
-        s, rcond, rank,
-        work, lwork,
-        rwork, info);
-  }
-};
-
-template<LapackLstsqDriverType driver_type, class scalar_t, class value_t = scalar_t>
-void lapackLstsq(
-    char trans, int m, int n, int nrhs,
-    scalar_t *a, int lda, scalar_t *b, int ldb,
-    scalar_t *work, int lwork, int *info, // Gels flavor
-    int *jpvt, value_t rcond, int *rank, value_t* rwork, // Gelsy flavor
-    value_t *s, // Gelss flavor
-    int *iwork // Gelsd flavor
-    ) {
-  lapackLstsq_impl<driver_type, scalar_t, value_t>::call(
-      trans, m, n, nrhs,
-      a, lda, b, ldb,
-      work, lwork, info,
-      jpvt, rcond, rank, rwork,
-      s,
-      iwork);
-}
-
 template<> void lapackSolve<c10::complex<double>>(int n, int nrhs, c10::complex<double> *a, int lda, int *ipiv, c10::complex<double> *b, int ldb, int *info) {
   zgesv_(&n, &nrhs, reinterpret_cast<std::complex<double>*>(a), &lda, ipiv, reinterpret_cast<std::complex<double>*>(b), &ldb, info);
 }
@@ -918,8 +797,7 @@ static Tensor& linalg_solve_out_info(Tensor& result, Tensor& infos, const Tensor
   // - 2-dimensional (2D) tensor or batch of 2D tensors (matrix case)
   // original torch.solve supported only the matrix case, while NumPy works for both cases
   // for the batched input we need to be able to distinguish them
-  auto expected_batched_rhs_shape = IntArrayRef(input.sizes().data(), input.dim()-1);  // input.shape[:-1]
-  bool vector_case = other.dim() == 1 || (input.dim()-1 == other.dim() && other.sizes().equals(expected_batched_rhs_shape));
+  bool vector_case = linalg_solve_is_vector_rhs(input, other);
 
   bool is_batched_column_major = false;
   if (vector_case) {
@@ -929,7 +807,7 @@ static Tensor& linalg_solve_out_info(Tensor& result, Tensor& infos, const Tensor
   }
 
   // if 'other' is a batch of 2D tensors, then 'input' can be non-batched and will be broadcasted
-  auto expected_shape = expected_batched_rhs_shape;
+  auto expected_shape = IntArrayRef(input.sizes().data(), input.dim() - 1);  // input.shape[:-1]
   if (!vector_case && other.dim() > 2) {
     expected_shape = other.sizes();
   }
@@ -1020,8 +898,7 @@ Tensor& linalg_solve_out(const Tensor& input, const Tensor& other, Tensor& resul
 
   // Now check LAPACK/MAGMA error codes
   // batchCheckErrors(Tensor, char*) calls 'infos = infos.to(kCPU)'
-  auto expected_batched_rhs_shape = IntArrayRef(input.sizes().data(), input.dim()-1);  // input.shape[:-1]
-  bool vector_case = other.dim() == 1 || (input.dim()-1 == other.dim() && other.sizes().equals(expected_batched_rhs_shape));
+  bool vector_case = linalg_solve_is_vector_rhs(input, other);
   if (vector_case ? result.dim() > 1 : result.dim() > 2) {
     batchCheckErrors(infos, "linalg_solve");
   } else {
@@ -2726,481 +2603,398 @@ std::tuple<Tensor&, Tensor&, Tensor&> linalg_svd_out(const Tensor& self, bool fu
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ lstsq ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-#ifdef USE_LAPACK
-template <class scalar_t, class value_t, class func_t>
-struct LapackLstsqHelper {
-  using self_type = LapackLstsqHelper;
+DEFINE_DISPATCH(lstsq_stub);
 
-  // we use `driver_type` to decide how to initialize
-  // relevant to specific drivers parameters
-  LapackLstsqDriverType driver_type;
-  func_t driver;
+/*
+  Solves a least squares problem. That is minimizing the squared Frobenius norm of |B - A X|.
 
-  bool is_complex;
-  at::ScalarType scalar_type;
-  IntArrayRef batch_shape;
-  // the strides below store the offsets to different lstsq problems in a batch
-  int64_t a_stride;
-  int64_t b_stride;
-  int64_t s_stride;
+  Input args:
+  * 'input' - Tensor containing batches of m-by-n matrix A.
+  * 'other' - Tensor containing batches of max(m, n)-by-nrhs matrix B.
+  * 'cond' - relative tolerance for determining rank of A.
+  * 'driver' - the name of the LAPACK driver that is used to compute the solution.
+  Output args (modified in-place):
+  * 'solution' - Tensor to store the solution matrix X.
+  * 'residuals' - Tensor to store values of the residual sum of squares for each column of the solution.
+  * 'rank' - Tensor to store the rank of A.
+  * 'singular_values' - Tensor to store the singular values of A.
+  * 'infos' - Tensor to store error codes of linear algebra math library.
 
-  // variables below correspond to LAPACK inputs.
-  // for more information check the LAPACK documentation on
-  // `?gels`, `?gelsy`, `?gelsd`, `?gelss`
-  char trans;
-  int m;
-  int n;
-  int nrhs;
-  scalar_t* a_working_ptr = nullptr;
-  int lda;
-  scalar_t* b_working_ptr = nullptr;
-  int ldb;
-  Tensor work;
-  scalar_t work_opt; // used to decide the opt `work` size with lwork=-1
-  scalar_t* work_ptr = &work_opt;
-  int lwork = -1; // default value to decide the opt size for workspace arrays
-  int* infos_data = nullptr;
-  int* infos_working_ptr = nullptr;
-  Tensor jpvt;
-  int* jpvt_ptr = nullptr;
-  value_t rcond;
-  int rank_opt;
-  int64_t* rank_data = nullptr;
-  int64_t* rank_working_ptr = nullptr;
-  Tensor rwork;
-  value_t rwork_opt; // used to decide the opt `rwork` size with lwork=-1
-  value_t* rwork_ptr = &rwork_opt;
-  value_t* s_data = nullptr;
-  value_t* s_working_ptr = nullptr;
-  Tensor iwork;
-  int iwork_opt; // used to decide the opt `iwork` size with lwork=-1
-  int* iwork_ptr = &iwork_opt;
+  For further details, please see the LAPACK documentation for GELS/GELSY/GELSS/GELSD routines.
+*/
+static void linalg_lstsq_out_info(
+    Tensor& solution,
+    Tensor& residuals,
+    Tensor& rank,
+    Tensor& singular_values,
+    Tensor& infos,
+    const Tensor& input,
+    const Tensor& other,
+    double rcond,
+    std::string& driver) {
+  // These internal asserts make explicit the assumptions in the implementation
+  // Error check with the actual error messages are done on the higher level of
+  // the hierarchy of calls
+  TORCH_INTERNAL_ASSERT(input.dim() >= 2);
+  TORCH_INTERNAL_ASSERT(other.dim() >= 1);
 
-  LapackLstsqHelper(LapackLstsqDriverType driver_type, func_t driver)
-    : driver_type{driver_type}, driver{driver}
-  {}
+  auto dim_diff = input.dim() - other.dim();
+  TORCH_INTERNAL_ASSERT(0 <= dim_diff && dim_diff <= 1);
 
-  self_type& set_trans(char trans) { this->trans = trans; return *this; }
-  self_type& set_m(int m) { this->m = m; return *this; }
-  self_type& set_n(int n) { this->n = n; return *this; }
-  self_type& set_nrhs(int nrhs) { this->nrhs = nrhs; return *this; }
-  self_type& set_a(const Tensor& a) {
-    this->a_working_ptr = a.data_ptr<scalar_t>();
-    this->scalar_type = a.scalar_type();
-    this->is_complex = a.is_complex();
-    // `a` is persistent, should be safe to store its properties in references.
-    this->batch_shape = IntArrayRef(a.sizes().data(), a.dim() - 2);
-    this->a_stride = matrixStride(a);
-    return *this;
+  TORCH_INTERNAL_ASSERT(input.scalar_type() == other.scalar_type());
+  TORCH_INTERNAL_ASSERT(input.device() == other.device());
+
+  TORCH_INTERNAL_ASSERT(solution.scalar_type() == input.scalar_type());
+  TORCH_INTERNAL_ASSERT(solution.device() == input.device());
+
+  TORCH_INTERNAL_ASSERT(residuals.device() == input.device());
+
+  TORCH_INTERNAL_ASSERT(rank.scalar_type() == at::kLong);
+  TORCH_INTERNAL_ASSERT(rank.device() == input.device());
+
+  auto real_dtype = toValueType(input.scalar_type());
+  TORCH_INTERNAL_ASSERT(singular_values.scalar_type() == real_dtype);
+  TORCH_INTERNAL_ASSERT(singular_values.device() == input.device());
+
+  TORCH_INTERNAL_ASSERT(infos.scalar_type() == at::kInt);
+  TORCH_INTERNAL_ASSERT(infos.device() == input.device());
+  TORCH_INTERNAL_ASSERT(infos.numel() == std::max<int64_t>(1, batchCount(input)));
+  TORCH_INTERNAL_ASSERT(infos.is_contiguous());
+
+  bool vector_case = linalg_solve_is_vector_rhs(input, other);
+  // we need to unsqueeze 'other' because 2-dimensional tensors are expected in the implementation
+  Tensor other_2d = vector_case ? other.unsqueeze(-1) : other;
+
+  TORCH_INTERNAL_ASSERT(input.size(-2) == other_2d.size(-2));
+
+  std::vector<int64_t> expected_solution_shape = broadcast_batch_size(input, other_2d, input.dim() - 2);
+  // the actual shape of the solution returned is (*, n,) or (*, n, nrhs)
+  // but LAPACK requires extra dimensions to store raw residuals
+  // so the expected shape is (*, max(m, n),) or (*, max(m, n), nrhs)
+  auto m = input.size(-2);
+  auto n = input.size(-1);
+  auto nrhs = other.size(-1);
+  expected_solution_shape.push_back(std::max(m, n));
+  if (!vector_case) {
+    expected_solution_shape.push_back(nrhs);
   }
-  self_type& set_lda(int lda) { this->lda = lda; return *this; }
-  self_type& set_b(const Tensor& b) {
-    this->b_working_ptr = b.data_ptr<scalar_t>();
-    this->b_stride = matrixStride(b);
-    return *this;
-  }
-  self_type& set_ldb(int ldb) { this->ldb = ldb; return *this; }
-  self_type& set_work() {
-    lwork = std::max<int>(1, real_impl<scalar_t, value_t>(work_opt));
-    work = at::empty({lwork}, scalar_type);
-    work_ptr = work.data_ptr<scalar_t>();
-    return *this;
-  }
-  self_type& set_jpvt() {
-    // handle `jpvt` workspace array (relevant for `?gelsy` which uses
-    // a QR factorization with column pivoting).
-    if (LapackLstsqDriverType::Gelsy == driver_type) {
-      jpvt = at::empty({std::max<int64_t>(1, n)}, at::kInt);
-      jpvt_ptr = jpvt.data_ptr<int>();
+
+  // if 'solution' has no elements we can modify it
+  if (solution.numel() == 0) {
+    if (vector_case) {
+      solution.resize_(expected_solution_shape, MemoryFormat::Contiguous);
+    } else {
+      auto shape_transposed = expected_solution_shape;
+      std::swap(shape_transposed.end()[-1], shape_transposed.end()[-2]);
+      solution.resize_(shape_transposed, MemoryFormat::Contiguous);
+      solution.transpose_(-2, -1);
     }
-    return *this;
-  }
-  self_type& set_rcond(double cond) { this->rcond = static_cast<value_t>(cond); return *this; }
-  self_type& set_rank(Tensor& rank) {
-    // only `?gels` is not rank-revealing
-    if (LapackLstsqDriverType::Gels != driver_type) {
-      TORCH_INTERNAL_ASSERT(rank.sizes().equals(batch_shape));
-      rank_data = rank.data_ptr<int64_t>();
-      rank_working_ptr = rank_data;
-    }
-    return *this;
-  }
-  self_type& set_rwork() {
-    // `rwork` only makes sense for complex flavors and
-    // `?gelsy`, `?gelsd` and `?gelss` drivers
-    if (!this->is_complex || LapackLstsqDriverType::Gels == driver_type) {
-      return *this;
-    }
-
-    int64_t rwork_len;
-    switch (this->driver_type) {
-      case LapackLstsqDriverType::Gelsy:
-        rwork_len = std::max<int64_t>(1, 2 * n);
-        break;
-      case LapackLstsqDriverType::Gelss:
-        rwork_len = std::max<int64_t>(1, 5 * std::min(m, n));
-        break;
-      // case LapackLstsqDriverType::Gelsd:
-      default:
-        rwork_len = std::max<int64_t>(1, rwork_opt);
-    }
-    rwork = at::empty({rwork_len}, c10::toValueType(scalar_type));
-    rwork_ptr = rwork.data_ptr<value_t>();
-    return *this;
-  }
-  self_type& set_s(Tensor& singular_values) {
-    // `?gelsd` and `?gelss` are SVD-based
-    // so we can extract singular values from them.
-    if (LapackLstsqDriverType::Gelsd == driver_type
-      || LapackLstsqDriverType::Gelss == driver_type) {
-      auto s_shape = batch_shape.vec();
-      s_shape.push_back(std::min(m, n));
-      TORCH_INTERNAL_ASSERT(singular_values.sizes().equals(s_shape));
-      s_data = singular_values.data_ptr<value_t>();
-      s_working_ptr = s_data;
-      s_stride = singular_values.size(-1);
-    }
-    return *this;
-  }
-  self_type& set_iwork() {
-    // handle `iwork` workspace array (relevant only for `?gelsd`)
-    if (LapackLstsqDriverType::Gelsd == driver_type) {
-      iwork = at::empty({std::max<int>(1, iwork_opt)}, at::kInt);
-      iwork_ptr = iwork.data_ptr<int>();
-    }
-    return *this;
-  }
-  self_type& set_infos(Tensor& infos) {
-    infos_data = infos.data_ptr<int>();
-    infos_working_ptr = infos_data;
-    return *this;
   }
 
-  self_type& call_driver() {
-    driver(trans, m, n, nrhs,
-      a_working_ptr, lda,
-      b_working_ptr, ldb,
-      work_ptr, lwork,
-      infos_working_ptr,
-      jpvt_ptr,
-      rcond,
-      &rank_opt,
-      rwork_ptr,
-      s_working_ptr,
-      iwork_ptr);
-    // we want the output `rank` Tensor to be of type int64_t,
-    // however LAPACK accepts int. That is why we use an integer
-    // variable that then gets promoted and written into `rank`.
-    // We use this approach over a tensor cast for better performance.
-    if (rank_working_ptr) {
-      *rank_working_ptr = static_cast<int64_t>(rank_opt);
-    }
-    return *this;
+  // if 'solution' is non-empty it must have the expected shape
+  TORCH_INTERNAL_ASSERT(solution.sizes().equals(expected_solution_shape));
+
+  // 'solution' must be in batched column major order (Fortran contiguous) for 2D inputs
+  // or C contiguous for 1D input
+  if (vector_case) {
+    TORCH_INTERNAL_ASSERT(solution.is_contiguous());
+  } else {
+    TORCH_INTERNAL_ASSERT(solution.transpose(-2, -1).is_contiguous());
   }
 
-  self_type& next() {
-    // advance to the next problem in a batch.
-    // Should only be used if a.shape[:-2] == b.shape[:-2]
-    a_working_ptr += a_stride;
-    b_working_ptr += b_stride;
-    rank_working_ptr = rank_working_ptr ? rank_working_ptr + 1 : nullptr;
-    s_working_ptr = s_working_ptr ? s_working_ptr + s_stride : nullptr;
-    return *this;
+  // for 1-dimensional 'other', we need to unsqueeze the 'solution' before passing to "apply_solve"
+  if (vector_case) {
+    solution = solution.unsqueeze_(-1);
   }
 
-  self_type& next(scalar_t* a_working_ptr, scalar_t* b_working_ptr,
-    int64_t a_linear_batch_idx) {
-    // advance to the next problem in a batch.
-    // Designed to be used with the `batch_iterator_with_broadcasting` method.
-    this->a_working_ptr = a_working_ptr;
-    this->b_working_ptr = b_working_ptr;
-    rank_working_ptr = rank_working_ptr ? &rank_data[a_linear_batch_idx] : nullptr;
-    s_working_ptr = s_working_ptr ? &s_data[a_linear_batch_idx * s_stride] : nullptr;
-    infos_working_ptr = &infos_data[a_linear_batch_idx];
-    return *this;
+  // _linalg_lstsq_helper_ performs calculations in-place and 'solution' must be a copy of other_2d
+  solution.narrow(-2, 0, other_2d.size(-2)).copy_(other_2d);
+
+  // if 'rank' is empty we might resize it
+  auto input_batch_shape = IntArrayRef(input.sizes().cbegin(), input.sizes().cend() - 2);
+  if (rank.numel() == 0 && driver != "gels") { // gels driver doesn't set 'rank'
+    rank.resize_(input_batch_shape, MemoryFormat::Contiguous);
   }
-};
 
-// we use `enum class LapackLstsqDriverType` as keys in an unordered_map.
-// Clang5 and Gcc5 do not support std::hash for enum classes, hence
-// we provide our own hash function.
-struct LapackLstsqDriverTypeHash {
-  std::size_t operator()(const LapackLstsqDriverType& driver_type) const {
-    return static_cast<std::size_t>(driver_type);
+  // if 'rank' is non-empty it must have the expected shape and be contiguous
+  if (driver != "gels") {
+    TORCH_INTERNAL_ASSERT(rank.sizes().equals(input_batch_shape));
+    TORCH_INTERNAL_ASSERT(rank.is_contiguous());
   }
-};
-#endif
 
-Tensor& _lstsq_helper_cpu(
-    Tensor& b, Tensor& rank, Tensor& singular_values, Tensor& infos, const Tensor& a, double cond, std::string driver_name) {
-#ifndef USE_LAPACK
-  TORCH_CHECK(false, "torch.linalg.lstsq: LAPACK library not found in compilation");
-#else
+  // if 'singular_values' is empty we might resize it
+  auto singular_values_shape = input_batch_shape.vec();
+  singular_values_shape.push_back(std::min(m, n));
+  if (singular_values.numel() == 0 && (driver == "gelsd" || driver == "gelss")) {
+    singular_values.resize_(singular_values_shape, MemoryFormat::Contiguous);
+  }
 
-  static auto driver_string_to_type = std::unordered_map<std::string, LapackLstsqDriverType>({
-    {"gels", LapackLstsqDriverType::Gels},
-    {"gelsy", LapackLstsqDriverType::Gelsy},
-    {"gelsd", LapackLstsqDriverType::Gelsd},
-    {"gelss", LapackLstsqDriverType::Gelss}
-  });
-  auto driver_type = driver_string_to_type[driver_name];
+  // if 'singular_values' is non-empty it must have the expected shape and be contiguous
+  if (driver == "gelsd" || driver == "gelss") {
+    TORCH_INTERNAL_ASSERT(singular_values.sizes().equals(singular_values_shape));
+    TORCH_INTERNAL_ASSERT(singular_values.is_contiguous());
+  }
 
-  AT_DISPATCH_FLOATING_AND_COMPLEX_TYPES(a.scalar_type(), "torch.linalg.lstsq_cpu", [&] {
-    using value_t = typename c10::scalar_value_type<scalar_t>::type;
+  // 'input' is modified in-place so we need a column-major copy
+  auto input_working_copy = copyBatchedColumnMajor(input);
 
-    auto driver = lapackLstsq<LapackLstsqDriverType::Gelsd, scalar_t, value_t>;
-    static auto driver_type_to_func
-      = std::unordered_map<LapackLstsqDriverType, decltype(driver), LapackLstsqDriverTypeHash>({
-      {LapackLstsqDriverType::Gels, lapackLstsq<LapackLstsqDriverType::Gels, scalar_t, value_t>},
-      {LapackLstsqDriverType::Gelsy, lapackLstsq<LapackLstsqDriverType::Gelsy, scalar_t, value_t>},
-      {LapackLstsqDriverType::Gelsd, lapackLstsq<LapackLstsqDriverType::Gelsd, scalar_t, value_t>},
-      {LapackLstsqDriverType::Gelss, lapackLstsq<LapackLstsqDriverType::Gelss, scalar_t, value_t>}
-    });
-    driver = driver_type_to_func[driver_type];
+  // now the actual call that computes the result in-place (apply_lstsq)
+  lstsq_stub(input.device().type(), input_working_copy, solution, rank, singular_values, infos, rcond, driver);
 
-    auto m = a.size(-2);
-    auto n = a.size(-1);
-    auto nrhs = b.size(-1);
-    auto driver_helper = LapackLstsqHelper<scalar_t, value_t, decltype(driver)>(driver_type, driver)
-      .set_trans('N')
-      .set_m(m)
-      .set_n(n)
-      .set_nrhs(nrhs)
-      .set_a(a)
-      .set_lda(std::max<int64_t>(1, m))
-      .set_b(b)
-      .set_ldb(std::max<int64_t>(1, std::max(m, n)))
-      .set_jpvt()
-      .set_rcond(cond)
-      .set_rank(rank)
-      .set_s(singular_values)
-      .set_infos(infos)
-      .call_driver() // initial call to deduce optimal sizes for workspace arrays
-      .set_work()
-      .set_rwork()
-      .set_iwork();
-
-    // If batch dims for `a` and `b` are equivalent, i.e.
-    // a.shape[:-2] == b.shape[:-2], the call to `batch_iterator_with_broadcasting`
-    // is equivalent to:
-    // for (int64_t i = 0; i < batchCount(a); ++i) {
-    //   driver_helper.call_driver().next();
-    //   if (driver_helper.info) {
-    //     break;
-    //   }
-    // }
-    // which does correspond to a batch-wise iteration for methods that do not
-    // broadcast with size expansion over batch dimensions.
-    batch_iterator_with_broadcasting<scalar_t>(a, b,
-      [&](scalar_t* a_working_ptr, scalar_t* b_working_ptr,
-        int64_t a_linear_batch_idx) {
-        driver_helper.next(a_working_ptr, b_working_ptr, a_linear_batch_idx)
-          .call_driver();
+  // residuals are available only if m > n and drivers other than gelsy used
+  if (m > n && driver != "gelsy") {
+    // if the driver is gelss or gelsd then the residuals are available only if rank == n
+    bool compute_residuals = true;
+    if (driver != "gels") {
+      if (input.dim() == 2) {
+        compute_residuals = (rank.item().toInt() == n);
+      } else {
+        // if any of the computed ranks in equal to n then do the computation of residuals
+        compute_residuals = at::any(rank == n).item().toBool();
       }
-    );
-  });
-  return b;
-#endif
+    }
+    if (compute_residuals) {
+      // LAPACK stores residuals data for postprocessing in rows n:(m-n)
+      auto raw_residuals = solution.narrow(/*dim=*/-2, /*start=*/n, /*length*/m - n);
+      if (raw_residuals.is_complex()) {
+        raw_residuals.mul_(raw_residuals.conj());
+        raw_residuals = at::real(raw_residuals);
+      } else {
+        raw_residuals.pow_(2);
+      }
+      at::sum_out(residuals, raw_residuals, /*dim=*/-2, /*keepdim=*/false, /*dtype*/real_dtype);
+
+      // if at::any(rank != n) then the residuals for i-th batch with rank[i] != n are not available
+      // and the computed result is not meaningful, we fill it with INFINITY as we cannot resize it to (0,) shape
+      if (driver != "gels") {
+        residuals.masked_fill_((rank != n).unsqueeze_(-1), INFINITY);
+      }
+    }
+  }
+  solution = solution.narrow(/*dim=*/-2, /*start=*/0, /*length*/n);
+  if (m == 0) {
+    solution.zero_();
+  }
+
+  // for 1-dimensional 'other', we need to squeeze the solution after "apply_lstsq"
+  if (vector_case) {
+    solution = solution.squeeze_(-1);
+  }
 }
 
-std::tuple<Tensor, Tensor, Tensor, Tensor> linalg_lstsq(
-    const Tensor& self, const Tensor& b,
-    c10::optional<double> cond,
-    c10::optional<std::string> driver) {
-  TORCH_CHECK(
-    self.device().type() == b.device().type(),
-    "torch.linalg.lstsq: input tensors should be on the same device"
-  );
-  TORCH_CHECK(
-    self.scalar_type() == b.scalar_type(),
-    "torch.linalg.lstsq: input tensors should be of the same dtype"
-  );
-  TORCH_CHECK(
-    self.dim() >= 2,
-    "torch.linalg.lstsq: input `self` Tensor should be at least 2D"
-  );
-  TORCH_CHECK(
-    b.dim() >= 1,
-    "torch.linalg.lstsq: input `b` Tensor should be at least 1D"
-  );
-  auto dim_diff = self.dim() - b.dim();
-  TORCH_CHECK(
-    0 <= dim_diff && dim_diff <= 1,
-    "torch.linalg.lstsq: self.dim() must be greater or equal to b.dim() and "
-    "(self.dim() - b.dim()) <= 1"
-  );
-  Tensor b_2d = dim_diff ? b.unsqueeze(-1) : b;
-  TORCH_CHECK(
-    self.size(-2) == b_2d.size(-2),
-    dim_diff ? "torch.linalg.lstsq: self.size(-2) should match b.size(-1)" :
-      "torch.linalg.lstsq: self.size(-2) should match b.size(-2)"
-  );
-
-  // if `driver` is empty, we use `driver_opt` to be set to
-  // c10::nullopt if working with CUDA tensors,
+static std::string get_default_lstsq_driver(c10::optional<std::string> driver, const Tensor& input) {
+  // if `driver` is empty, we set driver_str to "gels" if working with CUDA tensors,
   // otherwise to "gelsy" driver.
-  // CUDA tensors are treated specially because MAGMA
-  // has only 'gels' driver supported.
-  c10::optional<std::string> driver_opt = driver;
+  std::string driver_str;
   // check whether the user provided name is a valid driver name
   if (driver.has_value()) {
-    auto driver_str = driver.value();
+    driver_str = driver.value();
     // convert `driver_str` to lower case inplace.
     std::transform(driver_str.begin(), driver_str.end(), driver_str.begin(),
       [](unsigned char c) { return std::tolower(c); });
     static std::unordered_set<std::string> allowed_drivers = {
       "gels", "gelsy", "gelsd", "gelss"
     };
-    if (at::kCPU == self.device().type()) {
+    if (input.device() == at::kCPU) {
       TORCH_CHECK(
         allowed_drivers.find(driver_str) != allowed_drivers.end(),
         "torch.linalg.lstsq: parameter `driver` should be one of "
         "(gels, gelsy, gelsd, gelss)"
       );
-    }
-    //else if (at::kCUDA == self.device().type()) {
-    else {
+    } else { // else if (input.is_cuda())
       TORCH_CHECK(
         driver_str == "gels",
         "torch.linalg.lstsq: `driver` other than `gels` is not supported on CUDA"
       );
     }
+  } else {
+    // if driver name is not provided, set to default 'gelsy' if on CPU,
+    // or to `gels` if on CUDA.
+    driver_str = input.is_cuda() ? "gels" : "gelsy";
   }
-  // if driver name is not provided, set to default 'gelsy' if on CPU,
-  // or to `gels` if on CUDA.
-  else {
-    driver_opt = (at::kCPU == self.device().type())
-      ? c10::optional<std::string>("gelsy")
-      : c10::optional<std::string>("gels");
-  }
+  return driver_str;
+}
 
-  // CUDA has only `gels` driver now which ONLY works with overdetermined systems
-  if (at::kCUDA == self.device().type()) {
-    TORCH_CHECK(
-      self.size(-2) >= self.size(-1),
-      "torch.linalg.lstsq: only overdetermined systems (m >= n) are allowed on CUDA"
-    );
-  }
+std::tuple<Tensor&, Tensor&, Tensor&, Tensor&> linalg_lstsq_out(
+    const Tensor& input,
+    const Tensor& other,
+    c10::optional<double> rcond,
+    c10::optional<std::string> driver,
+    Tensor& solution,
+    Tensor& residuals,
+    Tensor& rank,
+    Tensor& singular_values) {
+  TORCH_CHECK(input.dim() >= 2, "torch.linalg.lstsq: input must have at least 2 dimensions.");
+  TORCH_CHECK(other.dim() >= 1, "torch.linalg.lstsq: other must have at least 1 dimension.");
+  TORCH_CHECK(
+      input.scalar_type() == other.scalar_type(),
+      "torch.linalg.lstsq: Expected input and other to have the same dtype, but got input's dtype ",
+      input.scalar_type(),
+      " and other's dtype ",
+      other.scalar_type());
 
-  // LAPACK/MAGMA requries inputs to be in the column-major-order.
-  auto self_working_copy = copyBatchedColumnMajor(self);
+  auto dim_diff = input.dim() - other.dim();
+  TORCH_CHECK(
+      0 <= dim_diff && dim_diff <= 1,
+      "torch.linalg.lstsq: input.dim() must be greater or equal to other.dim() and (input.dim() - other.dim()) <= 1");
+  Tensor other_2d = dim_diff ? other.unsqueeze(-1) : other;
+  TORCH_CHECK(
+      input.size(-2) == other_2d.size(-2),
+      dim_diff ? "torch.linalg.lstsq: input.size(-2) should match other.size(-1)"
+               : "torch.linalg.lstsq: input.size(-2) should match other.size(-2)");
 
-  // Tensor b must be of size (..., max(m, n), nrhs)
-  // and in the column-major order.
-  // We allow the batch dims of `self` to broadcast over the batch
-  // dims of `b` so that it is possible to solve multiple systems with
-  // with the same lhs (encoded by `self`) / rhs (encoded by `b`).
-  // `b_working_copy` is modified in-place and the combination of
-  // batch broadcasting plus LAPACK/MAGMA requirements impose the following
-  // restrictions on sizes/strides of `b`:
-  // 1. b.size = (broadcasted_batch_size(self, b), max(m, n), nrhs).
-  // 2. b.stride should correspond to an almost contiguous Tensor in the column-major-order,
-  //   i.e. b.stride = b.transpose(-2, -1).contiguous().transpose(-2, -1).strides()
-  auto m = self.size(-2);
-  auto n = self.size(-1);
-  auto b_working_copy = copyBatchedColumnMajor(b_2d,
-    /*nrows=*/std::max(m, n),
-    /*desired_batch_sizes=*/broadcast_batch_size(self, b_2d, self.dim() - 2));
+  checkSameDevice("torch.linalg.lstsq", other, input, "other");
+  checkSameDevice("torch.linalg.lstsq", solution, input, "solution");
+  checkSameDevice("torch.linalg.lstsq", residuals, input, "residuals");
+  checkSameDevice("torch.linalg.lstsq", rank, input, "rank");
+  checkSameDevice("torch.linalg.lstsq", singular_values, input, "singular_values");
 
-  double rcond = cond.has_value() && (cond.value() > 0)
-    ? cond.value()
-    : _get_epsilon(c10::toValueType(self.scalar_type()));
+  // 'solution' is expected to have same dtype as input
+  checkLinalgCompatibleDtype("torch.linalg.lstsq", solution, input, "solution");
 
-  auto batch_shape = IntArrayRef(self.sizes().cbegin(), self.sizes().cend() - 2);
-  Tensor rank = at::empty({0}, self.options().dtype(at::kLong));
-  if (driver_opt.value() != "gels") {
-    rank.resize_(batch_shape, MemoryFormat::Contiguous);
-  }
+  // 'residuals' is expected to have real float dtype
+  ScalarType real_dtype = c10::toValueType(input.scalar_type());
+  checkLinalgCompatibleDtype("torch.linalg.lstsq", residuals.scalar_type(), real_dtype, "solution");
 
-  auto singular_values_shape = batch_shape.vec();
-  singular_values_shape.push_back(std::min(m, n));
-  auto real_dtype = c10::toValueType(self.scalar_type());
-  Tensor singular_values = at::empty({0}, self.options().dtype(real_dtype));
-  if (driver_opt.value() == "gelsd" || driver_opt.value() == "gelss") {
-    singular_values.resize_(singular_values_shape, MemoryFormat::Contiguous);
-  }
+  // 'rank' is expected to have integer dtype
+  // actual LAPACK calls use int32_t type for rank, but we promote it to int64_t
+  // to be consistent with torch.linalg.matrix_rank output dtype
+  ScalarType rank_expected_type = ScalarType::Long;
+  checkLinalgCompatibleDtype("torch.linalg.lstsq", rank.scalar_type(), rank_expected_type, "rank");
 
-  Tensor infos = at::zeros({std::max<int64_t>(1, batchCount(self))}, self.options().dtype(kInt).device(kCPU));
+  // 'singular_values' is expected to have real float dtype
+  checkLinalgCompatibleDtype("torch.linalg.lstsq", singular_values.scalar_type(), real_dtype, "singular_values");
 
-  Tensor x, residuals;
+  std::string driver_name = get_default_lstsq_driver(driver, input);
 
-  // path if neither `self` nor `b` is empty
-  if (self.numel() && b.numel()) {
-    x = at::_lstsq_helper_(b_working_copy, rank, singular_values, infos, self_working_copy, rcond, driver_opt.value());
-    if (m > n && driver_opt.value() != "gelsy") {
-      residuals = x.narrow(-2, n, std::max(m, n) - n).abs().pow_(2).sum(-2);
-    }
-    x = x.narrow(-2, 0, n);
-  }
-  // if either `self` or `b` is empty, return an empty tensor or,
-  // if non-zero sizes, return a tensor of zeros.
-  else {
-    x = b_working_copy.zero_().narrow(-2, 0, n);
-  }
+  // set default rcond value
+  double rcond_value = rcond.has_value()
+    ? rcond.value()
+    : _get_epsilon(c10::toValueType(input.scalar_type())) * std::max<int64_t>(input.size(-2), input.size(-1));
 
-  auto return_empty_if_undefined = [&self](Tensor& t,
-      c10::optional<at::ScalarType> dtype = c10::nullopt,
-      c10::optional<std::vector<int64_t>> shape = c10::nullopt) {
-    if (t.defined()) {
-      return t;
-    }
-    else {
-      auto output_dtype = dtype.has_value() ? dtype.value() : self.scalar_type();
-      if (shape.has_value()) {
-        return at::empty(shape.value(), self.options().dtype(output_dtype));
-      }
-      else {
-        return at::empty({0}, self.options().dtype(output_dtype));
-      }
-    }
-  };
+  auto infos = at::zeros({std::max<int64_t>(1, batchCount(input))}, input.options().dtype(kInt));
 
-  // Some output stays undefined for some values of driver.
-  // Instead of returning undefined tensors which get exposed as
-  // Nones in the Python interface, we return empty tensors.
-  // This way we follow the convention of output types in the
-  // torch.linalg namespace.
-  // NOTE: we run drivers only if both inputs are non-empty!
-  // Hence the code below explicitly handles each and every output
-  // if `self` is empty.
+  // now check whether the provided output tensors can be used directly
 
-  // Numpy and Scipy always return ranks for empty matrices,
-  // even for drivers which are not rank-revealing.
-  if (self.numel()) {
-    rank = return_empty_if_undefined(rank, at::kLong);
-  }
-  else {
-    rank = at::zeros(batch_shape, self.options().dtype(at::kLong));
+  // Two types of 'other' tensors are supported:
+  // - 1-dimensional (1D) tensor or batch of 1D tensors (vector case)
+  // - 2-dimensional (2D) tensor or batch of 2D tensors (matrix case)
+  // original torch.lstsq supported only the matrix case, while NumPy works for both cases
+  // for the batched input we need to be able to distinguish them
+  // auto expected_batched_rhs_shape = IntArrayRef(input.sizes().data(), input.dim() - 1); // input.shape[:-1]
+  // bool vector_case = other.dim() == 1 || (input.dim() - 1 == other.dim() && other.sizes().equals(expected_batched_rhs_shape));
+  bool vector_case = linalg_solve_is_vector_rhs(input, other);
+
+  // provided output tensor can be used directly if:
+  // 1. the shape matches the expected shape
+  // 2. the dtype matches the expected dtype
+  // 3. the tensor is contiguous
+
+  // Checks for the 'solution' tensor
+  std::vector<int64_t> expected_solution_shape = broadcast_batch_size(input, other_2d, input.dim() - 2);
+  // the actual shape of the shape of the solution returned in (*, n,) or (*, n, nrhs)
+  // but LAPACK requires extra dimensions so the expected shape is (*, max(m, n),) or (*, max(m, n), nrhs)
+  expected_solution_shape.push_back(std::max(input.size(-1), input.size(-2)));
+  if (!vector_case && other.dim() > 2) {
+    expected_solution_shape.push_back(other.size(-1));
   }
 
-  // undefined residuals could only be an empty Tensor of shape (0)
-  residuals = return_empty_if_undefined(residuals);
+  bool solution_equal_expected_shape = solution.sizes().equals(expected_solution_shape);
+  bool solution_input_same_type = (solution.scalar_type() == input.scalar_type());
 
-  if (!self.numel()
-    && (driver_opt.value() == "gelss" || driver_opt.value() == "gelsd")) {
-    // when `self` is empty, return singular_values of shape
-    // (*self.shape[:-2], 0) only if driver is in ('gelss', 'gelsd')
-    auto singular_values_empty_shape = batch_shape.vec();
-    singular_values_empty_shape.push_back(0);
-    singular_values = return_empty_if_undefined(
-      singular_values,
-      at::toValueType(self.scalar_type()),
-      singular_values_empty_shape);
-  }
-  else {
-    // otherwise return an empty tensor of shape (0)
-    singular_values = return_empty_if_undefined(
-      singular_values,
-      at::toValueType(self.scalar_type()));
+  bool is_solution_batched_column_major = false;
+  if (vector_case) {
+    is_solution_batched_column_major = solution.is_contiguous();
+  } else if (!vector_case && solution.dim() >= 2) {
+    is_solution_batched_column_major = solution.transpose(-2, -1).is_contiguous();
   }
 
-  if (self.dim() > 2) {
+  // 'residuals' is not checked here because at::sum_out(residuals, ...) does that
+
+  auto input_batch_shape = IntArrayRef(input.sizes().cbegin(), input.sizes().cend() - 2);
+
+  // Checks for the 'rank' tensor
+  // rank is a scalar value for each matrix in the batch so
+  // rank's expected shape is equal to input.shape[0:input.ndim-2]
+  bool rank_equal_expected_shape = true;
+  bool rank_equal_expected_type = true;
+  bool rank_is_contiguous = true;
+  if (driver_name != "gels") { // gels driver doesn't set 'rank'
+    rank_equal_expected_shape = rank.sizes().equals(input_batch_shape);
+    rank_equal_expected_type = (rank.scalar_type() == at::kLong);
+    rank_is_contiguous = rank.is_contiguous();
+  }
+
+  // Checks for the 'singular_values' tensor
+  // singular values are computed only with "gelsd" and "gelss" drivers currently
+  bool singular_values_equal_expected_shape = true;
+  bool singular_values_equal_expected_type = true;
+  bool singular_values_is_contiguous = true;
+  if (driver_name == "gelsd" || driver_name == "gelss") {
+    auto singular_values_shape = input_batch_shape.vec();
+    singular_values_shape.push_back(std::min(input.size(-1), input.size(-2)));
+    singular_values_equal_expected_shape = singular_values.sizes().equals(singular_values_shape);
+    singular_values_equal_expected_type = (singular_values.scalar_type() == real_dtype);
+    singular_values_is_contiguous = singular_values.is_contiguous();
+  }
+
+  // if solution is not empty and not in batched column major format
+  bool copy_needed = (solution.numel() != 0 && !is_solution_batched_column_major);
+  copy_needed |= !solution_input_same_type;  // or solution does not have the same dtype as input
+  copy_needed |= (solution.numel() != 0 && !solution_equal_expected_shape); // or solution does not have the expected shape
+
+  copy_needed |= !rank_equal_expected_type;
+  copy_needed |= (rank.numel() != 0 && !rank_equal_expected_shape);
+  copy_needed |= (rank.numel() != 0 && !rank_is_contiguous);
+
+  copy_needed |= !singular_values_equal_expected_type;
+  copy_needed |= (singular_values.numel() != 0 && !singular_values_equal_expected_shape);
+  copy_needed |= (singular_values.numel() != 0 && !singular_values_is_contiguous);
+
+  if (copy_needed) { // we have to allocate temporary tensors
+    Tensor solution_tmp = at::empty({0}, input.options());
+    Tensor residuals_tmp = at::empty({0}, input.options().dtype(real_dtype));
+    Tensor rank_tmp = at::empty({0}, input.options().dtype(at::kLong));
+    Tensor singular_values_tmp = at::empty({0}, input.options().dtype(real_dtype));
+
+    linalg_lstsq_out_info(solution_tmp, residuals_tmp, rank_tmp, singular_values_tmp, infos, input, other, rcond_value, driver_name);
+
+    at::native::resize_output(solution, solution_tmp.sizes());
+    solution.copy_(solution_tmp);
+
+    at::native::resize_output(residuals, residuals_tmp.sizes());
+    residuals.copy_(residuals_tmp);
+
+    at::native::resize_output(rank, rank_tmp.sizes());
+    rank.copy_(rank_tmp);
+
+    at::native::resize_output(singular_values, singular_values_tmp.sizes());
+    singular_values.copy_(singular_values_tmp);
+  } else {
+    // else use the provided output storage directly
+    linalg_lstsq_out_info(solution, residuals, rank, singular_values, infos, input, other, rcond_value, driver_name);
+  }
+
+  if (infos.numel() > 1) {
     batchCheckErrors(infos, "torch.linalg.lstsq");
   } else {
-    singleCheckErrors(infos.item().toInt(), "torch.linalg.lstsq");
+    singleCheckErrors(infos.item<int64_t>(), "torch.linalg.lstsq");
   }
 
-  return std::make_tuple(x, residuals, rank, singular_values);
+  return std::tuple<Tensor&, Tensor&, Tensor&, Tensor&>(solution, residuals, rank, singular_values);
+}
+
+std::tuple<Tensor, Tensor, Tensor, Tensor> linalg_lstsq(
+    const Tensor& input, const Tensor& other,
+    c10::optional<double> rcond,
+    c10::optional<std::string> driver) {
+  Tensor solution = at::empty({0}, input.options());
+  Tensor residuals = at::empty({0}, input.options().dtype(toValueType(input.scalar_type())));
+  Tensor rank = at::empty({0}, input.options().dtype(at::kLong));
+  Tensor singular_values = at::empty({0}, input.options().dtype(toValueType(input.scalar_type())));
+  std::tie(solution, residuals, rank, singular_values) =
+      at::linalg_lstsq_outf(input, other, rcond, driver, solution, residuals, rank, singular_values);
+  return std::make_tuple(solution, residuals, rank, singular_values);
 }
 
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ lu_solve ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
