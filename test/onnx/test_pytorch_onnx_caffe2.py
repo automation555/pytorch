@@ -1,24 +1,22 @@
-from typing import Tuple
-import io
-import itertools
+import numpy as np
 import sys
 import unittest
+import itertools
 
-import numpy as np
-
-from debug_embed_params import run_embed_params
-from torch import nn
-from torch.autograd import Variable, function
-from torch.nn.utils import rnn as rnn_utils
-from torch.onnx import ExportTypes
 import torch.onnx
 import torch.onnx.operators
+from torch.onnx import ExportTypes
+from torch import nn
+from torch.autograd import Variable, function
 import torch.utils.model_zoo as model_zoo
+from torch.nn.utils import rnn as rnn_utils
+from debug_embed_params import run_embed_params
+import io
 
 # Import various models for testing
 from torchvision.models.alexnet import alexnet
-from torchvision.models.densenet import densenet121
 from torchvision.models.inception import inception_v3
+from torchvision.models.densenet import densenet121
 from torchvision.models.resnet import resnet50
 from torchvision.models.vgg import vgg16, vgg16_bn, vgg19, vgg19_bn
 
@@ -118,6 +116,7 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
     from torch.onnx.symbolic_helper import _export_onnx_opset_version
     opset_version = _export_onnx_opset_version
     embed_params = False
+    use_new_jit_passes = False
 
     def setUp(self):
         torch.manual_seed(0)
@@ -135,7 +134,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
 
     def run_debug_test(self, model, train, batch_size, state_dict=None,
                        input=None, use_gpu=True, example_outputs=None,
-                       operator_export_type=torch.onnx.OperatorExportTypes.ONNX):
+                       operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
+                       use_new_jit_passes=use_new_jit_passes):
         """
         # TODO: remove this from the final release version
         This test is for our debugging only for the case where
@@ -158,7 +158,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
                                       opset_version=self.opset_version,
                                       keep_initializers_as_inputs=True,
                                       add_node_names=False,
-                                      operator_export_type=operator_export_type)
+                                      operator_export_type=operator_export_type,
+                                      use_new_jit_passes=use_new_jit_passes)
         if isinstance(torch_out, torch.autograd.Variable):
             torch_out = (torch_out,)
 
@@ -169,7 +170,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
     def run_actual_test(self, model, train, batch_size, state_dict=None,
                         input=None, use_gpu=True, rtol=0.001, atol=1e-7,
                         example_outputs=None, do_constant_folding=True,
-                        operator_export_type=torch.onnx.OperatorExportTypes.ONNX):
+                        operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
+                        use_new_jit_passes=use_new_jit_passes):
         """
         This is what the user facing version will look like
         """
@@ -193,7 +195,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
                       do_constant_folding=do_constant_folding,
                       opset_version=self.opset_version,
                       keep_initializers_as_inputs=True,
-                      operator_export_type=operator_export_type)
+                      operator_export_type=operator_export_type,
+                      use_new_jit_passes=use_new_jit_passes)
 
     def run_model_test(self, model, train, batch_size, state_dict=None,
                        input=None, use_gpu=True, rtol=0.001, atol=1e-7,
@@ -209,11 +212,13 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
                                  use_gpu=use_gpu_, rtol=rtol, atol=atol,
                                  example_outputs=example_outputs,
                                  do_constant_folding=do_constant_folding,
-                                 operator_export_type=operator_export_type)
+                                 operator_export_type=operator_export_type,
+                                 use_new_jit_passes=self.use_new_jit_passes)
         else:
             self.run_debug_test(model, train, batch_size, state_dict, input,
                                 use_gpu=use_gpu_, example_outputs=example_outputs,
-                                operator_export_type=operator_export_type)
+                                operator_export_type=operator_export_type,
+                                use_new_jit_passes=self.use_new_jit_passes)
 
     def test_linear(self):
         class MyModel(torch.nn.Module):
@@ -1429,9 +1434,6 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
         x = torch.randn(2, 3, 4)
         self.run_model_test(Fill_(), train=False, input=(x,), batch_size=BATCH_SIZE, use_gpu=False)
 
-    # ConstantFill is a deprecated experimental op (used in opsets < 9).
-    # Shape inference does not cover this op.
-    @skipIfUnsupportedMinOpsetVersion(9)
     def test_inplace_arithmetic(self):
         class Arithmetic(torch.jit.ScriptModule):
             @torch.jit.script_method
@@ -1979,7 +1981,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
     def test_tuple_input_output(self):
         class TupleModel(torch.jit.ScriptModule):
             @torch.jit.script_method
-            def forward(self, a: Tuple[torch.Tensor, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+            def forward(self, a):
+                # type: (Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor]
                 return a
 
         x = (torch.randn(3, 4), torch.randn(4, 3))
@@ -1989,7 +1992,8 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
     def test_nested_tuple_input_output(self):
         class NestedTupleModel(torch.jit.ScriptModule):
             @torch.jit.script_method
-            def forward(self, a: torch.Tensor, b: Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]) -> torch.Tensor:
+            def forward(self, a, b):
+                # type: (Tensor, Tuple[Tensor, Tuple[Tensor, Tensor]]) -> Tensor
                 return a + b[0] + b[1][0] + b[1][1]
 
         x = torch.randn(4, 5)
@@ -2138,6 +2142,36 @@ class TestCaffe2Backend_opset9(unittest.TestCase):
         prepared = c2.prepare(onnx_model)
         caffe2_out = prepared.run(inputs=[x.cpu().numpy()])
         self.assertEqual(caffe2_out[0].shape, x.shape)
+
+    def test_conv_rnn_2d_conversion(self):
+        # Test ConvRNN2D can be converted to Caffe.
+        in_size = (64, 64)
+        kernel_size = (3, 3)
+        in_channels = 3
+        out_channels = 16
+        batch_size = 5
+        hidden = torch.zeros(
+            (batch_size, out_channels, *in_size),
+            requires_grad=False,
+            dtype=torch.float32,
+        )
+        test_model = operators.ConvRNN2D(in_channels, out_channels, kernel_size, hidden).float()
+        test_inputs = torch.randn((batch_size, in_channels, *in_size), requires_grad=True).float()
+        with tempfile.NamedTemporaryFile() as f:
+            tmp_filename = f.name
+            torch_out = torch.onnx._export(test_model, test_inputs, tmp_filename, export_params=True, keep_initializers_as_inputs=True,)
+            np.testing.assert_array_equal(torch_out.detach().numpy().shape, [batch_size, out_channels, in_size[0], in_size[1]],)
+
+            # Convert to caffe.
+            caffe_model = onnx.load(tmp_filename)
+            prepared_backend = onnx_caffe2_backend.prepare(caffe_model)
+
+        # Run with Caffe model.
+        w = {caffe_model.graph.input[0].name: test_inputs.float().data.numpy()}
+        caffe_out = prepared_backend.run(w)[0]
+
+        # Verify torch and caffe model are the same.
+        np.testing.assert_array_almost_equal(torch_out.data.cpu().numpy(), caffe_out, decimal=5)
 
     # The order of returned indices from Multinomial is undefined, so randomly generated inputs
     # in Caffe2BackendTestEmbed doesn't work with this op.
@@ -2522,7 +2556,8 @@ TestCaffe2BackendEmbed_opset10 = type(str("TestCaffe2BackendEmbed_opset10"),
 # to embed_params=True
 TestCaffe2BackendEmbed_opset9_new_jit_API = type(str("TestCaffe2BackendEmbed_opset9_new_jit_API"),
                                                  (unittest.TestCase,),
-                                                 dict(TestCaffe2Backend_opset9.__dict__, embed_params=True))
+                                                 dict(TestCaffe2Backend_opset9.__dict__, embed_params=True,
+                                                 use_new_jit_passes=True))
 
 if __name__ == '__main__':
     unittest.main()
