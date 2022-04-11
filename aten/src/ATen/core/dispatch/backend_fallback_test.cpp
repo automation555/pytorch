@@ -3,7 +3,6 @@
 #include <ATen/ATen.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/Functions.h>
-#include <ATen/core/dispatch/Dispatcher.h>
 #include <ATen/core/op_registration/op_registration.h>
 #include <torch/library.h>
 
@@ -72,10 +71,10 @@ void generic_wrapper_fallback(const c10::OperatorHandle& op, torch::jit::Stack* 
   auto rets = torch::jit::pop(*stack, num_returns);
   for (size_t i = 0; i < num_returns; i++) {
     // TODO: Handle tensor list
-    if (rets[i].isTensor()) {
-      torch::jit::push(*stack, at::detail::make_tensor<GenericWrapperTensorImpl>(std::move(rets[i]).toTensor()));  // yes move!
+    if (args[i].isTensor()) {
+      torch::jit::push(*stack, at::detail::make_tensor<GenericWrapperTensorImpl>(std::move(args[i]).toTensor()));  // yes move!
     } else {
-      torch::jit::push(*stack, std::move(rets[i]));
+      torch::jit::push(*stack, std::move(args[i]));
     }
   }
 }
@@ -105,6 +104,8 @@ TEST(BackendFallbackTest, TestBackendFallbackWithWrapper) {
 TEST(BackendFallbackTest, TestFallthroughBackendFallback) {
   auto m = MAKE_TORCH_LIBRARY_IMPL(aten, TESTING_ONLY_GenericMode);
   m.impl("mul.Tensor", torch::CppFunction::makeFromBoxedFunction<&generic_mode_fallback>());
+
+  m.impl("abs_", torch::CppFunction::makeNamedNotSupported());
 
   auto gm = MAKE_TORCH_LIBRARY_IMPL(_, TESTING_ONLY_GenericMode);
   gm.fallback(torch::CppFunction::makeFallthrough());
