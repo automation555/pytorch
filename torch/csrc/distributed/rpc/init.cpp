@@ -10,6 +10,7 @@
 #include <torch/csrc/distributed/rpc/rpc_agent.h>
 #include <torch/csrc/distributed/rpc/rref_context.h>
 #include <torch/csrc/distributed/rpc/tensorpipe_agent.h>
+#include <torch/csrc/distributed/rpc/tensorpipe_utils.h>
 #include <torch/csrc/distributed/rpc/torchscript_functions.h>
 #include <torch/csrc/distributed/rpc/types.h>
 #include <torch/csrc/jit/python/pybind_utils.h>
@@ -683,6 +684,14 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
           // intentionally not releasing GIL to avoid unnecessary context switch
           &TensorPipeAgent::setReverseDeviceMaps);
 
+  module.def("_get_request_device_indices", [](){
+    auto tpAgent = std::static_pointer_cast<TensorPipeAgent>(
+        RpcAgent::getCurrentRpcAgent());
+
+    return tpAgent->getThreadLocalLazyStreamContext()->deviceIndices();
+  });
+
+
 #endif // USE_TENSORPIPE
 
   module.def("_is_current_rpc_agent_set", &RpcAgent::isCurrentRpcAgentSet);
@@ -757,12 +766,26 @@ PyObject* rpc_init(PyObject* _unused, PyObject* noargs) {
          std::vector<torch::Tensor>& tensors,
          const float rpcTimeoutSeconds,
          const bool isAsyncExecution) {
-        return std::make_shared<jit::PythonFutureWrapper>(pyRpcPythonUdf(
-            dst,
-            pickledPythonUDF,
-            tensors,
-            rpcTimeoutSeconds,
-            isAsyncExecution));
+        return std::make_shared<jit::PythonFutureWrapper>(
+            pyRpcPythonUdf(
+                dst,
+                pickledPythonUDF,
+                tensors,
+                rpcTimeoutSeconds,
+                isAsyncExecution),
+            /* unwrap_func */ [](const py::object& value) {
+              py::gil_scoped_release release;
+              auto& pythonRpcHandler = PythonRpcHandler::getInstance();
+              // This will unwrap RemoteException and raise the contained
+              // server-side Python exception on client side. A caveat here is
+              // that the exception must be raise in the client thread calling
+              // the pybind "wait" API, so that it can be correctly shown to
+              // user. A wrong way is to raise it in RPC server thread, where
+              // the exception would be swallowed in the ThreadPool task, and
+              // also no pybind handling code can help shown the Python
+              // exception.
+              pythonRpcHandler.handleException(value);
+            });
       },
       py::call_guard<py::gil_scoped_release>());
 
