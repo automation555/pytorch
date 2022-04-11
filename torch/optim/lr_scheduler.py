@@ -19,6 +19,8 @@ EPOCH_DEPRECATION_WARNING = (
     "https://github.com/pytorch/pytorch/issues/new/choose."
 )
 
+SAVE_STATE_WARNING = "Please also save or load the state of the optimizer when saving or loading the scheduler."
+
 class _LRScheduler(object):
 
     def __init__(self, optimizer, last_epoch=-1, verbose=False):
@@ -87,7 +89,7 @@ class _LRScheduler(object):
     def load_state_dict(self, state_dict):
         """Loads the schedulers state.
 
-        Args:
+        Arguments:
             state_dict (dict): scheduler state. Should be an object returned
                 from a call to :meth:`state_dict`.
         """
@@ -209,10 +211,9 @@ class LambdaLR(_LRScheduler):
         is not the optimizer.
         The learning rate lambda functions will only be saved if they are callable objects
         and not if they are functions or lambdas.
-
-        When saving or loading the scheduler, please make sure to also save or load the state of the optimizer.
         """
 
+        warnings.warn(SAVE_STATE_WARNING, UserWarning)
         state_dict = {key: value for key, value in self.__dict__.items() if key not in ('optimizer', 'lr_lambdas')}
         state_dict['lr_lambdas'] = [None] * len(self.lr_lambdas)
 
@@ -225,13 +226,12 @@ class LambdaLR(_LRScheduler):
     def load_state_dict(self, state_dict):
         """Loads the schedulers state.
 
-        When saving or loading the scheduler, please make sure to also save or load the state of the optimizer.
-
-        Args:
+        Arguments:
             state_dict (dict): scheduler state. Should be an object returned
                 from a call to :meth:`state_dict`.
         """
 
+        warnings.warn(SAVE_STATE_WARNING, UserWarning)
         lr_lambdas = state_dict.pop('lr_lambdas')
         self.__dict__.update(state_dict)
         # Restore state_dict keys in order to prevent side effects
@@ -305,7 +305,7 @@ class MultiplicativeLR(_LRScheduler):
     def load_state_dict(self, state_dict):
         """Loads the schedulers state.
 
-        Args:
+        Arguments:
             state_dict (dict): scheduler state. Should be an object returned
                 from a call to :meth:`state_dict`.
         """
@@ -931,9 +931,9 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
 
     .. math::
         \eta_t = \eta_{min} + \frac{1}{2}(\eta_{max} - \eta_{min})\left(1 +
-        \cos\left(\frac{T_{cur}}{T_{i}}\pi\right)\right)
+        \cos\left(\frac{T_{cur}}{T_{i} - 1}\pi\right)\right)
 
-    When :math:`T_{cur}=T_{i}`, set :math:`\eta_t = \eta_{min}`.
+    When :math:`T_{cur}=T_{i} - 1`, set :math:`\eta_t = \eta_{min}`.
     When :math:`T_{cur}=0` after restart, set :math:`\eta_t=\eta_{max}`.
 
     It has been proposed in
@@ -953,8 +953,8 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
     """
 
     def __init__(self, optimizer, T_0, T_mult=1, eta_min=0, last_epoch=-1, verbose=False):
-        if T_0 <= 0 or not isinstance(T_0, int):
-            raise ValueError("Expected positive integer T_0, but got {}".format(T_0))
+        if T_0 <= 1 or not isinstance(T_0, int):
+            raise ValueError("Expected positive integer T_0 >= 2, but got {}".format(T_0))
         if T_mult < 1 or not isinstance(T_mult, int):
             raise ValueError("Expected integer T_mult >= 1, but got {}".format(T_mult))
         self.T_0 = T_0
@@ -971,7 +971,7 @@ class CosineAnnealingWarmRestarts(_LRScheduler):
             warnings.warn("To get the last learning rate computed by the scheduler, "
                           "please use `get_last_lr()`.", UserWarning)
 
-        return [self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * self.T_cur / self.T_i)) / 2
+        return [self.eta_min + (base_lr - self.eta_min) * (1 + math.cos(math.pi * self.T_cur / (self.T_i - 1))) / 2
                 for base_lr in self.base_lrs]
 
     def step(self, epoch=None):
