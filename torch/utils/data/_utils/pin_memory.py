@@ -5,11 +5,8 @@ These **needs** to be in global scope since Py2 doesn't support serializing
 static methods.
 """
 
-import collections
-import queue
-
 import torch
-from torch._six import string_classes
+from torch._six import queue, container_abcs, string_classes
 from . import MP_STATUS_CHECK_INTERVAL
 from torch._utils import ExceptionWrapper
 
@@ -46,17 +43,17 @@ def _pin_memory_loop(in_queue, out_queue, device_id, done_event):
 
 
 def pin_memory(data):
-    if isinstance(data, torch.Tensor):
+    if hasattr(data, "pin_memory"):
+        return data.pin_memory()
+    elif isinstance(data, torch.Tensor):
         return data.pin_memory()
     elif isinstance(data, string_classes):
         return data
-    elif isinstance(data, collections.abc.Mapping):
+    elif isinstance(data, container_abcs.Mapping):
         return {k: pin_memory(sample) for k, sample in data.items()}
     elif isinstance(data, tuple) and hasattr(data, '_fields'):  # namedtuple
         return type(data)(*(pin_memory(sample) for sample in data))
-    elif isinstance(data, collections.abc.Sequence):
+    elif isinstance(data, container_abcs.Sequence):
         return [pin_memory(sample) for sample in data]
-    elif hasattr(data, "pin_memory"):
-        return data.pin_memory()
     else:
         return data
