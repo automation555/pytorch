@@ -222,16 +222,6 @@ struct SourceImporterImpl : public Resolver,
       return std::make_shared<SimpleValue>(
           graph->insertConstant(std::numeric_limits<double>::quiet_NaN(), loc));
     }
-    if (name == "infj") {
-      return std::make_shared<SimpleValue>(graph->insertConstant(
-          c10::complex<double>(0, std::numeric_limits<double>::infinity()),
-          loc));
-    }
-    if (name == "nanj") {
-      return std::make_shared<SimpleValue>(graph->insertConstant(
-          c10::complex<double>(0, std::numeric_limits<double>::quiet_NaN()),
-          loc));
-    }
     if (name == "__torch__") {
       return std::make_shared<ClassNamespaceValue>(
           c10::QualifiedName(name), shared_from_this());
@@ -257,6 +247,70 @@ struct SourceImporterImpl : public Resolver,
         nullptr);
   }
 
+  // Extract a dictionary containing ignored argument named for an interface
+  // whose AST is class_def. This is stored as a class attributes named
+  // "__ignored_argument_names__".
+  InterfaceType::InterfaceIgnoredArgsType getIgnoredArgumentNames(
+      const ClassDef& class_def) {
+    InterfaceType::InterfaceIgnoredArgsType ignored_argument_names;
+    for (const Stmt& stmt : class_def.body()) {
+      // Look for Assign.
+      if (stmt.kind() == TK_ASSIGN) {
+        auto assign = Assign(stmt);
+        auto var = Var(assign.lhs());
+
+        // The LHS must be a Var named "__ignored_argument_names__".
+        if (var.name().name() == "__ignored_argument_names__") {
+          // The RHS should be a Dict[str, List[str]].
+          auto dict = DictLiteral(assign.rhs().get());
+          auto method_names = dict.key_inputs();
+          auto arg_names = dict.value_inputs();
+
+          for (size_t i = 0, e = method_names.size(); i < e; ++i) {
+            auto method_name = StringLiteral(method_names[i]).text();
+            auto args_list = ListLiteral(arg_names[i]);
+
+            InterfaceType::InterfaceIgnoredArgsType::value_type::second_type
+                args_set;
+            for (const auto& input : args_list.inputs()) {
+              args_set.insert(StringLiteral(input).text());
+            }
+
+            ignored_argument_names[method_name] = std::move(args_set);
+          }
+
+          return ignored_argument_names;
+        }
+      }
+    }
+
+    return ignored_argument_names;
+  }
+
+  // Strip non-Def trees from the body of class_def.
+  ClassDef stripNonDefFromClass(const ClassDef& class_def) {
+    std::vector<Stmt> only_defs;
+    only_defs.reserve(class_def.body().size());
+
+    for (const auto& def : class_def.body()) {
+      if (def.kind() == TK_DEF) {
+        only_defs.emplace_back(def);
+      }
+    }
+
+    c10::optional<const List<Property>> properties = c10::nullopt;
+    if (class_def.properties().present()) {
+      properties = class_def.properties().get();
+    }
+
+    return ClassDef::create(
+        class_def.range(),
+        class_def.name(),
+        class_def.superclass(),
+        List<Stmt>::create(class_def.range(), only_defs),
+        properties);
+  }
+
   void importNamedType(
       const std::string& qualifier,
       const ClassDef& class_def) {
@@ -274,11 +328,29 @@ struct SourceImporterImpl : public Resolver,
       // ClassTypes)
       return importNamedTuple(qualified_name, class_def);
     } else if (superclass_name == "Interface") {
+      // Parse the set of ignored arguments for each method from the ClassDef.
+      auto ignored_argument_names = getIgnoredArgumentNames(class_def);
+      // Strip the Assign for the ignored argument names from the ClassDef for
+      // the interface because define_interface doesn't handle those.
+      ClassDef stripped_class_def = stripNonDefFromClass(class_def);
       cu_->define_interface(
-          qualified_name, class_def, shared_from_this(), /*is_module=*/false);
+          qualified_name,
+          stripped_class_def,
+          shared_from_this(),
+          ignored_argument_names,
+          /*is_module=*/false);
     } else if (superclass_name == "ModuleInterface") {
+      // Parse the set of ignored arguments for each method from the ClassDef.
+      auto ignored_argument_names = getIgnoredArgumentNames(class_def);
+      // Strip the Assign for the ignored argument names from the ClassDef for
+      // the interface because define_interface doesn't handle those.
+      ClassDef stripped_class_def = stripNonDefFromClass(class_def);
       cu_->define_interface(
-          qualified_name, class_def, shared_from_this(), /*is_module=*/true);
+          qualified_name,
+          stripped_class_def,
+          shared_from_this(),
+          ignored_argument_names,
+          /*is_module=*/true);
     } else if (superclass_name == "Enum") {
       importEnum(qualified_name, class_def);
     } else {
@@ -377,23 +449,13 @@ struct SourceImporterImpl : public Resolver,
         c10::QualifiedName(qualified_classname), cu_, is_module);
 
     std::vector<Def> methods;
-    std::vector<ResolverPtr> method_resolvers;
-    std::map<std::string, Def> pre_hook_def_map;
-    std::map<std::string, Def> hook_def_map;
-    std::map<std::string, ResolverPtr> pre_hook_resolver_map;
-    std::map<std::string, ResolverPtr> hook_resolver_map;
+    std::vector<ResolverPtr> resolvers;
     std::vector<Assign> attributes;
     std::vector<Assign> constants;
 
     // Module-specific: which attrs are parameters?
     std::unordered_set<std::string> parameter_names;
     std::unordered_set<std::string> buffer_names;
-    std::unordered_set<std::string> pre_hook_names;
-    std::unordered_set<std::string> hook_names;
-    // used to keep track of original ordering of hooks and prehooks
-    // in case any are called more than once
-    std::vector<std::string> pre_hooks_order;
-    std::vector<std::string> hooks_order;
     // Process statements, splitting things into attribute and method
     // definitions.
     for (const auto& statement : class_def.body()) {
@@ -427,27 +489,6 @@ struct SourceImporterImpl : public Resolver,
                     ListLiteral(assign.rhs().get()).inputs();
                 for (const auto& buffer : buffer_list) {
                   buffer_names.insert(StringLiteral(buffer).text());
-                }
-              } else if (name == "__forward_pre_hooks__") {
-                TORCH_INTERNAL_ASSERT(
-                    is_module,
-                    "Forward pre hooks only exist on modules at the moment");
-                const auto pre_hook_list =
-                    ListLiteral(assign.rhs().get()).inputs();
-                for (const auto& pre_hook : pre_hook_list) {
-                  std::string pre_hook_name = StringLiteral(pre_hook).text();
-                  pre_hook_names.insert(pre_hook_name);
-                  pre_hooks_order.emplace_back(pre_hook_name);
-                }
-              } else if (name == "__forward_hooks__") {
-                TORCH_INTERNAL_ASSERT(
-                    is_module,
-                    "Forward hooks only exist on modules at the moment");
-                const auto hook_list = ListLiteral(assign.rhs().get()).inputs();
-                for (const auto& hook : hook_list) {
-                  std::string hook_name = StringLiteral(hook).text();
-                  hook_names.insert(hook_name);
-                  hooks_order.emplace_back(hook_name);
                 }
               } else {
                 if (auto fixed_up = attributeAssignmentSpecialHandlingHack(
@@ -483,18 +524,8 @@ struct SourceImporterImpl : public Resolver,
           }
         } break;
         case TK_DEF: {
-          Def def = Def(statement);
-          if (pre_hook_names.find(def.name().name()) != pre_hook_names.end()) {
-            pre_hook_def_map.emplace(def.name().name(), def);
-            pre_hook_resolver_map.emplace(
-                def.name().name(), shared_from_this());
-          } else if (hook_names.find(def.name().name()) != hook_names.end()) {
-            hook_def_map.emplace(def.name().name(), def);
-            hook_resolver_map.emplace(def.name().name(), shared_from_this());
-          } else {
-            methods.emplace_back(def);
-            method_resolvers.push_back(shared_from_this());
-          }
+          methods.emplace_back(Def(statement));
+          resolvers.push_back(shared_from_this());
         } break;
         default: {
           TORCH_INTERNAL_ASSERT(
@@ -536,23 +567,6 @@ struct SourceImporterImpl : public Resolver,
       class_type->addConstant(name, const_val);
     }
 
-    // build pre hook and hook def/resolver pairs
-    // pairs are dedupped in ir_emitter.cpp's CompilationUnit::define_hooks()
-    // ordering here is call order for hooks
-    std::vector<Def> hooks;
-    std::vector<ResolverPtr> hook_resolvers;
-    for (const std::string& hook_name : hooks_order) {
-      hooks.emplace_back(hook_def_map.find(hook_name)->second);
-      hook_resolvers.push_back(hook_resolver_map.find(hook_name)->second);
-    }
-    std::vector<Def> pre_hooks;
-    std::vector<ResolverPtr> pre_hook_resolvers;
-    for (const std::string& pre_hook_name : pre_hooks_order) {
-      pre_hooks.emplace_back(pre_hook_def_map.find(pre_hook_name)->second);
-      pre_hook_resolvers.push_back(
-          pre_hook_resolver_map.find(pre_hook_name)->second);
-    }
-
     cu_->register_type(class_type);
     const auto self = SimpleSelf(class_type);
     cu_->define(
@@ -560,14 +574,7 @@ struct SourceImporterImpl : public Resolver,
         /*properties=*/{},
         /*propResolvers=*/{},
         methods,
-        method_resolvers,
-        &self);
-    cu_->define_hooks(
-        qualified_classname,
-        hooks,
-        hook_resolvers,
-        pre_hooks,
-        pre_hook_resolvers,
+        resolvers,
         &self);
   }
 

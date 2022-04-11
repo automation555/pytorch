@@ -468,6 +468,16 @@ struct MethodValue : public SugaredValue {
         }
         schemas.push_back(&method.getSchema());
       } else if (auto interface_type = self_->type()->cast<InterfaceType>()) {
+        // If the method being called on the interface has arguments whose names
+        // were ignored during subtyping checks, err on the side of caution and
+        // prohibit calling the method with kwargs.
+        auto ignored_arg_names = interface_type->ignored_arg_names();
+        if ((ignored_arg_names.find(method_name) != ignored_arg_names.end()) &&
+            !kwargs.empty()) {
+          throw ErrorReport(loc)
+              << method_name
+              << " cannot be called with keyword arguments because it is a method of an interface type and its argument names were ignored during interface subtyping";
+        }
         schemas.push_back(interface_type->getMethod(method_name));
       } else {
         TORCH_INTERNAL_ASSERT(
@@ -511,20 +521,9 @@ struct TORCH_API CastValue : public BuiltinFunction {
       at::ArrayRef<NamedValue> kwargs,
       size_t n_binders) override {
     if (args.size() == 1 && kwargs.size() == 0) {
-      auto len_op = std::make_shared<BuiltinFunction>(aten::len, at::nullopt);
-      auto gt_op = std::make_shared<BuiltinFunction>(aten::gt, at::nullopt);
-      auto zero = m.graph()->insertConstant(0);
-
       auto v = args[0].value(*m.graph());
       if (v->type()->isSubtypeOf(type_)) {
         return std::make_shared<SimpleValue>(v);
-      } else if (
-          *type_ == *BoolType::get() &&
-          (v->type()->isSubtypeOf(AnyListType::get()) ||
-           v->type()->isSubtypeOf(StringType::get()) ||
-           v->type()->cast<DictType>())) {
-        auto len = len_op->call(loc, m, {v}, {}, 1);
-        return gt_op->call(loc, m, {len->asValue(loc, m), zero}, {}, 1);
       }
     }
     return BuiltinFunction::call(loc, m, args, kwargs, n_binders);
@@ -550,8 +549,8 @@ struct TORCH_API TensorCastValue : public SugaredValue {
       size_t n_binders) override {
     TORCH_INTERNAL_ASSERT(args.size() == 0 && kwargs.size() == 0);
     Value* dtype_const = m.graph()->insertConstant(dtype_, loc);
-    std::vector<NamedValue> kwargs_{
-        self_, NamedValue(loc, "dtype", dtype_const)};
+    std::vector<NamedValue> kwargs_{self_,
+                                    NamedValue(loc, "dtype", dtype_const)};
     Value* casted_val = m.graph()->insert(
         /*opname=*/Symbol::fromQualString("aten::to"),
         /*args=*/args,

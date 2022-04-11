@@ -85,16 +85,10 @@ struct Argument {
   }
 
   Argument cloneWithType(TypePtr new_type) const {
-    return Argument(
-        name_,
-        std::move(new_type),
-        N_,
-        default_value_,
-        kwarg_only_,
-        alias_info_);
+    return Argument(name_, new_type, N_, default_value_, kwarg_only_, alias_info_);
   }
 
-  // this function checks whether this Argument is backward compatible with
+  // this function check whether this Argument is backward compatible with
   // the old one. we consider the following cases are backward compatible:
   //   1) two arguments are equal
   //   2) this arg's type should be subtype of old
@@ -103,7 +97,7 @@ struct Argument {
       const Argument& old,
       std::ostream* why_not=nullptr) const;
 
- private:
+private:
   std::string name_;
   TypePtr type_;
   // for list types, an optional statically known length for the list
@@ -113,7 +107,7 @@ struct Argument {
   c10::optional<int32_t> N_;
 
   c10::optional<IValue> default_value_;
-  // is this only specifiable as a keyword argument?
+  // is this only specifyable as a keyword argument?
   bool kwarg_only_;
   c10::optional<AliasInfo> alias_info_;
 };
@@ -229,7 +223,7 @@ struct FunctionSchema {
     }
   }
 
- public:
+public:
 
   void dump() const;
 
@@ -271,13 +265,13 @@ struct FunctionSchema {
   }
   FunctionSchema cloneWithName(std::string name, std::string overload_name) const {
     return FunctionSchema(
-        std::move(name),
-        std::move(overload_name),
-        arguments(),
-        returns(),
-        is_vararg(),
-        is_varret()
-        );
+      std::move(name),
+      std::move(overload_name),
+      arguments(),
+      returns(),
+      is_vararg(),
+      is_varret()
+      );
   }
   FunctionSchema cloneWithArguments(std::vector<Argument> new_arguments) const {
     return FunctionSchema(
@@ -311,8 +305,7 @@ struct FunctionSchema {
   // values.
   void checkAndNormalizeInputs(
       std::vector<IValue>& inputs,
-      const std::unordered_map<std::string, IValue>& kwargs =
-          std::unordered_map<std::string, IValue>{}) const;
+      const std::unordered_map<std::string, IValue>& kwargs) const;
 
   std::string findErrorInKwargs(const std::vector<std::string>& kwargs) const;
 
@@ -355,17 +348,18 @@ struct FunctionSchema {
   // can a function with this schema be substituted for a function of rhs's
   // schema and have the program typecheck?
   // as_method - if true, treat this schema as a method and ignore
+  // ignored_arg_names - set of argument names to ignore
   // the first argument, which will be the object in both cases
-  bool isSubtypeOf(const FunctionSchema& rhs, bool as_method, std::ostream* why_not=nullptr) const;
+  bool isSubtypeOf(const FunctionSchema& rhs, bool as_method, const std::set<std::string>& ignored_arg_names, std::ostream* why_not=nullptr) const;
 };
 
 inline bool operator==(const FunctionSchema& lhs, const FunctionSchema& rhs) {
   return lhs.name() == rhs.name()
-     && lhs.overload_name() == rhs.overload_name()
-     && lhs.arguments() == rhs.arguments()
-     && lhs.returns() == rhs.returns()
-     && lhs.is_vararg() == rhs.is_vararg()
-     && lhs.is_varret() == rhs.is_varret();
+      && lhs.overload_name() == rhs.overload_name()
+      && lhs.arguments() == rhs.arguments()
+      && lhs.returns() == rhs.returns()
+      && lhs.is_vararg() == rhs.is_vararg()
+      && lhs.is_varret() == rhs.is_varret();
 }
 
 inline bool operator!=(const FunctionSchema& lhs, const FunctionSchema& rhs) {
@@ -382,7 +376,7 @@ inline std::ostream& operator<<(std::ostream& out, const Argument& arg) {
   // so we always use Type(alias)? format
   auto type = arg.type();
   bool is_opt = type->kind() == OptionalType::Kind;
-  auto unopt_type = is_opt ? type->castRaw<OptionalType>()->getElementType() : type;
+  auto unopt_type = is_opt ? type->cast<OptionalType>()->getElementType() : type;
 
   if (unopt_type->kind() == ListType::Kind && arg.N()) {
     // sized lists get size N from arg, not type
@@ -406,7 +400,7 @@ inline std::ostream& operator<<(std::ostream& out, const Argument& arg) {
 
   if (arg.default_value()) {
     out << "=";
-    if (type->kind() == c10::TypeKind::StringType || (unopt_type->kind() == c10::TypeKind::StringType && !arg.default_value().value().isNone())) {
+    if (type->kind() == c10::TypeKind::StringType) {
       printQuotedString(out, arg.default_value().value().toStringRef());
     } else {
       out << arg.default_value().value();
