@@ -12,7 +12,6 @@
 #include <c10/util/intrusive_ptr.h>
 #include <c10/core/Device.h>
 #include <c10/core/DispatchKeySet.h>
-#include <c10/util/python_stub.h>
 #include <c10/core/TensorImpl.h>
 
 /**
@@ -72,8 +71,8 @@ struct C10_API GeneratorImpl : public c10::intrusive_ptr_target {
   virtual void set_current_seed(uint64_t seed) = 0;
   virtual uint64_t current_seed() const = 0;
   virtual uint64_t seed() = 0;
-  virtual void set_state(const c10::TensorImpl& new_state) = 0;
-  virtual c10::intrusive_ptr<c10::TensorImpl> get_state() const = 0;
+  virtual void set_state(c10::TensorImpl& new_state) = 0;
+  virtual c10::intrusive_ptr<c10::TensorImpl> state() const = 0;
   Device device() const;
 
   // See Note [Acquire lock when using random generators]
@@ -81,18 +80,9 @@ struct C10_API GeneratorImpl : public c10::intrusive_ptr_target {
 
   DispatchKeySet key_set() const { return key_set_; }
 
-  inline void set_pyobj(PyObject* pyobj) noexcept {
-    pyobj_ = pyobj;
-  }
-
-  inline PyObject* pyobj() const noexcept {
-    return pyobj_;
-  }
-
   protected:
     Device device_;
     DispatchKeySet key_set_;
-    PyObject* pyobj_ = nullptr;
 
     virtual GeneratorImpl* clone_impl() const = 0;
 };
