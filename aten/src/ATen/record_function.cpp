@@ -189,16 +189,12 @@ class CallbackManager {
   // to be executed and whether any of them need inputs
   inline void init(RecordFunction& rec_fn, RecordScope scope, bool pre_sampled) {
     bool found_needs_inputs = false;
-    bool found_needs_outputs = false;
     bool found_needs_ids = false;
 
     for (const auto& cb: rf_tls_.sorted_tls_callbacks_) {
       if (callbackShouldRun(cb.first, scope, pre_sampled)) {
         if (cb.first.needsInputs()) {
           found_needs_inputs = true;
-        }
-        if (cb.first.needsOutputs()) {
-          found_needs_outputs = true;
         }
         if (cb.first.needsIds()) {
           found_needs_ids = true;
@@ -214,9 +210,6 @@ class CallbackManager {
       if (callbackShouldRun(cb.first, scope, pre_sampled)) {
         if (cb.first.needsInputs()) {
           found_needs_inputs = true;
-        }
-        if (cb.first.needsOutputs()) {
-          found_needs_outputs = true;
         }
         if (cb.first.needsIds()) {
           found_needs_ids = true;
@@ -237,7 +230,6 @@ class CallbackManager {
     rec_fn.state_->global_ctx_.resize(rec_fn.state_->sorted_active_global_handles_.size());
 
     rec_fn.state_->needs_inputs = found_needs_inputs;
-    rec_fn.state_->needs_outputs = found_needs_outputs;
     if (found_needs_ids) {
       rec_fn.setHandle(next_unique_record_function_handle());
     }
@@ -285,12 +277,10 @@ class CallbackManager {
       bool is_start) {
     try {
       if (is_start) {
-        ctx = rfcb.start() ? rfcb.start()(rf) : nullptr;
+        ctx = rfcb.start()(rf);
       }
       else {
-        if (rfcb.end()) {
-          rfcb.end()(rf, ctx.get());
-        }
+        rfcb.end()(rf, ctx.get());
       }
       return true;
     } catch (const std::exception &e) {
@@ -460,8 +450,6 @@ void RecordFunction::before(
   state_->sequence_nr_ = sequence_nr;
   state_->thread_id_ = currentThreadId();
   state_->operator_name_ = op.operator_name();
-  state_->op_input_size = op.schema().arguments().size();
-  state_->op_output_size = op.schema().returns().size();
   state_->name_ = StringView(op.schema().name());
 
   manager().runStartCallbacks(*this);
@@ -508,17 +496,14 @@ bool checkRecordAllFunctions() {
 
 bool shouldRunRecordFunction(bool* pre_sampled) {
   auto* rf_tls_ptr = &rf_tls_;
-  if (rf_tls_ptr->sorted_tls_callbacks_.empty() && !manager().hasGlobalCallbacks()) {
-    *pre_sampled = false;
-    return false;
-  }
-  if (global_record_all_functions_.load(std::memory_order_relaxed) > 0) {
-    *pre_sampled = false;
-    return true;
-  }
   if (!rf_tls_ptr->tls_record_function_enabled_) {
     *pre_sampled = false;
     return false;
+  }
+
+  if (global_record_all_functions_.load(std::memory_order_relaxed) > 0) {
+    *pre_sampled = false;
+    return true;
   }
 
   *pre_sampled = true;
