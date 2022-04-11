@@ -4,6 +4,7 @@
 
 #include <ATen/ATen.h>
 #include <torch/csrc/python_headers.h>
+#include <torch/csrc/utils/pybind.h>
 #include <tuple>
 
 #include <torch/csrc/Dtype.h>
@@ -43,13 +44,8 @@ inline PyObject* wrap(void* value) {
   return THPUtils_packInt64(reinterpret_cast<intptr_t>(value));
 }
 
-inline PyObject* wrap(THPDtype *dtype) {
-  Py_INCREF(dtype);
-  return (PyObject*)dtype;
-}
-
 inline PyObject* wrap(at::ScalarType scalarType) {
-  return wrap(getTHPDtype(scalarType));
+  return py::cast(scalarType).release().ptr();
 }
 
 inline PyObject* wrap(THPLayout *layout) {
@@ -65,7 +61,7 @@ inline PyObject* wrap(at::Tensor tensor) {
   return THPVariable_Wrap(Variable(std::move(tensor)));
 }
 
-inline PyObject* wrap(const at::Scalar& scalar) {
+inline PyObject* wrap(at::Scalar scalar) {
   return wrap(scalar_to_tensor(scalar));
 }
 
@@ -106,16 +102,6 @@ inline PyObject* wrap(PyTypeObject *type, std::tuple<at::Tensor, at::Tensor, at:
   PyStructSequence_SET_ITEM(r.get(), 0, wrap(std::get<0>(tensors)));
   PyStructSequence_SET_ITEM(r.get(), 1, wrap(std::get<1>(tensors)));
   PyStructSequence_SET_ITEM(r.get(), 2, wrap(std::get<2>(tensors)));
-  return r.release();
-}
-
-inline PyObject* wrap(PyTypeObject *type, std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> tensors) {
-  auto r = THPObjectPtr{PyStructSequence_New(type)};
-  if (!r) throw python_error();
-  PyStructSequence_SET_ITEM(r.get(), 0, wrap(std::get<0>(tensors)));
-  PyStructSequence_SET_ITEM(r.get(), 1, wrap(std::get<1>(tensors)));
-  PyStructSequence_SET_ITEM(r.get(), 2, wrap(std::get<2>(tensors)));
-  PyStructSequence_SET_ITEM(r.get(), 3, wrap(std::get<3>(tensors)));
   return r.release();
 }
 
