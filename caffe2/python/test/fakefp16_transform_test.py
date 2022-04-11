@@ -1,6 +1,6 @@
-
-
-
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
 
 import unittest
 from caffe2.python.fakefp16_transform_lib import fakeFp16FuseOps
@@ -19,6 +19,5 @@ class Transformer(unittest.TestCase):
                 deq, swish, quant
             ]
         )
-        print(net_swish.Proto())
         out_net = fakeFp16FuseOps(net_swish.Proto())
         assert(len(out_net.op) == 1)
