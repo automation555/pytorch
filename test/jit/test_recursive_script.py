@@ -1,3 +1,4 @@
+import unittest
 import os
 import sys
 import typing
@@ -82,7 +83,7 @@ class TestRecursiveScript(JitTestCase):
                 return self.fn(x)
 
         m = M(fn)
-        with self.assertRaisesRegexWithHighlight(RuntimeError, "failed to compile", "i_dont_exist"):
+        with self.assertRaisesRegex(RuntimeError, "failed to compile"):
             torch.jit.script(m)
 
     def test_init_error(self):
@@ -158,6 +159,7 @@ class TestRecursiveScript(JitTestCase):
             # Make sure that no entries are left over from the previous failure
             FileCheck().check_count("is being compiled", 2).run(str(e))
 
+    @unittest.skipIf(sys.version_info[:2] < (3, 7), "Class annotations are a thing in > 3.5, need to fix for < 3.7")
     def test_constants_with_final(self):
         class M1(torch.nn.Module):
             x : torch.jit.Final[int]
@@ -210,7 +212,7 @@ class TestRecursiveScript(JitTestCase):
             def forward(self, x):
                 return MyScriptClass()
 
-        with self.assertRaisesRegexWithHighlight(torch.jit.frontend.FrontendError, "Cannot instantiate class", "MyScriptClass"):
+        with self.assertRaisesRegex(torch.jit.frontend.FrontendError, "Cannot instantiate class"):
             t = torch.jit.script(TestModule())
 
     def test_method_call(self):
@@ -285,7 +287,8 @@ class TestRecursiveScript(JitTestCase):
         test_module_dir(nn.ModuleDict(OrderedDict([("conv", conv), ("linear", linear)])))
 
     def test_class_compile(self):
-        def other_fn(a: int, b: Tensor) -> Tensor:
+        def other_fn(a, b):
+            # type: (int, Tensor) -> Tensor
             return a * b
 
         class B(object):
@@ -307,7 +310,8 @@ class TestRecursiveScript(JitTestCase):
         self.checkModule(N(), (torch.randn(2, 2),))
 
     def test_error_stack(self):
-        def d(x: int) -> int:
+        def d(x):
+            # type: (int) -> int
             return x + 10
 
         def c(x):
@@ -330,7 +334,8 @@ class TestRecursiveScript(JitTestCase):
             checker.run(str(e))
 
     def test_error_stack_module(self):
-        def d(x: int) -> int:
+        def d(x):
+            # type: (int) -> int
             return x + 10
 
         def c(x):
@@ -492,59 +497,6 @@ class TestRecursiveScript(JitTestCase):
 
         self.checkModule(M(), (torch.randn(5, 5),))
 
-    def test_prepare_scriptable_basic(self):
-        class SeluButReluWhenScripted(torch.nn.SELU):
-            def __prepare_scriptable__(self):
-                return nn.ReLU()
-
-        t = torch.randn(5, 5)
-        m = SeluButReluWhenScripted()
-        sm = torch.jit.script(m)
-        eager_out = m(t)
-        script_out = sm(t)
-        self.assertNotEqual(eager_out, script_out)
-
-    def test_prepare_scriptable_iterable_modules(self):
-        class SeluButReluWhenScripted(torch.nn.SELU):
-            def __prepare_scriptable__(self):
-                return nn.ReLU()
-
-        class M(torch.nn.Module):
-            def __init__(self):
-                super(M, self).__init__()
-                shared = SeluButReluWhenScripted()
-                self.sequential = nn.Sequential(
-                    SeluButReluWhenScripted(),
-                    SeluButReluWhenScripted(),
-                    nn.Sequential(SeluButReluWhenScripted(), shared, SeluButReluWhenScripted()),
-                    shared,
-                )
-                self.module_list = nn.ModuleList([SeluButReluWhenScripted(),
-                                                  shared,
-                                                  SeluButReluWhenScripted()])
-
-            def forward(self, x):
-                for mod in self.module_list:
-                    x += mod(x)
-                x += self.sequential(x)
-                return x
-
-        t = torch.randn(5, 5)
-        m = M()
-        eager_out = m(t.clone())
-        sm = torch.jit.script(m)
-        script_out = sm(t.clone())
-        self.assertNotEqual(eager_out, script_out)
-
-    def test_prepare_scriptable_cycle(self):
-        t = torch.randn(5, 5)
-        c = torch.nn.Module()
-        p = torch.nn.Module()
-        c.__dict__["_p"] = p
-        p.__dict__["_c"] = c
-
-        sm = torch.jit.script(p)
-
     def test_attributes(self):
         @torch.jit.script
         class Inner2(object):
@@ -563,7 +515,8 @@ class TestRecursiveScript(JitTestCase):
                 self.a = 4
                 self.inner = Inner2()
 
-            def __setstate__(self, obj: Tuple[int, Inner2]) -> None:
+            def __setstate__(self, obj):
+                # type: (Tuple[int, Inner2]) -> None
                 a, inner = obj
                 self.a = a
                 self.inner = inner
@@ -672,6 +625,24 @@ class TestRecursiveScript(JitTestCase):
         m = M()
         self.checkModule(m, (torch.randn(5, 5), ))
 
+    def test_property(self):
+        class M(nn.Module):
+            def __init__(self):
+                super(M, self).__init__()
+                self.x = 0
+
+            @property
+            def x_and_1(self):
+                return self.x + 1
+
+            def forward(self, new_x):
+                # type: (int) -> int
+                self.x = new_x
+                return self.x_and_1
+
+        with self.assertRaisesRegex(RuntimeError, "property"):
+            torch.jit.script(M())
+
     def test_inner_traced_module(self):
         class Dummy(nn.Module):
             def forward(self, x):
@@ -729,3 +700,70 @@ class TestRecursiveScript(JitTestCase):
         self.checkModule(mod, (torch.rand(2, 2),))
         mod.foo = None
         self.checkModule(mod, (torch.rand(2, 2),))
+
+    def test_aliased_submodule(self):
+        class A(torch.nn.Module):
+            def __init__(self, submod1, submod2):
+                super().__init__()
+                self.submod1 = submod1
+                self.submod2 = submod2
+
+            def forward(self, x):
+                return x
+
+        class B(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+
+            def forward(self, x):
+                return x
+
+        b = B()
+        a = A(b, b)
+        self.checkModule(a, (torch.rand(2, 2),))
+        a_scripted = torch.jit.script(a)
+        # scripting should preserve aliasing relationships between modules
+        self.assertTrue(a_scripted.submod1 is a_scripted.submod2)
+
+    def test_aliased_submodule_mutation(self):
+        class SubModule(nn.Module):
+            def __init__(self):
+                super(SubModule, self).__init__()
+                self.a = 1.1
+                self.b = 2.2
+
+            def forward(self, x):
+                return self.a + self.b
+
+            @torch.jit.export
+            def modify_a(self, x):
+                self.a = 10.0
+                return self. b
+
+            @torch.jit.export
+            def modify_b(self, x):
+                self.b = 20.0
+                return self.a
+
+        Sub = SubModule()
+
+        class SubModule2(nn.Module):
+            def __init__(self):
+                super(SubModule2, self).__init__()
+                self.sub = Sub  # aliasing
+
+            def forward(self, x):
+                return self.sub.a
+
+        class TestModule(nn.Module):
+            def __init__(self):
+                super(TestModule, self).__init__()
+                self.sub1 = Sub  # aliasing
+                self.sub2 = SubModule2()
+
+            def forward(self, x):
+                z = self.sub1.modify_a(x)
+                return self.sub2(x) + z
+
+        m = TestModule()
+        self.checkModule(m, (torch.randn(2, 2),))
