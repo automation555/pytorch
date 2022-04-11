@@ -2,9 +2,9 @@ r'''
 **This file is EXPERIMENTAL and is mostly used for testing purposes! Do not
 rely on it for anything!**
 '''
-from torch.fx import Graph, GraphModule
-from torch.fx.graph import map_arg
-from torch.fx.proxy import Proxy
+from torch._fx import Graph, GraphModule
+from torch._fx.graph import map_arg
+from torch._fx.proxy import Proxy
 import sys
 import torch
 from torch.nn.utils import fuse_conv_bn_weights
@@ -164,7 +164,7 @@ def matches(modules, node, pattern, max_uses=sys.maxsize):
         self_match = pattern
         arg_matches = None
 
-    if len(node.users) > max_uses:
+    if node.uses > max_uses:
         return False
 
     if isinstance(self_match, type) and issubclass(self_match, torch.nn.Module):
@@ -219,7 +219,6 @@ class Quantizer:
         def load_arg(a):
             return map_arg(a, lambda node: env[node.name])
 
-        output_node : Optional[Node] = None
         for node in self.graph.nodes:
             if node.op == 'placeholder':
                 result = next(args_iter)
@@ -233,8 +232,6 @@ class Quantizer:
                 result = getattr(self_obj, node.target)(*args, **kwargs)
             elif node.op == 'call_module':
                 result = self.modules[node.target](*load_arg(node.args), **load_arg(node.kwargs))
-            elif node.op == 'output':
-                return load_arg(node.args[0])
 
             env[node.name] = result
             root_node, obj = self.matches.get(node.name, (None, None))
@@ -243,7 +240,7 @@ class Quantizer:
             if node.name in self.quants:
                 self.quants[node.name].observe(node, env)
 
-        raise RuntimeError('Graph had no output node!')
+        return load_arg(self.graph.result)
 
     def quantize(self):
         self.quantized_graph = Graph()
@@ -284,6 +281,7 @@ class Quantizer:
                 else:
                     quant_env[node.name] = r
 
+        self.quantized_graph.output(load_arg(self.graph.result, quantized=False))
         return GraphModule(self.root, self.quantized_graph)
 
     def _find_matches(self, patterns):
