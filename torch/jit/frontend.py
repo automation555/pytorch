@@ -18,7 +18,7 @@ from torch._C._jit_tree_views import (
 )
 from torch._utils_internal import get_source_lines_and_file
 
-from torch._jit_internal import SourceContext, should_drop, is_static_fn
+from torch._jit_internal import SourceContext, createResolutionCallbackFromClosure, should_drop, is_static_fn
 import torch.jit.annotations
 
 # Borrowed from cPython implementation
@@ -166,14 +166,9 @@ def get_jit_class_def(cls, self_name):
         and not is_static_fn(cls, m.__name__)
         and m.__name__ in cls.__dict__
     )
-
-    def is_classmethod(fn):
-        return inspect.ismethod(fn) and getattr(fn, "__self__", None) == cls
-
     methods = [get_jit_def(method[1],
                            method[0],
-                           self_name=self_name,
-                           is_classmethod=is_classmethod(method[1])) for method in methods]
+                           self_name=self_name) for method in methods]
 
     properties = get_class_properties(cls, self_name)
 
@@ -222,7 +217,39 @@ def normalize_source_lines(sourcelines: List[str]) -> List[str]:
     return aligned_prefix + aligned_suffix
 
 
-def get_jit_def(fn, def_name, self_name=None, is_classmethod=False):
+def check_fn_decorators_supported(fn_def, ctx, rcb):
+    """
+    Check that all decorators present in fn_def are supported by JIT.
+
+    Args:
+        fn_def: The ast.FunctionDef object.
+        ctx: A SourceContext instance. Used for source highlighting
+            when an unsupported decorator is found.
+        rcb: A resolution callback used to resolve decorator instances.
+            This helps handle cases of import aliasing.
+    """
+    # Small function for converting AST subtrees representing decorators
+    # to their full names.
+    def get_decorator_name(decorator):
+        if isinstance(decorator, ast.Call):
+            return get_decorator_name(decorator.func)
+        elif isinstance(decorator, ast.Attribute):
+            return f"{get_decorator_name(decorator.value)}.{decorator.attr}"
+        elif isinstance(decorator, ast.Name):
+            return decorator.id
+        else:
+            raise RuntimeError(f"Unsupported node type: {type(decorator)}")
+
+    for decorator in fn_def.decorator_list:
+        if isinstance(decorator, ast.Call):
+            decorator_name = get_decorator_name(decorator)
+            decorator_obj = rcb(decorator_name)
+            if decorator_obj == torch.no_grad:
+                ctx_range = ctx.make_range(decorator.lineno, decorator.col_offset, decorator.col_offset + len(decorator_name))
+                raise NotSupportedError(ctx_range, "Using no_grad as a decorator is not supported")
+
+
+def get_jit_def(fn, def_name, self_name=None):
     """
     Build a JIT AST (TreeView) from the given function.
 
@@ -249,11 +276,8 @@ def get_jit_def(fn, def_name, self_name=None, is_classmethod=False):
     ctx = SourceContext(source, filename, file_lineno, leading_whitespace_len, True)
     fn_def = py_ast.body[0]
 
-    if is_classmethod:
-        arg_name = fn_def.args.args[0].arg
-        # Insert a statement that assigns the first argument to the class
-        assign_stmt = ast.parse(f"{arg_name} = {self_name}").body[0]
-        fn_def.body.insert(0, assign_stmt)
+    # Check that all decorators applied to fn are supported.
+    check_fn_decorators_supported(fn_def, ctx, createResolutionCallbackFromClosure(fn))
 
     # Swap out the function signature and body if it is unused
     if should_drop(fn):
@@ -483,9 +507,6 @@ class StmtBuilder(Builder):
     @staticmethod
     def build_For(ctx, stmt):
         r = ctx.make_range(stmt.lineno, stmt.col_offset, stmt.col_offset + len("for"))
-        if stmt.orelse:
-            raise NotSupportedError(r, "else branches of for loops aren't supported")
-
         return For(
             r, [build_expr(ctx, stmt.target)],
             [build_expr(ctx, stmt.iter)], build_stmts(ctx, stmt.body))
@@ -617,8 +638,6 @@ class ExprBuilder(Builder):
             return FalseLiteral(r)
         elif expr.id == "None":
             return NoneLiteral(r)
-        elif expr.id == "Ellipsis":
-            return Dots(r)
         return Var(Ident(r, expr.id))
 
     @staticmethod
@@ -630,8 +649,6 @@ class ExprBuilder(Builder):
             return FalseLiteral(r)
         elif expr.value is None:
             return NoneLiteral(r)
-        elif expr.value == Ellipsis:
-            return Dots(r)
         else:
             raise ValueError("Name constant value unsupported: " + str(expr.value))
 
@@ -779,11 +796,8 @@ class ExprBuilder(Builder):
 
     @staticmethod
     def build_Dict(ctx, expr):
-        range = ctx.make_range(expr.lineno, expr.col_offset, expr.col_offset + 1)
-        if expr.keys and not expr.keys[0]:
-            raise NotSupportedError(range, "Dict expansion (e.g. `{**dict}`) is not supported")
-        return DictLiteral(range, [build_expr(ctx, e) for e in expr.keys],
-                           [build_expr(ctx, e) for e in expr.values])
+        return DictLiteral(ctx.make_range(expr.lineno, expr.col_offset, expr.col_offset + 1),
+                           [build_expr(ctx, e) for e in expr.keys], [build_expr(ctx, e) for e in expr.values])
 
     @staticmethod
     def build_Num(ctx, expr):
@@ -798,7 +812,7 @@ class ExprBuilder(Builder):
             # NB: this check has to happen before the int check because bool is
             # a subclass of int
             return ExprBuilder.build_NameConstant(ctx, expr)
-        if isinstance(value, (int, float, complex)):
+        if isinstance(value, (int, float)):
             return ExprBuilder.build_Num(ctx, expr)
         elif isinstance(value, str):
             return ExprBuilder.build_Str(ctx, expr)
