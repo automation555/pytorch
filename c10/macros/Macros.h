@@ -186,10 +186,10 @@ namespace at { namespace cuda { using namespace c10::hip; }}
 #define C10_NOINLINE
 #endif
 
-#if defined(_MSC_VER)
-#define C10_ALWAYS_INLINE __forceinline
-#elif __has_attribute(always_inline) || defined(__GNUC__)
+#if __has_attribute(always_inline) || defined(__GNUC__)
 #define C10_ALWAYS_INLINE __attribute__((__always_inline__)) inline
+#elif defined(_MSC_VER)
+#define C10_ALWAYS_INLINE __forceinline
 #else
 #define C10_ALWAYS_INLINE inline
 #endif
@@ -260,7 +260,7 @@ constexpr uint32_t CUDA_THREADS_PER_BLOCK_FALLBACK = 256;
 // CUDA_KERNEL_ASSERT checks the assertion
 // even when NDEBUG is defined. This is useful for important assertions in CUDA
 // code that would otherwise be suppressed when building Release.
-#if defined(__ANDROID__) || defined(__APPLE__) || defined(__HIP_PLATFORM_HCC__)
+#if defined(__ANDROID__) || defined(__APPLE__)
 // Those platforms do not support assert()
 #define CUDA_KERNEL_ASSERT(cond)
 #elif defined(_MSC_VER)
