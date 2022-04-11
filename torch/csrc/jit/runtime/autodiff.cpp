@@ -14,6 +14,8 @@
 #include <torch/csrc/jit/runtime/symbolic_script.h>
 #include <algorithm>
 #include <memory>
+#include "ATen/core/interned_strings.h"
+#include "jit/ir/ir.h"
 
 namespace torch {
 namespace jit {
@@ -346,6 +348,18 @@ struct ReverseDetails {
   Block* reverse_block;
 };
 
+static void unwrapOptionalGradient(Value* dx) {
+  const static auto optional_tensor_type =
+      OptionalType::create(TensorType::get());
+
+  if (auto opt_type = dx->type()->cast<OptionalType>()) {
+    if (auto tensor_type = opt_type->getElementType()->cast<TensorType>()) {
+      GRAPH_DEBUG("Unwrapping the optional part of ", dx->debugName());
+      dx->setType(tensor_type);
+    }
+  }
+}
+
 // AutogradAdd is a special addition function that handles Undef
 // AutogradAdd(a, b) == a + b if defined(a) and defined(b)
 // AutogradAdd(Undef, b) == b
@@ -431,6 +445,12 @@ static ReverseDetails addReverseInline(Gradient& grad_desc) {
       // aten::type_as case.
       if (!grad_inputs[i])
         continue;
+
+      // if a backward function returns `None` or `Tensor` (i.e.
+      // Optional[Tensor]) as a gradient for one of the forward's inputs, we
+      // need to strip off the optional part, otherwise any following
+      // computations that use the gradient may fail schema matching
+      unwrapOptionalGradient(grad_inputs[i]);
       set_grad(inputs[i], grad_inputs[i]);
     }
   }
