@@ -1,12 +1,11 @@
 import atexit
 import shutil
-import re
 import tempfile
-import textwrap
 from typing import List, Optional, Tuple
 
-from core.api import GroupedBenchmark, TimerArgs
-from core.types import Definition, FlatIntermediateDefinition, Label
+from core.api import AutogradMode, AutoLabels, RuntimeMode, TimerArgs, GroupedBenchmark
+from core.jit import generate_torchscript_file
+from core.types import Definition, FlatDefinition, FlatIntermediateDefinition, Label
 
 
 _TEMPDIR: Optional[str] = None
@@ -44,7 +43,6 @@ def _flatten(
 
 
 def flatten(schema: Definition) -> FlatIntermediateDefinition:
-    """See types.py for an explanation of nested vs. flat definitions."""
     result: FlatIntermediateDefinition = {}
     _flatten(key_prefix=(), sub_schema=schema, result=result)
 
@@ -56,44 +54,29 @@ def flatten(schema: Definition) -> FlatIntermediateDefinition:
     return result
 
 
-def parse_stmts(stmts: str) -> Tuple[str, str]:
-    """Helper function for side-by-side Python and C++ stmts.
+def unpack(definitions: FlatIntermediateDefinition) -> FlatDefinition:
+    results: List[Tuple[Label, AutoLabels, TimerArgs]] = []
 
-    For more complex statements, it can be useful to see Python and C++ code
-    side by side. To this end, we provide an **extremely restricted** way
-    to define Python and C++ code side-by-side. The schema should be mostly
-    self explanatory, with the following non-obvious caveats:
-      - Width for the left (Python) column MUST be 40 characters.
-      - The column separator is " | ", not "|". Whitespace matters.
-    """
-    stmts = textwrap.dedent(stmts).strip()
-    lines: List[str] = stmts.splitlines(keepends=False)
-    assert len(lines) >= 3, f"Invalid string:\n{stmts}"
+    for label, args in definitions.items():
+        if isinstance(args, TimerArgs):
+            auto_labels = AutoLabels(
+                RuntimeMode.EXPLICIT,
+                AutogradMode.EXPLICIT,
+                args.language
+            )
+            results.append((label, auto_labels, args))
 
-    column_header_pattern = r"^Python\s{35}\| C\+\+(\s*)$"
-    signature_pattern = r"^: f\((.*)\)( -> (.+))?\s*$"
-    separation_pattern = r"^[-]{40} | [-]{40}$"
-    code_pattern = r"^(.{40}) \|($| (.*)$)"
+        else:
+            assert isinstance(args, GroupedBenchmark)
 
-    column_match = re.search(column_header_pattern, lines[0])
-    if column_match is None:
-        raise ValueError(
-            f"Column header `{lines[0]}` "
-            f"does not match pattern `{column_header_pattern}`")
+            model_path: Optional[str] = None
+            ts_model_setup = args.ts_model_setup
+            if ts_model_setup is not None:
+                name: str = re.sub(r'[^a-z0-9_]', '_', '_'.join(label).lower())
+                name = f"{name}_{uuid.uuid4()}"
+                model_path = generate_torchscript_file(ts_model_setup, name=name, temp_dir=get_temp_dir())
 
-    assert re.search(separation_pattern, lines[1])
+            for auto_labels, timer_args in args.flatten(model_path):
+                results.append((label, auto_labels, timer_args))
 
-    py_lines: List[str] = []
-    cpp_lines: List[str] = []
-    for l in lines[2:]:
-        l_match = re.search(code_pattern, l)
-        if l_match is None:
-            raise ValueError(f"Invalid line `{l}`")
-        py_lines.append(l_match.groups()[0])
-        cpp_lines.append(l_match.groups()[2] or "")
-
-        # Make sure we can round trip for correctness.
-        l_from_stmts = f"{py_lines[-1]:<40} | {cpp_lines[-1]:<40}".rstrip()
-        assert l_from_stmts == l.rstrip(), f"Failed to round trip `{l}`"
-
-    return "\n".join(py_lines), "\n".join(cpp_lines)
+    return tuple(results)
