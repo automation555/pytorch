@@ -20,10 +20,12 @@ if [[ "$PACKAGE_TYPE" == libtorch ]]; then
   unzip "$pkg" -d /tmp
   cd /tmp/libtorch
 elif [[ "$PACKAGE_TYPE" == conda ]]; then
-  conda install -y "$pkg"
+  conda install -y "$pkg" --offline
 else
-  pip install "$pkg" -v
+  pip install "$pkg" --no-index --no-dependencies -v
 fi
+
+export TORCH_SHOW_CPP_STACKTRACES=1
 
 # Test
 if [[ "$PACKAGE_TYPE" == libtorch ]]; then
