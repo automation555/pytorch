@@ -34,6 +34,7 @@ struct IndexRangeGenerator {
 bool isFwGradDefined(const c10::optional<Tensor>& t);
 Tensor toNonOptFwGrad(const c10::optional<Tensor>& t);
 Tensor toNonOptPrimal(const c10::optional<Tensor>& t);
+Tensor toNonOptTensor(const c10::optional<Tensor>& t);
 
 bool any_variable_defined(variable_list& variables);
 void copy_range(variable_list& out, IndexRange range, const at::Tensor & t);
@@ -57,8 +58,8 @@ at::Tensor angle_backward(at::Tensor grad, const at::Tensor& self);
 at::Tensor mul_tensor_backward(Tensor grad, Tensor other, ScalarType self_st);
 at::Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st);
 at::Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other);
-at::Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st, const c10::optional<std::string>& rounding_mode);
-at::Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other, const c10::optional<std::string>& rounding_mode);
+at::Tensor div_tensor_self_backward(Tensor grad, Tensor other, ScalarType self_st, c10::string_view rounding_mode);
+at::Tensor div_tensor_other_backward(Tensor grad, Tensor self, Tensor other, c10::string_view rounding_mode);
 at::Tensor mvlgamma_backward(at::Tensor grad, const at::Tensor & self, int64_t p);
 at::Tensor permute_backwards(const at::Tensor & grad, at::IntArrayRef fwd_dims);
 at::Tensor rad2deg_backward(const at::Tensor& grad);
@@ -160,7 +161,7 @@ Tensor linalg_qr_backward(const std::vector<torch::autograd::Variable> &grads, c
                           std::string mode, const Tensor& Q, const Tensor& R);
 Tensor eig_backward(const std::vector<torch::autograd::Variable> &grads, const Tensor& self,
                     bool eigenvectors, const Tensor& lambda, const Tensor& v);
-Tensor linalg_det_backward(const Tensor & grad, const Tensor& self, const Tensor& det);
+Tensor det_backward(const Tensor & grad, const Tensor& self, const Tensor& det);
 std::tuple<Tensor, Tensor, Tensor> batchnorm_double_backward(
     const Tensor & input,
     const c10::optional<Tensor> & gamma,
@@ -228,6 +229,25 @@ std::tuple<Tensor, Tensor> householder_product_backward(const Tensor& grad, cons
 std::tuple<Tensor, Tensor> polar_backward(
     const Tensor& grad,
     const Tensor& result);
+
+Tensor slow_conv_dilated2d_forward_grad(const Tensor& self_fw_grad, const Tensor& weight_fw_grad, IntArrayRef kernel_size, const Tensor& bias_fw_grad,
+        const Tensor& self, const Tensor& weight, IntArrayRef stride, IntArrayRef padding, IntArrayRef dilation, const Tensor& result);
+Tensor native_batch_norm_forward(const Tensor& input_fw_grad, const Tensor& input, const c10::optional<at::Tensor> weight,
+        const c10::optional<at::Tensor>  running_mean, const c10::optional<at::Tensor>  running_var, const Tensor& result1,
+        const Tensor& result2, bool training, float eps, const Tensor& weight_fw_grad, const Tensor& bias_fw_grad);
+Tensor max_pool2d_with_indices_forward(const Tensor& self_fw_grad, const Tensor& indices);
+Tensor _log_softmax_foward(const Tensor& self_fw_grad, const Tensor& result, int dim);
+Tensor stack_forward(at::TensorList tensors, int64_t dim);
+Tensor cat_forward(at::TensorList tensors, int64_t dim);
+Tensor max_forward(const Tensor& self_fw_grad, const Tensor& self, const Tensor& result);
+at::Tensor apply_loss_reduction(const at::Tensor& unreduced, int64_t reduction);
+Tensor binary_cross_entropy_with_logits_forward(const at::Tensor& self_fw_grad, const at::Tensor& target_fw_grad,
+        const at::Tensor& self, const at::Tensor& target, const c10::optional<at::Tensor> weight,
+        const c10::optional<at::Tensor> pos_weight, int64_t reduction);
+Tensor min_max_other_forward(const at::Tensor& self_fw_grad, const at::Tensor& other_fw_grad, const at::Tensor& self,
+        const at::Tensor& other, bool is_min);
+Tensor max_dim_forward(const Tensor& self_fw_grad, int64_t dim, const Tensor& indices, bool keepdim);
+
 
 } // namespace details
 } // namespace generated
