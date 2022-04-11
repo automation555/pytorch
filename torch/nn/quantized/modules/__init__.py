@@ -1,13 +1,15 @@
+
 import torch
 from torch.nn.modules.pooling import MaxPool2d
 
-from .activation import ReLU6, Hardswish, ELU, LeakyReLU, Sigmoid
+from .activation import ReLU, ReLU6, Hardswish, ELU, LeakyReLU, Sigmoid
 from .batchnorm import BatchNorm2d, BatchNorm3d
 from .normalization import LayerNorm, GroupNorm, InstanceNorm1d, \
     InstanceNorm2d, InstanceNorm3d
-from .conv import _ConvNd, Conv1d, Conv2d, Conv3d
+from .conv import Conv1d, Conv2d, Conv3d
 from .conv import ConvTranspose1d, ConvTranspose2d, ConvTranspose3d
 from .linear import Linear
+from .rnn import LSTMCell, LSTM
 from .embedding_ops import Embedding, EmbeddingBag
 
 from .functional_modules import FloatFunctional, FXFloatFunctional, QFunctional
@@ -85,7 +87,6 @@ class DeQuantize(torch.nn.Module):
 __all__ = [
     'BatchNorm2d',
     'BatchNorm3d',
-    '_ConvNd',
     'Conv1d',
     'Conv2d',
     'Conv3d',
@@ -104,8 +105,11 @@ __all__ = [
     'LayerNorm',
     'LeakyReLU',
     'Linear',
+    'LSTM',
+    'LSTMCell',
     'MaxPool2d',
     'Quantize',
+    'ReLU',
     'ReLU6',
     'Sigmoid',
     # Wrapper modules
