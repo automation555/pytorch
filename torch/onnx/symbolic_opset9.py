@@ -11,7 +11,7 @@ from functools import partial
 from functools import wraps
 
 import torch.onnx.symbolic_helper as sym_help
-from torch.onnx.symbolic_helper import parse_args, _parse_arg, _unimplemented
+from torch.onnx.symbolic_helper import _is_value, parse_args, _parse_arg, _unimplemented
 
 from typing import Optional
 
@@ -113,14 +113,14 @@ def div(g, self, other, *args):
 
 @parse_args('v', 'v', 's')
 def _div_rounding_mode(g, self, other, rounding_mode):
-    if rounding_mode is None:
+    if rounding_mode == 'true':
         return true_divide(g, self, other)
     elif rounding_mode == 'floor':
         return _floor_divide(g, self, other)
     elif rounding_mode == 'trunc':
         return _trunc_divide(g, self, other)
     else:
-        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected None, "floor" or "trunc"')
+        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected "true", "floor" or "trunc"')
 
 
 def _trunc_divide(g, self, other):
@@ -1866,12 +1866,6 @@ def hardswish(g, self):
     hardtanh_ = g.op("Div", hardtanh_, g.op('Constant', value_t=torch.tensor(6, dtype=torch.float)))
     return g.op("Mul", self, hardtanh_)
 
-
-@parse_args('v')
-def hardsigmoid(g, self):
-    return g.op('HardSigmoid', self, alpha_f=1 / 6)
-
-
 def alias(g, self):
     return self
 
@@ -1933,8 +1927,21 @@ def to(g, self, *args):
             # aten::to(Tensor, Device, bool, bool, memory_format)
             return self
         else:
-            dtype = sym_help._maybe_get_const(args[0], 'i')
-            if sym_help._is_value(dtype):
+            # TODO: The logic here is weird for test/onnx/test_pytorch_onnx_onnxruntime.py::TestONNXRuntime::test_ones_bool
+            # It is aten::to(Tensor, Tensor, bool, bool, memory_format) but
+            # args[0] = Bool(2, 3, 4, strides=[12, 4, 1], requires_grad=0, device=cpu) = onnx::Constant[value=<Tensor>]()
+            # The Constant value is a tensor not int.
+            dtype = args[0]
+            if _is_value(args[0]) and args[0].node().kind() == 'onnx::Constant':
+                tval = args[0].node()['value']
+                if isinstance(tval, torch.Tensor):
+                    if len(tval.shape) == 0:
+                        tval = tval.item()
+                        dtype = int(tval)
+                    else:
+                        dtype = tval
+
+            if sym_help._is_value(dtype) or isinstance(dtype, torch.Tensor):
                 # aten::to(Tensor, Tensor, bool, bool, memory_format)
                 other = args[0]
                 dtype = other.type().scalarType()
@@ -2002,13 +2009,17 @@ def repeat_interleave(g, self, repeats, dim=None):
         if not sym_help._is_tensor(repeats):
             repeats = g.op("Constant", value_t=torch.LongTensor(repeats))
         if input_sizes[dim] == 0:
-            raise NotImplementedError("Unsupported repeat_interleave along dimension with unknown input size")
+            return sym_help._onnx_opset_unsupported_detailed('repeat_interleave', 9, 11,
+                                                             'Unsupported along dimension with unknown input size')
         else:
             reps = input_sizes[dim]
             repeats = expand(g, repeats, g.op("Constant", value_t=torch.tensor([reps])), None)
 
     # Cases where repeats is a 1 dim Tensor
     elif repeats_dim == 1:
+        if input_sizes[dim] == 0:
+            return sym_help._onnx_opset_unsupported_detailed('repeat_interleave', 9, 11,
+                                                             'Unsupported along dimension with unknown input size')
         assert repeats_sizes[0] == input_sizes[dim], "repeats must have the same size as input along dim"
         reps = repeats_sizes[0]
     else:
@@ -3018,5 +3029,24 @@ def linear(g, input, weight, bias):
         output = matmul(g, input, weight)
         if not bias.node().mustBeNone():
             output = add(g, bias, output)
+
+    return output
+
+@parse_args('v', 'b', 'i', 'v', 'v', 'v', 'v')
+def hann_window(g, window_length, periodic=True, dtype=None, layout=None, device=None, pin_memory=None, requires_grad=False):
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+        if sym_help._dtype_is_fp(dtype) is False:
+            dtype = torch.float
+        dtype = sym_help.scalar_type_to_pytorch_type.index(dtype)
+
+    n_array = arange(g, window_length, 4, None, None, None)
+    output = g.op('Cast', n_array, to_i=sym_help.cast_pytorch_to_onnx['Float'])
+    output = mul(g, g.op('Constant', value_t=torch.tensor(math.pi, dtype=torch.float)), output)
+
+    if periodic is False:
+        window_length = sub(g, window_length, g.op("Constant", value_t=torch.tensor(1, dtype=torch.int)))
+    output = div(g, output, window_length)
+    output = g.op("Cast", square(g, sin(g, output)), to_i=sym_help.scalar_type_to_onnx[dtype])
 
     return output

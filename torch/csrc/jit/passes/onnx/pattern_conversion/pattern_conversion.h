@@ -38,7 +38,8 @@ namespace jit {
 TORCH_API std::vector<Value*> ConvertPatternFromSubblock(
     Block* new_block,
     Node* old_node,
-    std::unordered_map<Value*, Value*>& env);
+    std::unordered_map<Value*, Value*>& env,
+    bool static_input_shape);
 
 } // namespace jit
 } // namespace torch

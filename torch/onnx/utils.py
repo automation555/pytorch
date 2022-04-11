@@ -23,11 +23,21 @@ from typing import Union, Tuple, List
 
 # the flag to tell the user whether it's in the middle of ONNX export or not
 __IN_ONNX_EXPORT = False
+# The input shapes are all static or not.
+__static_input_shape = False
 
 
 def is_in_onnx_export():
     global __IN_ONNX_EXPORT
     return __IN_ONNX_EXPORT
+
+def get_static_input_shape():
+    global __static_input_shape
+    return __static_input_shape
+
+def set_static_input_shape(static_input_shape):
+    global __static_input_shape
+    __static_input_shape = static_input_shape
 
 # Skip check due to cannot import IValue from torch._C
 _params_dict = {}  # type: ignore
@@ -125,6 +135,7 @@ def _split_tensor_list_constants(g, block):
 
 def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=False, fixed_batch_size=False,
                     params_dict=None, dynamic_axes=None, input_names=None, module=None):
+    set_static_input_shape(dynamic_axes in [None, {}])
     # Inline everything
     torch._C._jit_pass_inline(graph)
 
@@ -151,6 +162,7 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
     torch._C._jit_pass_peephole(graph, True)
     torch._C._jit_pass_fuse_addmm(graph)
     torch._C._jit_pass_lint(graph)
+    from torch.onnx.symbolic_helper import _onnx_shape_inference, _export_onnx_opset_version
 
     if operator_export_type != OperatorExportTypes.RAW:
         torch._C._jit_pass_peephole(graph, True)
@@ -192,12 +204,12 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
         # onnx only supports tensors, so we turn all out number types into tensors
         torch._C._jit_pass_erase_number_types(graph)
 
-        from torch.onnx.symbolic_helper import _onnx_shape_inference
         if _onnx_shape_inference:
             input_names = [] if input_names is None else input_names
             dynamic_axes = {} if dynamic_axes is None else dynamic_axes
             torch._C._jit_pass_onnx_set_dynamic_input_shape(graph, dynamic_axes, input_names)
-        graph = torch._C._jit_pass_onnx(graph, operator_export_type)
+        graph = torch._C._jit_pass_onnx(graph, operator_export_type, get_static_input_shape(), params_dict,
+                                        _export_onnx_opset_version)
         torch._C._jit_pass_lint(graph)
 
         torch._C._jit_pass_onnx_scalar_type_analysis(graph)
@@ -218,9 +230,8 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
     torch._C._jit_pass_lint(graph)
     graph = torch._C._jit_pass_canonicalize(graph)
     torch._C._jit_pass_lint(graph)
-    from torch.onnx.symbolic_helper import _onnx_shape_inference, _export_onnx_opset_version
     if _onnx_shape_inference:
-        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version)
+        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version, get_static_input_shape())
     return graph
 
 
@@ -434,6 +445,7 @@ def _model_to_graph(model, args, verbose=False,
                     _retain_param_name=False, do_constant_folding=True,
                     _disable_torch_constant_prop=False, fixed_batch_size=False,
                     training=None, dynamic_axes=None):
+    set_static_input_shape(dynamic_axes in [None, {}])
     from torch.onnx.symbolic_helper import _export_onnx_opset_version
     # Special case for common case of passing a single Tensor
     if isinstance(args, (torch.Tensor, int, float, bool)):
@@ -490,7 +502,7 @@ def _model_to_graph(model, args, verbose=False,
         torch._C._jit_pass_dce_allow_deleting_nodes_with_side_effects(graph)
 
     if _onnx_shape_inference:
-        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version)
+        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version, get_static_input_shape())
 
     params_dict = torch._C._jit_pass_onnx_eliminate_unused_items(graph, params_dict)
 
@@ -636,6 +648,9 @@ def _export(model, args, f, export_params=True, verbose=False, training=None,
     global __IN_ONNX_EXPORT
     assert __IN_ONNX_EXPORT is False
     __IN_ONNX_EXPORT = True
+
+    set_static_input_shape(dynamic_axes in [None, {}])
+
     try:
         from torch.onnx.symbolic_helper import _set_onnx_shape_inference
         _set_onnx_shape_inference(onnx_shape_inference)
@@ -874,7 +889,7 @@ def _graph_op(g, opname, *raw_args, **kwargs):
     from torch.onnx.symbolic_helper import _onnx_shape_inference
     if _onnx_shape_inference:
         from torch.onnx.symbolic_helper import _export_onnx_opset_version as opset_version
-        torch._C._jit_pass_onnx_node_shape_type_inference(n, _params_dict, opset_version)
+        torch._C._jit_pass_onnx_node_shape_type_inference(n, _params_dict, opset_version, get_static_input_shape())
 
     if outputs == 1:
         return n.output()
@@ -955,7 +970,7 @@ def _run_symbolic_function(g, block, n, inputs, env, operator_export_type=Operat
         ns, op_name = ns_op_name.split("::")
         if ns == "onnx":
             if op_name == "Placeholder":
-                return torch._C._jit_onnx_convert_pattern_from_subblock(block, n, env)
+                return torch._C._jit_onnx_convert_pattern_from_subblock(block, n, env, get_static_input_shape())
             else:
                 # Use the original node directly
                 attrs = {k + "_" + n.kindOf(k)[0]: n[k] for k in n.attributeNames()}
@@ -1004,35 +1019,98 @@ def _run_symbolic_function(g, block, n, inputs, env, operator_export_type=Operat
             elif op_name == "device" and n.output().type().kind() == "DeviceObjType":
                 return None
             elif op_name == 'Loop' or op_name == 'If':
-                new_op_outputs = g.op(op_name, *inputs, outputs=n.outputsSize())
-                new_node = new_op_outputs[0].node() if n.outputsSize() > 1 else new_op_outputs.node()
-                for b in n.blocks():
-                    new_block = new_node.addBlock()
-                    # Copy input metadata to subblock
+                static_if = False
+                enable_const_folding = False
+                is_sub_block = False
+                if op_name == "If" and inputs[0].node().kind() == "onnx::Constant":
+                    # Fold static if
                     #
-                    # If format:
-                    #   prim::If(cond)
-                    #     block0()
-                    #     block1()
+                    # The torch IR
+                    # graph(%embedding_matrix.1 : Float(10, 15, strides=[15, 1], requires_grad=0, device=cpu),
+                    #    %input.1 : Long(6, strides=[1], requires_grad=0, device=cpu), ...
+                    # %65 : Bool(requires_grad=0, device=cpu) = prim::Constant[value={0}]()
+                    # %21 : Long(device=cpu) = aten::eq(%20, %64)
+                    # %22 : Long(device=cpu) = prim::If(%21)
+                    #     block0():
+                    #     %23 : Long(device=cpu) = aten::is_floating_point(%input.1)
+                    #     -> (%23)
+                    #     block1():
+                    #     -> (%65)
+                    # %input.53 : Tensor, %weight : Tensor = prim::If(%22)
+                    #     block0():
+                    #     -> (%embedding_matrix.1, %input.1)
+                    #     block1():
+                    #     -> (%input.1, %embedding_matrix.1)
                     #
-                    # Loop format:
-                    #   prim::Loop(iter, cond, input_1, ..., input_n)
-                    #     block0(iter, input_1, ..., input_n)
+                    # The converted ONNX graph
+                    # %10 : Bool(device=cpu) = onnx::Constant[value={0}]()
+                    # %14 : Bool(device=cpu) = onnx::Equal(%13, %8)
+                    # %15 : Bool(requires_grad=0, device=cpu) = onnx::Constant[value={0}]()
+                    # %16 : Long(6, strides=[1], device=cpu) = onnx::Identity(%input.1)
+                    # %17 : Float(10, 15, strides=[15, 1], device=cpu) = onnx::Identity(%embedding_matrix.1)
                     #
-                    # For `If` node, there is nothing to copy.
-                    # For `Loop` node, copy metadata for `iter`, `input_1`, ..., `input_n`.
-                    for i, b_in in enumerate(b.inputs()):
-                        if i == 0 and i < len(inputs):
-                            b_in.setType(inputs[i].type())
-                        if i > 0 and (i + 1) < len(inputs):
-                            b_in.setType(inputs[i + 1].type())
-                    torch._C._jit_pass_onnx_block(b, new_block, operator_export_type, env)
-                new_op_outputs = torch._C._jit_pass_fixup_onnx_controlflow_node(new_node, opset_version)
-                # Process Loop and If after subblock is converted.
-                from torch.onnx.symbolic_helper import _onnx_shape_inference
-                if _onnx_shape_inference:
-                    torch._C._jit_pass_onnx_node_shape_type_inference(new_node, _params_dict, opset_version)
-                return new_op_outputs
+                    # env: 65:10, 21:14, 22:10, input.53:16, weight:17
+                    # embedding_matrix.1 and input.1 are prim::Param, so we need convert to ONNX Identity to do shape inference.
+                    torch._C._jit_pass_onnx_node_shape_type_inference(inputs[0].node(), _params_dict, opset_version,
+                                                                      get_static_input_shape())
+                    static_if = True
+                    input_flag = inputs[0].node()['value'].tolist()
+                    if isinstance(input_flag, list):
+                        const_value = all(input_flag)
+                    else:
+                        const_value = bool(input_flag)
+                    block_idx = 0 if const_value else 1
+                    current_b = list(n.blocks())[block_idx]
+                    is_sub_block = True
+                    env = torch._C._jit_pass_onnx_block(current_b, block, operator_export_type, env, get_static_input_shape(),
+                                                        _params_dict, opset_version, enable_const_folding, is_sub_block)
+                    if_output_list = list(n.outputs())
+                    current_b_list = list(current_b.outputs())
+                    final_b_list = []
+                    for idx in range(len(if_output_list)):
+                        if current_b_list[idx] not in env:
+                            raise RuntimeError("The sub block ATen output " + current_b_list[idx] + " is not in env")
+                        if "onnx" in env[current_b_list[idx]].node().kind():
+                            onnx_b = env[current_b_list[idx]]
+                        else:
+                            onnx_b = g.op("Identity", env[current_b_list[idx]])
+                        final_b_list.append(onnx_b)
+                        torch._C._jit_pass_onnx_node_shape_type_inference(onnx_b.node(), _params_dict, opset_version,
+                                                                          get_static_input_shape())
+
+                    return final_b_list
+                else:
+                    new_op_outputs = g.op(op_name, *inputs, outputs=n.outputsSize())
+                    new_node = new_op_outputs[0].node() if n.outputsSize() > 1 else new_op_outputs.node()
+                    for b in n.blocks():
+                        new_block = new_node.addBlock()
+                        # Copy input metadata to subblock
+                        #
+                        # If format:
+                        #   prim::If(cond)
+                        #     block0()
+                        #     block1()
+                        #
+                        # Loop format:
+                        #   prim::Loop(iter, cond, input_1, ..., input_n)
+                        #     block0(iter, input_1, ..., input_n)
+                        #
+                        # For `If` node, there is nothing to copy.
+                        # For `Loop` node, copy metadata for `iter`, `input_1`, ..., `input_n`.
+                        for i, b_in in enumerate(b.inputs()):
+                            if i == 0 and i < len(inputs):
+                                b_in.setType(inputs[i].type())
+                            if i > 0 and (i + 1) < len(inputs):
+                                b_in.setType(inputs[i + 1].type())
+                        torch._C._jit_pass_onnx_block(b, new_block, operator_export_type, env, get_static_input_shape(),
+                                                      _params_dict, opset_version, enable_const_folding, is_sub_block)
+                    new_op_outputs = torch._C._jit_pass_fixup_onnx_controlflow_node(new_node, opset_version)
+                    # Process Loop and If after subblock is converted.
+                    from torch.onnx.symbolic_helper import _onnx_shape_inference
+                    if _onnx_shape_inference:
+                        torch._C._jit_pass_onnx_node_shape_type_inference(new_node, _params_dict, opset_version,
+                                                                          get_static_input_shape())
+                    return new_op_outputs
             else:
                 symbolic_name = 'prim_' + op_name
                 domain = ''

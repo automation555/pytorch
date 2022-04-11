@@ -38,7 +38,8 @@ TORCH_API void ONNXAssignOutputShape(
 TORCH_API void ONNXShapeTypeInference(
     Node* n,
     const ParamMap& params_dict,
-    int opset_version);
+    int opset_version,
+    bool static_input_shape);
 
 // Utilize ONNX Shape Inference for graph.
 // Internally calls ONNXShapeTypeInference for each node, to achieve more
@@ -47,7 +48,8 @@ TORCH_API void ONNXShapeTypeInference(
 TORCH_API void ONNXShapeTypeInference(
     std::shared_ptr<Graph>& g,
     const ParamMap& params_dict,
-    int opset_version);
+    int opset_version,
+    bool static_input_shape);
 
 } // namespace jit
 } // namespace torch

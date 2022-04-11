@@ -3,7 +3,7 @@ from test_pytorch_common import TestCase, run_tests
 import torch
 import torch.onnx
 from torch.onnx import utils, OperatorExportTypes, TrainingMode
-from torch.onnx.symbolic_helper import _set_opset_version, _set_operator_export_type
+from torch.onnx.symbolic_helper import _set_opset_version, _set_operator_export_type, _set_onnx_shape_inference
 import torch.utils.cpp_extension
 from test_pytorch_common import skipIfUnsupportedMinOpsetVersion, skipIfUnsupportedOpsetVersion
 import caffe2.python.onnx.backend as backend
@@ -35,6 +35,7 @@ class TestUtilityFuns(TestCase):
                         training=TrainingMode.EVAL,
                         operator_export_type=OperatorExportTypes.ONNX):
 
+        _set_onnx_shape_inference(False)
         return utils._model_to_graph(model, input,
                                      do_constant_folding=do_constant_folding,
                                      _disable_torch_constant_prop=True,
@@ -312,11 +313,14 @@ class TestUtilityFuns(TestCase):
         x = torch.ones(2, 3)
         graph, _, __ = self._model_to_graph(ConcatModule(), (x, ))
 
-        for node in graph.nodes():
-            assert node.kind() != "onnx::Concat"
-            assert node.kind() != "onnx::Cast"
-            assert node.kind() != "onnx::Constant"
-        assert len(list(graph.nodes())) == 1
+        if self.opset_version >= 9:
+            for node in graph.nodes():
+                assert node.kind() != "onnx::Concat"
+                assert node.kind() != "onnx::Cast"
+                assert node.kind() != "onnx::Constant"
+            assert len(list(graph.nodes())) == 1
+        else:
+            assert len(list(graph.nodes())) == 9
 
     def test_constant_fold_lstm(self):
         class GruNet(torch.nn.Module):
@@ -832,7 +836,6 @@ class TestUtilityFuns(TestCase):
         for node in graph.nodes():
             assert node.kind() != "prim::Constant"
         assert len(list(graph.nodes())) == 2  # onnx::Sub and onnx::Add nodes only.
-
 
 # opset 10 tests
 TestUtilityFuns_opset10 = type(str("TestUtilityFuns_opset10"),
