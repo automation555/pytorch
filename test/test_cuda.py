@@ -1674,28 +1674,53 @@ class TestCuda(TestCase):
 
         class MultiplyInStream(torch.autograd.Function):
             @staticmethod
-            def forward(ctx, x):
-                return x * 2
+            def forward(ctx, x, val):
+                ctx.val = val
+                return x * val
 
             @staticmethod
             def backward(ctx, grad):
                 self.assertEqual(torch.cuda.current_stream(), stream)
                 # delays the operation in the the background stream
                 torch.cuda._sleep(1000 * 1000)
-                return grad * 2
+                return grad * ctx.val, None
 
+        # Tests using grads outside the backward() stream context
+        # See "Stream semantics of backward passes" on https://pytorch.org/docs/stable/notes/cuda.html
         x = torch.randn(5, 5, device='cuda', requires_grad=True)
         with torch.cuda.stream(stream):
             stream.wait_stream(default_stream)
-            output = MultiplyInStream.apply(x)
+            output = MultiplyInStream.apply(x, 2)
             output.sum().backward()
-
+        # sync needed
+        default_stream.wait_stream(stream)
         self.assertEqual(x.grad, torch.ones_like(x) * 2)
         self.assertEqual(torch.cuda.current_stream(), default_stream)
 
+        # Tests that using grads in the same stream context as backward()
+        # is safe regardless what streams bwd ops ran on
+        bwd_ambient_stream = torch.cuda.Stream()
+        x = torch.randn(5, 5, device='cuda', requires_grad=True)
+        with torch.cuda.stream(stream):
+            stream.wait_stream(default_stream)
+            output = MultiplyInStream.apply(x, 3)
+        with torch.cuda.stream(bwd_ambient_stream):
+            bwd_ambient_stream.wait_stream(stream)
+            output.sum().backward()
+            # x was first used on "stream" so its AccumulateGrad leaf should run on "stream".
+            # The end of backward() should have synced "bwd_ambient_stream" with "stream"
+            # so it should be safe to use x.grad here without any syncs.
+            self.assertEqual(x.grad, torch.ones_like(x) * 3)
+            self.assertEqual(torch.cuda.current_stream(), bwd_ambient_stream)
+
     # Skip the test for ROCm as per https://github.com/pytorch/pytorch/issues/53190
     @skipIfRocm
-    def test_streaming_backwards_multiple_streams(self):
+    def test_streaming_backwards_multiple_streams_legacy(self):
+        # Tests calling backward() under a side stream then using a grad
+        # on the default stream without syncing. Right now, this pattern is safe,
+        # but only for BC. In a future PR, this pattern will become unsafe,
+        # a sync will be required, and this test will be deleted in favor of
+        # test_streaming_backward_multiple_streams below.
 
         class StreamModel(torch.nn.Module):
             def __init__(self):
@@ -1728,6 +1753,62 @@ class TestCuda(TestCase):
             model(x).sum().backward()
 
         self.assertEqual(x.grad, torch.ones_like(x) * 5)
+
+    # Skip the test for ROCm as per https://github.com/pytorch/pytorch/issues/53190
+    @skipIfRocm
+    def test_streaming_backwards_multiple_streams(self):
+
+        class MultiplyInStream(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, val):
+                ctx.val = val
+                ctx.stream = torch.cuda.current_stream()
+                return x * val
+
+            @staticmethod
+            def backward(ctx, grad):
+                self.assertEqual(torch.cuda.current_stream(), ctx.stream)
+                # delays the operation in the the background stream
+                torch.cuda._sleep(1000 * 5000)
+                return grad * ctx.val, None
+
+        class StreamModel(torch.nn.Module):
+            def __init__(self):
+                super(StreamModel, self).__init__()
+                self.event = torch.cuda.Event()
+                self.stream0 = torch.cuda.Stream()
+                self.stream1 = torch.cuda.Stream()
+
+            def forward(self, x, x_first_use_on_ambient):
+                if x_first_use_on_ambient:
+                    x0 = x.clone()
+                self.stream0.wait_stream(torch.cuda.current_stream())
+                self.stream1.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(self.stream0):
+                    if not x_first_use_on_ambient:
+                        x0 = x.clone()
+                    y0 = MultiplyInStream.apply(x0, 2)
+                    self.event.record(stream=torch.cuda.current_stream())
+
+                with torch.cuda.stream(self.stream1):
+                    y1 = MultiplyInStream.apply(x, 3)
+                    self.stream1.wait_event(self.event)
+                    return y0 + y1
+
+        stream = torch.cuda.Stream()
+
+        for x_first_use_on_ambient in (True, False):
+            with torch.cuda.stream(stream):
+                x = torch.randn(5, 5, device='cuda', requires_grad=True)
+                model = StreamModel().cuda()
+                x.register_hook(lambda grad: self.assertEqual(torch.cuda.current_stream(),
+                                                              stream if x_first_use_on_ambient else model.stream0))
+                for i in range(5):
+                    model(x, x_first_use_on_ambient).sum().backward()
+            # See "Stream semantics of backward passes" on https://pytorch.org/docs/stable/notes/cuda.html
+            torch.cuda.current_stream().wait_stream(stream)
+
+            self.assertEqual(x.grad, torch.ones_like(x) * 5 * 5)
 
     @unittest.skipIf(not TEST_MULTIGPU, "only one GPU detected")
     # Skip the test for ROCm as per https://github.com/pytorch/pytorch/issues/53190
@@ -1773,7 +1854,7 @@ class TestCuda(TestCase):
         self.assertTrue(a.grad.sum().item() == 4 * size)
         self.assertTrue(b.grad.sum().item() == 4 * size)
 
-    def test_streaming_backward_sync_graph_root(self):
+    def test_streaming_backwards_sync_graph_root(self):
         # This function tests if bwd ops running on a side stream properly sync with the GraphRoot.
         # The potential bug it targets is a race condition. The test uses multiple trials and
         # torch.cuda._sleep such that if the race condition exists, the test will almost certainly fail,
