@@ -107,13 +107,22 @@ inline Tensor mse_loss(
                "This will likely lead to incorrect results due to broadcasting. ",
                "Please ensure they have the same size.");
   }
-  std::vector<torch::Tensor> broadcast_tensors = torch::broadcast_tensors({input, target});
-  auto expanded_input = broadcast_tensors[0];
-  auto expanded_target = broadcast_tensors[1];
-  return torch::mse_loss(
-    expanded_input,
-    expanded_target,
-    enumtype::reduction_get_enum(reduction));
+  torch::Tensor ret;
+  if (target.requires_grad()) {
+    ret = torch::pow(input - target, 2);
+    if (!c10::get_if<enumtype::kNone>(&reduction)) {
+      ret = c10::get_if<enumtype::kMean>(&reduction) ? torch::mean(ret) : torch::sum(ret);
+    }
+  } else {
+    std::vector<torch::Tensor> broadcast_tensors = torch::broadcast_tensors({input, target});
+    auto expanded_input = broadcast_tensors[0];
+    auto expanded_target = broadcast_tensors[1];
+    ret = torch::mse_loss(
+      expanded_input,
+      expanded_target,
+      enumtype::reduction_get_enum(reduction));
+  }
+  return ret;
 }
 } // namespace detail
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */
@@ -155,13 +164,7 @@ inline Tensor binary_cross_entropy(
       "Please ensure they have the same size.");
   }
 
-  auto weight_ = weight;
-  if (weight_.defined()) {
-    auto new_size = at::infer_size(target.sizes(), weight_.sizes());
-    weight_ = weight_.expand(new_size);
-  }
-
-  return torch::binary_cross_entropy(input, target, weight_, reduction_enum);
+  return torch::binary_cross_entropy(input, target, weight, reduction_enum);
 }
 } // namespace detail
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */
@@ -307,9 +310,9 @@ inline Tensor cosine_embedding_loss(
 
 // ============================================================================
 
-inline Tensor _smooth_l1_loss(const Tensor& input, const Tensor& target, double beta = 1.) {
+inline Tensor _smooth_l1_loss(const Tensor& input, const Tensor& target) {
     auto t = torch::abs(input - target);
-    return torch::where(t < beta, 0.5 * torch::pow(t, 2) / beta, t - 0.5 * beta);
+    return torch::where(t < 1, 0.5 * torch::pow(t, 2), t - 0.5);
 }
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
@@ -317,16 +320,25 @@ namespace detail {
 inline Tensor smooth_l1_loss(
     const Tensor& input,
     const Tensor& target,
-    SmoothL1LossFuncOptions::reduction_t reduction,
-    double beta = 1.) {
+    SmoothL1LossFuncOptions::reduction_t reduction) {
   if (target.sizes() != input.sizes()) {
     TORCH_WARN("Using a target size (", target.sizes(), ") that is different to the input size (", input.sizes(), "). ",
                   "This will likely lead to incorrect results due to broadcasting. ",
                   "Please ensure they have the same size.");
   }
 
-  std::vector<Tensor> expanded_tensors = torch::broadcast_tensors({input, target});
-  return torch::smooth_l1_loss(expanded_tensors[0], expanded_tensors[1], enumtype::reduction_get_enum(reduction), beta);
+  Tensor ret;
+
+  if (target.requires_grad()) {
+    ret = _smooth_l1_loss(input, target);
+    if (!c10::get_if<enumtype::kNone>(&reduction)) {
+      ret = c10::get_if<enumtype::kMean>(&reduction) ? torch::mean(ret) : torch::sum(ret);
+    }
+  } else {
+    std::vector<Tensor> expanded_tensors = torch::broadcast_tensors({input, target});
+    ret = torch::smooth_l1_loss(expanded_tensors[0], expanded_tensors[1], enumtype::reduction_get_enum(reduction));
+  }
+  return ret;
 }
 } // namespace detail
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */
@@ -345,48 +357,8 @@ inline Tensor smooth_l1_loss(
 inline Tensor smooth_l1_loss(
     const Tensor& input,
     const Tensor& target,
-    const SmoothL1LossFuncOptions& options = {},
-    double beta = 1.) {
-  return detail::smooth_l1_loss(input, target, options.reduction(), beta);
-}
-
-// ============================================================================
-
-#ifndef DOXYGEN_SHOULD_SKIP_THIS
-namespace detail {
-inline Tensor huber_loss(
-    const Tensor& input,
-    const Tensor& target,
-    HuberLossFuncOptions::reduction_t reduction,
-    double delta = 1.) {
-  if (target.sizes() != input.sizes()) {
-    TORCH_WARN("Using a target size (", target.sizes(), ") that is different to the input size (", input.sizes(), "). ",
-               "This will likely lead to incorrect results due to broadcasting. ",
-               "Please ensure they have the same size.");
-  }
-
-  std::vector<Tensor> expanded_tensors = torch::broadcast_tensors({input, target});
-  return torch::huber_loss(expanded_tensors[0], expanded_tensors[1], enumtype::reduction_get_enum(reduction), delta);
-}
-} // namespace detail
-#endif /* DOXYGEN_SHOULD_SKIP_THIS */
-
-/// See https://pytorch.org/docs/master/nn.functional.html#torch.nn.functional.huber_loss
-/// about the exact behavior of this functional.
-///
-/// See the documentation for `torch::nn::functional::HuberLossFuncOptions` class to learn what
-/// optional arguments are supported for this functional.
-///
-/// Example:
-/// ```
-/// namespace F = torch::nn::functional;
-/// F::huber_loss(input, target, F::HuberLossFuncOptions().reduction(torch::kNone).delta(0.5));
-/// ```
-inline Tensor huber_loss(
-    const Tensor& input,
-    const Tensor& target,
-    const HuberLossFuncOptions& options = {}) {
-  return detail::huber_loss(input, target, options.reduction(), options.delta());
+    const SmoothL1LossFuncOptions& options = {}) {
+  return detail::smooth_l1_loss(input, target, options.reduction());
 }
 
 // ============================================================================
@@ -568,85 +540,6 @@ inline Tensor triplet_margin_loss(
 
 #ifndef DOXYGEN_SHOULD_SKIP_THIS
 namespace detail {
-inline Tensor triplet_margin_with_distance_loss(
-    const Tensor& anchor,
-    const Tensor& positive,
-    const Tensor& negative,
-    c10::optional<TripletMarginWithDistanceLossFuncOptions::distance_function_t> distance_function,
-    double margin,
-    bool swap,
-    TripletMarginWithDistanceLossFuncOptions::reduction_t reduction) {
-  Tensor dist_pos, dist_neg;
-  if (distance_function.has_value()) {
-    auto distance_function_impl = distance_function.value();
-    dist_pos = distance_function_impl(anchor, positive);
-    dist_neg = distance_function_impl(anchor, negative);
-  } else {
-    dist_pos = pairwise_distance(anchor, positive);
-    dist_neg = pairwise_distance(anchor, negative);
-  }
-
-  if (swap) {
-    Tensor dist_swap;
-    if (distance_function.has_value()) {
-      dist_swap = distance_function.value()(positive, negative);
-    } else {
-      dist_swap = pairwise_distance(positive, negative);
-    }
-    dist_neg = torch::min(dist_neg, dist_swap);
-  }
-
-  auto loss = torch::clamp_min(dist_pos - dist_neg + margin, 0);
-
-  Tensor ret;
-  if (c10::get_if<enumtype::kNone>(&reduction)) {
-    ret = loss;
-  } else if (c10::get_if<enumtype::kMean>(&reduction)) {
-    ret = loss.mean();
-  } else if (c10::get_if<enumtype::kSum>(&reduction)) {
-    ret = loss.sum();
-  } else {
-    ret = anchor;
-    TORCH_INTERNAL_ASSERT(
-      false,
-      enumtype::get_enum_name(reduction),
-      " is not valid");
-  }
-  return ret;
-}
-} // namespace detail
-#endif /* DOXYGEN_SHOULD_SKIP_THIS */
-
-/// See https://pytorch.org/docs/master/nn.functional.html#torch.nn.functional.triplet_margin_with_distance_loss
-/// about the exact behavior of this functional.
-///
-/// See the documentation for `torch::nn::functional::TripletMarginWithDistanceLossFuncOptions` class to learn what
-/// optional arguments are supported for this functional.
-///
-/// Example:
-/// ```
-/// namespace F = torch::nn::functional;
-/// F::triplet_margin_with_distance_loss(anchor, positive, negative, F::TripletMarginWithDistanceLossFuncOptions().margin(1.0));
-/// ```
-inline Tensor triplet_margin_with_distance_loss(
-    const Tensor& anchor,
-    const Tensor& positive,
-    const Tensor& negative,
-    const TripletMarginWithDistanceLossFuncOptions& options = {}) {
-  return detail::triplet_margin_with_distance_loss(
-    anchor,
-    positive,
-    negative,
-    options.distance_function(),
-    options.margin(),
-    options.swap(),
-    options.reduction());
-}
-
-// ============================================================================
-
-#ifndef DOXYGEN_SHOULD_SKIP_THIS
-namespace detail {
 inline Tensor ctc_loss(const Tensor& log_probs,
                        const Tensor& targets,
                        const Tensor& input_lengths,
@@ -781,12 +674,54 @@ inline Tensor nll_loss(
     TORCH_CHECK(false, "Expected input batch_size (", input.sizes()[0], ") to match target batch_size (", target.sizes()[0], ").");
   }
 
-  return torch::nll_loss_nd(
-      input,
-      target,
-      weight,
-      enumtype::reduction_get_enum(reduction),
-      ignore_index);
+  torch::Tensor ret;
+  torch::Tensor input_ = input;
+  torch::Tensor target_ = target;
+  if (input_.dim() == 2) {
+    ret = torch::nll_loss(
+          input_,
+          target_,
+          weight,
+          enumtype::reduction_get_enum(reduction),
+          ignore_index);
+  } else if (input_.dim() == 4) {
+    ret = torch::nll_loss2d(
+          input_,
+          target_,
+          weight,
+          enumtype::reduction_get_enum(reduction),
+          ignore_index);
+  } else {
+    // dim == 3 or dim > 4
+    auto n = input_.sizes()[0];
+    auto c = input_.sizes()[1];
+    auto out_size = input_.sizes().slice(2).vec();
+    out_size.insert(out_size.begin(), n);
+    if (target_.sizes().slice(1) != input_.sizes().slice(2)) {
+      TORCH_CHECK(false, "Expected target size ", at::IntArrayRef(out_size), ", got ", target_.sizes());
+    }
+    input_ = input_.contiguous();
+    target_ = target_.contiguous();
+    // support empty batches, see #15870
+    if (input_.numel() > 0) {
+      input_ = input_.view({n, c, 1, -1});
+    } else {
+      input_ = input_.view({n, c, 0, 0});
+    }
+    if (target_.numel() > 0) {
+      target_ = target_.view({n, 1, -1});
+    } else {
+      target_ = target_.view({n, 0, 0});
+    }
+    auto reduction_enum = enumtype::reduction_get_enum(reduction);
+    if (!c10::get_if<enumtype::kNone>(&reduction)) {
+      ret = torch::nll_loss2d(input_, target_, weight, reduction_enum, ignore_index);
+    } else {
+      auto out = torch::nll_loss2d(input_, target_, weight, reduction_enum, ignore_index);
+      ret = out.view(out_size);
+    }
+  }
+  return ret;
 }
 } // namespace detail
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */
@@ -824,12 +759,25 @@ inline Tensor cross_entropy(
     const Tensor& weight,
     int64_t ignore_index,
     CrossEntropyFuncOptions::reduction_t reduction) {
-  return torch::cross_entropy_loss(
-      input,
-      target,
-      weight,
-      enumtype::reduction_get_enum(reduction),
-      ignore_index);
+  NLLLossFuncOptions::reduction_t reduction_;
+  if (c10::get_if<enumtype::kNone>(&reduction)) {
+    reduction_ = torch::kNone;
+  } else if (c10::get_if<enumtype::kMean>(&reduction)) {
+    reduction_ = torch::kMean;
+  } else if (c10::get_if<enumtype::kSum>(&reduction)) {
+    reduction_ = torch::kSum;
+  } else {
+    TORCH_INTERNAL_ASSERT(
+      false,
+      enumtype::get_enum_name(reduction),
+      " is not valid");
+  }
+  return torch::nn::functional::detail::nll_loss(
+    torch::nn::functional::detail::log_softmax(input, 1, c10::nullopt),
+    target,
+    weight,
+    ignore_index,
+    reduction_);
 }
 } // namespace detail
 #endif /* DOXYGEN_SHOULD_SKIP_THIS */
