@@ -1,6 +1,6 @@
+from __future__ import absolute_import, division, print_function, unicode_literals
 import errno
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -40,9 +40,6 @@ except ImportError:
                     sys.stderr.write("\r{0:.1f}%".format(100 * self.n / float(self.total)))
                 sys.stderr.flush()
 
-            def close(self):
-                self.disable = True
-
             def __enter__(self):
                 return self
 
@@ -67,13 +64,15 @@ _hub_dir = None
 
 # Copied from tools/shared/module_loader to be included in torch package
 def import_module(name, path):
-    import importlib.util
-    from importlib.abc import Loader
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    assert isinstance(spec.loader, Loader)
-    spec.loader.exec_module(module)
-    return module
+    if sys.version_info >= (3, 5):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    else:
+        from importlib.machinery import SourceFileLoader
+        return SourceFileLoader(name, path).load_module()
 
 
 def _remove_if_exists(path):
@@ -112,16 +111,6 @@ def _parse_repo_info(github):
     repo_owner, repo_name = repo_info.split('/')
     return repo_owner, repo_name, branch
 
-def _validate_not_a_forked_repo(repo_owner, repo_name, branch):
-    # Use urlopen to avoid depending on local git.
-    url = f'https://api.github.com/repos/{repo_owner}/{repo_name}/branches'
-    with urlopen(url) as r:
-        response = json.loads(r.read().decode(r.headers.get_content_charset('utf-8')))
-    for br in response:
-        if br['name'] == branch or br['commit']['sha'].startswith(branch):
-            return
-    raise ValueError(f'Cannot find {branch} in https://github.com/{repo_owner}/{repo_name}. '
-                     'If it\'s a commit from a forked repo, please call hub.load() with forked repo directly.')
 
 def _get_cache_or_reload(github, force_reload, verbose=True):
     # Setup hub_dir to save downloaded files
@@ -130,7 +119,6 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
         os.makedirs(hub_dir)
     # Parse github repo information
     repo_owner, repo_name, branch = _parse_repo_info(github)
-
     # Github allows branch name with slash '/',
     # this causes confusion with path on both Linux and Windows.
     # Backslash is not allowed in Github branch name so no need to
@@ -148,9 +136,6 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
         if verbose:
             sys.stderr.write('Using cache found in {}\n'.format(repo_dir))
     else:
-        # Validate the tag/branch is from the original repo instead of a forked repo
-        _validate_not_a_forked_repo(repo_owner, repo_name, branch)
-
         cached_file = os.path.join(hub_dir, normalized_br + '.zip')
         _remove_if_exists(cached_file)
 
@@ -173,9 +158,43 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
 
 
 def _check_module_exists(name):
-    import importlib.util
-    return importlib.util.find_spec(name) is not None
-
+    if sys.version_info >= (3, 4):
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+    elif sys.version_info >= (3, 3):
+        # Special case for python3.3
+        import importlib.find_loader
+        return importlib.find_loader(name) is not None
+    else:
+        # NB: Python2.7 imp.find_module() doesn't respect PEP 302,
+        #     it cannot find a package installed as .egg(zip) file.
+        #     Here we use workaround from:
+        #     https://stackoverflow.com/questions/28962344/imp-find-module-which-supports-zipped-eggs?lq=1
+        #     Also imp doesn't handle hierarchical module names (names contains dots).
+        try:
+            # 1. Try imp.find_module(), which searches sys.path, but does
+            # not respect PEP 302 import hooks.
+            import imp
+            result = imp.find_module(name)
+            if result:
+                return True
+        except ImportError:
+            pass
+        path = sys.path
+        for item in path:
+            # 2. Scan path for import hooks. sys.path_importer_cache maps
+            # path items to optional "importer" objects, that implement
+            # find_module() etc.  Note that path must be a subset of
+            # sys.path for this to work.
+            importer = sys.path_importer_cache.get(item)
+            if importer:
+                try:
+                    result = importer.find_module(name, [item])
+                    if result:
+                        return True
+                except ImportError:
+                    pass
+        return False
 
 def _check_dependencies(m):
     dependencies = _load_attr_from_module(m, VAR_DEPENDENCY)
@@ -295,94 +314,45 @@ def help(github, model, force_reload=False):
 # but Python2 complains syntax error for it. We have to skip force_reload in function
 # signature here but detect it in kwargs instead.
 # TODO: fix it after Python2 EOL
-def load(repo_or_dir, model, *args, **kwargs):
+def load(github, model, *args, **kwargs):
     r"""
-    Load a model from a github repo or a local directory.
-
-    Note: Loading a model is the typical use case, but this can also be used to
-    for loading other objects such as tokenizers, loss functions, etc.
-
-    If :attr:`source` is ``'github'``, :attr:`repo_or_dir` is expected to be
-    of the form ``repo_owner/repo_name[:tag_name]`` with an optional
-    tag/branch.
-
-    If :attr:`source` is ``'local'``, :attr:`repo_or_dir` is expected to be a
-    path to a local directory.
+    Load a model from a github repo, with pretrained weights.
 
     Args:
-        repo_or_dir (string): repo name (``repo_owner/repo_name[:tag_name]``),
-            if ``source = 'github'``; or a path to a local directory, if
-            ``source = 'local'``.
-        model (string): the name of a callable (entrypoint) defined in the
-            repo/dir's ``hubconf.py``.
-        *args (optional): the corresponding args for callable :attr:`model`.
-        source (string, optional): ``'github'`` | ``'local'``. Specifies how
-            ``repo_or_dir`` is to be interpreted. Default is ``'github'``.
-        force_reload (bool, optional): whether to force a fresh download of
-            the github repo unconditionally. Does not have any effect if
-            ``source = 'local'``. Default is ``False``.
-        verbose (bool, optional): If ``False``, mute messages about hitting
-            local caches. Note that the message about first download cannot be
-            muted. Does not have any effect if ``source = 'local'``.
-            Default is ``True``.
-        **kwargs (optional): the corresponding kwargs for callable
-            :attr:`model`.
-
-    Returns:
-        The output of the :attr:`model` callable when called with the given
-        ``*args`` and ``**kwargs``.
-
-    Example:
-        >>> # from a github repo
-        >>> repo = 'pytorch/vision'
-        >>> model = torch.hub.load(repo, 'resnet50', pretrained=True)
-        >>> # from a local directory
-        >>> path = '/some/local/path/pytorch/vision'
-        >>> model = torch.hub.load(path, 'resnet50', pretrained=True)
-    """
-    source = kwargs.pop('source', 'github').lower()
-    force_reload = kwargs.pop('force_reload', False)
-    verbose = kwargs.pop('verbose', True)
-
-    if source not in ('github', 'local'):
-        raise ValueError(
-            f'Unknown source: "{source}". Allowed values: "github" | "local".')
-
-    if source == 'github':
-        repo_or_dir = _get_cache_or_reload(repo_or_dir, force_reload, verbose)
-
-    model = _load_local(repo_or_dir, model, *args, **kwargs)
-    return model
-
-
-def _load_local(hubconf_dir, model, *args, **kwargs):
-    r"""
-    Load a model from a local directory with a ``hubconf.py``.
-
-    Args:
-        hubconf_dir (string): path to a local directory that contains a
-            ``hubconf.py``.
-        model (string): name of an entrypoint defined in the directory's
-            `hubconf.py`.
-        *args (optional): the corresponding args for callable ``model``.
-        **kwargs (optional): the corresponding kwargs for callable ``model``.
+        github (string): a string with format "repo_owner/repo_name[:tag_name]" with an optional
+            tag/branch. The default branch is `master` if not specified.
+            Example: 'pytorch/vision[:hub]'
+        model (string): a string of entrypoint name defined in repo's hubconf.py
+        *args (optional): the corresponding args for callable `model`.
+        force_reload (bool, optional): whether to force a fresh download of github repo unconditionally.
+            Default is `False`.
+        verbose (bool, optional): If False, mute messages about hitting local caches. Note that the message
+            about first download is cannot be muted.
+            Default is `True`.
+        **kwargs (optional): the corresponding kwargs for callable `model`.
 
     Returns:
         a single model with corresponding pretrained weights.
 
     Example:
-        >>> path = '/some/local/path/pytorch/vision'
-        >>> model = _load_local(path, 'resnet50', pretrained=True)
+        >>> model = torch.hub.load('pytorch/vision', 'resnet50', pretrained=True)
     """
-    sys.path.insert(0, hubconf_dir)
+    force_reload = kwargs.get('force_reload', False)
+    kwargs.pop('force_reload', None)
+    verbose = kwargs.get('verbose', True)
+    kwargs.pop('verbose', None)
 
-    hubconf_path = os.path.join(hubconf_dir, MODULE_HUBCONF)
-    hub_module = import_module(MODULE_HUBCONF, hubconf_path)
+    repo_dir = _get_cache_or_reload(github, force_reload, verbose)
+
+    sys.path.insert(0, repo_dir)
+
+    hub_module = import_module(MODULE_HUBCONF, repo_dir + '/' + MODULE_HUBCONF)
 
     entry = _load_entry_from_hubconf(hub_module, model)
+
     model = entry(*args, **kwargs)
 
-    sys.path.remove(hubconf_dir)
+    sys.path.remove(repo_dir)
 
     return model
 
@@ -454,31 +424,6 @@ def _download_url_to_file(url, dst, hash_prefix=None, progress=True):
             _download_url_to_file will be removed in after 1.3 release')
     download_url_to_file(url, dst, hash_prefix, progress)
 
-# Hub used to support automatically extracts from zipfile manually compressed by users.
-# The legacy zip format expects only one file from torch.save() < 1.6 in the zip.
-# We should remove this support since zipfile is now default zipfile format for torch.save().
-def _is_legacy_zip_format(filename):
-    if zipfile.is_zipfile(filename):
-        infolist = zipfile.ZipFile(filename).infolist()
-        return len(infolist) == 1 and not infolist[0].is_dir()
-    return False
-
-def _legacy_zip_load(filename, model_dir, map_location):
-    warnings.warn('Falling back to the old format < 1.6. This support will be '
-                  'deprecated in favor of default zipfile format introduced in 1.6. '
-                  'Please redo torch.save() to save it in the new zipfile format.')
-    # Note: extractall() defaults to overwrite file if exists. No need to clean up beforehand.
-    #       We deliberately don't handle tarfile here since our legacy serialization format was in tar.
-    #       E.g. resnet18-5c106cde.pth which is widely used.
-    with zipfile.ZipFile(filename) as f:
-        members = f.infolist()
-        if len(members) != 1:
-            raise RuntimeError('Only one file(not dir) is allowed in the zipfile')
-        f.extractall(model_dir)
-        extraced_name = members[0].filename
-        extracted_file = os.path.join(model_dir, extraced_name)
-    return torch.load(extracted_file, map_location=map_location)
-
 def load_state_dict_from_url(url, model_dir=None, map_location=None, progress=True, check_hash=False, file_name=None):
     r"""Loads the Torch serialized object at the given URL.
 
@@ -532,12 +477,19 @@ def load_state_dict_from_url(url, model_dir=None, map_location=None, progress=Tr
     cached_file = os.path.join(model_dir, filename)
     if not os.path.exists(cached_file):
         sys.stderr.write('Downloading: "{}" to {}\n'.format(url, cached_file))
-        hash_prefix = None
-        if check_hash:
-            r = HASH_REGEX.search(filename)  # r is Optional[Match[str]]
-            hash_prefix = r.group(1) if r else None
+        hash_prefix = HASH_REGEX.search(filename).group(1) if check_hash else None
         download_url_to_file(url, cached_file, hash_prefix, progress=progress)
 
-    if _is_legacy_zip_format(cached_file):
-        return _legacy_zip_load(cached_file, model_dir, map_location)
+    # Note: extractall() defaults to overwrite file if exists. No need to clean up beforehand.
+    #       We deliberately don't handle tarfile here since our legacy serialization format was in tar.
+    #       E.g. resnet18-5c106cde.pth which is widely used.
+    if zipfile.is_zipfile(cached_file):
+        with zipfile.ZipFile(cached_file) as cached_zipfile:
+            members = cached_zipfile.infolist()
+            if len(members) != 1:
+                raise RuntimeError('Only one file(not dir) is allowed in the zipfile')
+            cached_zipfile.extractall(model_dir)
+            extraced_name = members[0].filename
+            cached_file = os.path.join(model_dir, extraced_name)
+
     return torch.load(cached_file, map_location=map_location)
