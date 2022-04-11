@@ -279,8 +279,10 @@ static inline void checkAllSameDim(TensorList tensors, int64_t dim) {
   }
 }
 
-static inline std::tuple<Tensor,Tensor> _linalg_broadcast_batch_dims(const Tensor& arg1, const Tensor& arg2, const char* name) {
-  linearSolveCheckInputs(arg1, arg2, name);
+static inline std::tuple<Tensor,Tensor> _linalg_broadcast_batch_dims(const Tensor& arg1, const Tensor& arg2, const char* name, bool check_inputs = true) {
+  if (check_inputs) {
+    linearSolveCheckInputs(arg1, arg2, name);
+  }
 
   // broadcast the batch dimensions of arg1 and arg2.
   IntArrayRef arg1_batch_sizes(arg1.sizes().data(), arg1.ndimension() - 2);
@@ -512,6 +514,22 @@ static inline void checkLinalgCompatibleDtype(const std::string& fn_name, Scalar
       fn_name,
       ": Expected ", out_name, " to be safely castable from ", result_type, " dtype, but got ",
       out_name, " with dtype ", out_type);
+}
+
+/*
+  Two types of 'other' tensors are supported when solving
+  a system of linear equations matmul(input, x) = other:
+  * 1-dimensional (1D) tensor or batch of 1D tensors (vector case)
+  * 2-dimensional (2D) tensor or batch of 2D tensors (matrix case).
+  The original torch.solve supported only the matrix case, while NumPy works for both cases.
+  For the batched input we need to be able to distinguish them.
+  Let input.shape = (batch_dimensions, m, n), then 'other' is of vector type if other.shape == (batch_dimensions, m).
+  This rule is compatible with NumPy, see https://github.com/numpy/numpy/blob/v1.20.0/numpy/linalg/linalg.py#L384-L389
+*/
+static inline bool linalg_solve_is_vector_rhs(const Tensor& input, const Tensor& other) {
+  auto expected_batched_rhs_shape = IntArrayRef(input.sizes().data(), input.dim() - 1); // input.shape[:-1]
+  bool vector_case = other.dim() == 1 || (input.dim() - 1 == other.dim() && other.sizes().equals(expected_batched_rhs_shape));
+  return vector_case;
 }
 
 }}  // namespace at::native
