@@ -72,6 +72,8 @@ from torch.testing._internal.common_quantized import (
 
 from torch.testing._internal.common_utils import TemporaryFileName
 
+from torch.testing._internal.common_distributed import skip_if_not_multigpu
+
 from torch.testing._internal.common_quantization import NodeSpec as ns
 
 from torch.testing import FileCheck
@@ -1768,13 +1770,7 @@ class TestQuantizeFx(QuantizationTestCase):
                 x = x.view(dims_list)
                 return x
 
-        class M3(torch.nn.Module):
-            def forward(self, x):
-                shape = x.shape
-                x = x.view(shape)
-                return x
-
-        for cls in (M1, M2, M3):
+        for cls in (M1, M2):
             m = cls().eval()
             m(torch.rand(4, 4, 4, 4))
             qconfig_dict = {'': torch.quantization.default_qconfig}
@@ -2100,6 +2096,36 @@ class TestQuantizeFx(QuantizationTestCase):
                 quant = quant + 1
         self.assertEqual(dequant, 1)
         self.assertEqual(quant, 1)
+
+    def test_no_extra_quant_dequant(self):
+        """ Test that we don't insert unnecesssary quant/dequant"""
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.w = torch.ones(5, 5)
+                self.b = torch.zeros(5)
+
+            def forward(self, x):
+                x = torch.cat((x,), 1)
+                tmp = x.size()
+                x = torch.nn.functional.linear(x, self.w, self.b)
+                y = x * tmp[0]
+                return y
+
+        model = M().eval()
+        qconfig_dict = {
+            "": None,
+            "object_type": [
+                (torch.nn.functional.linear, default_qconfig),
+            ],
+        }
+        m = prepare_fx(model, qconfig_dict)
+        m(torch.rand(5, 5))
+        m = convert_fx(m)
+        occurrence = {
+            ns.call_method("dequantize"): 1
+        }
+        self.checkGraphModuleNodes(m, expected_node_occurrence=occurrence)
 
 @skipIfNoFBGEMM
 class TestQuantizeFxOps(QuantizationTestCase):
@@ -2791,8 +2817,8 @@ class TestQuantizeFxOps(QuantizationTestCase):
             prepare_custom_config_dict=prepare_custom_config_dict)
 
     @skipIfNoFBGEMM
-    def test_quantized_cat(self):
-        """ quantization of the output of cat will be depend on the
+    def test_cat(self):
+        """ quantization of the output of cat will depend on the
         input of cat. we only quantize the output of cat when its inputs are quantized.
         """
         class QuantizedInput(torch.nn.Module):
@@ -2815,11 +2841,22 @@ class TestQuantizeFxOps(QuantizationTestCase):
 
         data = (torch.randn(1, 2, 5, 5, dtype=torch.float),
                 torch.randn(1, 2, 5, 5, dtype=torch.float))
-        quantized_node = ns.call_function(torch.ops.quantized.cat)
+        quantized_node = ns.call_function(torch.cat)
         for quant_type in self.static_quant_types:
             self.checkGraphModeFxOp(QuantizedInput(), data, quant_type, quantized_node)
             self.checkGraphModeFxOp(NonQuantizedInput(), data, quant_type, quantized_node)
 
+        # check cat is using the same observer for input and output
+        m = QuantizedInput().eval()
+        m = prepare_fx(m, {"": default_qconfig})
+        # two inputs and one output of torch.cat are using same observer, so we have
+        # 2 observers that's replicated
+        all_observers = len(dict(m.named_modules(remove_duplicate=False)))
+        distinct_observers = len(dict(m.named_modules()))
+        self.assertEqual(all_observers, distinct_observers + 2)
+        # make sure the converted model runs
+        m = convert_fx(m)
+        m(*data)
 
     @skipIfNoFBGEMM
     def test_qbatch_norm(self):
@@ -3451,7 +3488,7 @@ class TestQuantizeFxOps(QuantizationTestCase):
                 ns.call_function(torch.ops.quantized.mul),
                 ns.call_function(torch.ops.quantized.mul),
                 ns.call_function(torch.ops.quantized.add_relu),
-                ns.call_function(torch.ops.quantized.cat),
+                ns.call_function(torch.cat),
                 ns.call_method('dequantize')
             ]
             m = convert_fx(m)
@@ -3953,8 +3990,8 @@ class TestQuantizeFxModels(QuantizationTestCase):
         # print('----------------------')
 
     @skip_if_no_torchvision
+    @skip_if_not_multigpu
     @skipIfNoFBGEMM
-    @unittest.skip("TODO: Test is always failing - https://github.com/pytorch/pytorch/issues/54979")
     def test_resnet18_ddp(self):
         from torchvision import models
         from torchvision.models import quantization as quantized_models
