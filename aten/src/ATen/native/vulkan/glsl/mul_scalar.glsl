@@ -1,26 +1,21 @@
 #version 450 core
-#define PRECISION $precision
-
 layout(std430) buffer;
+layout(std430) uniform;
 
-/* Qualifiers: layout - storage - precision - memory */
-
-layout(set = 0, binding = 0) uniform PRECISION restrict writeonly image3D   uOutput;
-layout(set = 0, binding = 1) uniform PRECISION                    sampler3D uInput;
-layout(set = 0, binding = 2) uniform PRECISION restrict           Block {
-  ivec3 size;
+layout(set = 0, rgba16f, binding = 0) writeonly highp uniform image3D uOutput;
+layout(set = 0, binding = 1) uniform mediump sampler3D uInput;
+layout(set = 0, binding = 2) uniform constBlock {
+  ivec4 sizes;
   float other;
-} uBlock;
+}
+uConstBlock;
 
-layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
+layout(local_size_x_id = 1, local_size_y_id = 2, local_size_z_id = 3) in;
 
 void main() {
-  const ivec3 pos = ivec3(gl_GlobalInvocationID);
-
-  if (all(lessThan(pos, uBlock.size))) {
-    imageStore(
-        uOutput,
-        pos,
-        texelFetch(uInput, pos, 0) * uBlock.other);
+  ivec3 pos = ivec3(gl_GlobalInvocationID);
+  if (all(lessThan(pos, uConstBlock.sizes.xyz))) {
+    vec4 v = uConstBlock.other * texelFetch(uInput, pos, 0);
+    imageStore(uOutput, pos, v);
   }
 }
