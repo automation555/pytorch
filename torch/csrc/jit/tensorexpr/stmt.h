@@ -16,7 +16,7 @@ class Placeholder;
 // The common base between all statement node.
 class TORCH_API Stmt : public KernelScopedObject {
  public:
-  Stmt() = default;
+  Stmt() {}
   virtual void accept(IRVisitor* visitor) const = 0;
   virtual Stmt* accept_mutator(IRMutator* mutator) = 0;
 
@@ -50,12 +50,11 @@ class StmtNode : public Stmt {
     visitor->visit(static_cast<const Op*>(this));
   }
   Stmt* accept_mutator(IRMutator* mutator) override;
-  StmtNode() = default;
+  StmtNode() {}
 };
 
 template <class Op>
 Stmt* StmtNode<Op>::accept_mutator(IRMutator* mutator) {
-  // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
   StmtNode* this_mutable = const_cast<StmtNode*>(this);
   return mutator->mutate(static_cast<Op*>(this_mutable));
 }
@@ -148,6 +147,29 @@ class TORCH_API Block : public StmtNode<Block> {
     set_parent(old_stmt, nullptr);
     set_parent(new_stmt, this);
     return true;
+  }
+
+  Block* clone_and_replace(Stmt* old_stmt, Stmt* new_stmt) {
+    if (new_stmt->get_parent()) {
+      throw malformed_input(
+          "Block replace Stmt with existing parent", new_stmt);
+    }
+
+    std::vector<Stmt*> stmts(stmts_.begin(), stmts_.end());
+    std::vector<Stmt*> cloned_stmts(stmts.size());
+    bool found = false;
+    for (int i = 0; i < static_cast<int>(stmts.size()); ++i) {
+      if (stmts[i] == old_stmt) {
+        found = true;
+        cloned_stmts[i] = new_stmt;
+      } else {
+        cloned_stmts[i] = Stmt::clone(stmts[i]);
+      }
+    }
+    if (!found) {
+      return nullptr;
+    }
+    return new Block(cloned_stmts);
   }
 
   bool remove_stmt(Stmt* stmt) {
@@ -473,7 +495,6 @@ class TORCH_API LoopOptions {
       throw malformed_input("Has no GPU block index");
     }
 
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
     static const char* kBlockIndexNames[] = {
         "blockIdx.x",
         "blockIdx.y",
@@ -516,7 +537,6 @@ class TORCH_API LoopOptions {
       throw malformed_input("has no GPU thread index");
     }
 
-    // NOLINTNEXTLINE(modernize-avoid-c-arrays,cppcoreguidelines-avoid-c-arrays)
     static const char* kThreadIndexNames[] = {
         "threadIdx.x", "threadIdx.y", "threadIdx.z", "threadIdx.w"};
 
@@ -541,28 +561,17 @@ class TORCH_API LoopOptions {
     gpu_thread_index_ = index;
   }
 
-  void set_parallel() {
-    is_parallel_ = true;
-  }
-
-  bool is_parallel() const {
-    return is_parallel_;
-  }
-
   std::string ToString() const {
     if (is_gpu_block_index()) {
       return gpu_block_index_str();
     } else if (is_gpu_thread_index()) {
       return gpu_thread_index_str();
-    } else if (is_parallel()) {
-      return "parallel";
     }
     return "";
   }
 
   bool isDefault() const {
-    return gpu_block_index_ == IDX_UNSET && gpu_thread_index_ == IDX_UNSET &&
-        !is_parallel_;
+    return gpu_block_index_ == IDX_UNSET && gpu_thread_index_ == IDX_UNSET;
   }
 
   void set_buffer_mapping(
@@ -577,7 +586,6 @@ class TORCH_API LoopOptions {
  private:
   int gpu_block_index_{IDX_UNSET};
   int gpu_thread_index_{IDX_UNSET};
-  bool is_parallel_{false};
   std::unordered_map<std::string, const Buf*> map_input_to_tensor_bufs_;
 };
 
@@ -634,11 +642,8 @@ class TORCH_API For : public StmtNode<For> {
       const Expr* start,
       const Expr* stop,
       Stmt* body,
-      LoopOptions loop_options)
-      : var_(var),
-        start_(start),
-        stop_(stop),
-        loop_options_(std::move(loop_options)) {
+      const LoopOptions& loop_options)
+      : var_(var), start_(start), stop_(stop), loop_options_(loop_options) {
     if (!var) {
       throw malformed_input("invalid Var in For loop", var);
     } else if (!start) {
@@ -665,14 +670,6 @@ class TORCH_API For : public StmtNode<For> {
     loop_options_.set_gpu_thread_index(thread_index);
   }
 
-  void set_parallel() {
-    loop_options_.set_parallel();
-  }
-
-  bool is_parallel() const {
-    return loop_options_.is_parallel();
-  }
-
   void set_buffer_map(const std::unordered_map<std::string, const Buf*>& map) {
     loop_options_.set_buffer_mapping(map);
   }
@@ -695,8 +692,11 @@ class TORCH_API For : public StmtNode<For> {
 // TODO: make IR nodes extensible.
 class TORCH_API AtomicAdd : public StmtNode<AtomicAdd> {
  public:
-  AtomicAdd(const Buf* buf, std::vector<const Expr*> indices, const Expr* value)
-      : buf_(buf), indices_(std::move(indices)), value_(value) {}
+  AtomicAdd(
+      const Buf* buf,
+      const std::vector<const Expr*>& indices,
+      const Expr* value)
+      : buf_(buf), indices_(indices), value_(value) {}
 
   const Var* base_handle() const {
     return buf_->base_handle();
@@ -727,7 +727,7 @@ class TORCH_API AtomicAdd : public StmtNode<AtomicAdd> {
 
 class TORCH_API SyncThreads : public StmtNode<SyncThreads> {
  public:
-  SyncThreads() = default;
+  SyncThreads() {}
 };
 
 /*
@@ -775,13 +775,10 @@ class TORCH_API ExternalCall : public StmtNode<ExternalCall> {
 
   ExternalCall(
       const Buf* buf,
-      std::string func_name,
-      std::vector<const Buf*> buf_args,
-      std::vector<const Expr*> args)
-      : buf_(buf),
-        func_name_(std::move(func_name)),
-        buf_args_(std::move(buf_args)),
-        args_(std::move(args)) {}
+      const std::string& func_name,
+      const std::vector<const Buf*>& buf_args,
+      const std::vector<const Expr*>& args)
+      : buf_(buf), func_name_(func_name), buf_args_(buf_args), args_(args) {}
 
  private:
   const Buf* buf_;
