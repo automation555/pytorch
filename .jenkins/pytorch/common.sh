@@ -1,7 +1,6 @@
 #!/bin/bash
 
 # Common setup for all Jenkins scripts
-# shellcheck source=./common_utils.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common_utils.sh"
 set -ex
 
@@ -128,7 +127,6 @@ fi
 # Alternatively we could point cmake to the right place
 # export CMAKE_PREFIX_PATH=${CONDA_PREFIX:-"$(dirname $(which conda))/../"}
 if [[ "$BUILD_ENVIRONMENT" == *pytorch-xla-linux-bionic* ]] || \
-   [[ "$BUILD_ENVIRONMENT" == *pytorch-linux-xenial-cuda9-cudnn7-py2* ]] || \
    [[ "$BUILD_ENVIRONMENT" == *pytorch-linux-xenial-cuda10.1-cudnn7-py3* ]] || \
    [[ "$BUILD_ENVIRONMENT" == *pytorch-*centos* ]] || \
    [[ "$BUILD_ENVIRONMENT" == *pytorch-linux-bionic* ]]; then
