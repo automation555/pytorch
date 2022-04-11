@@ -5,8 +5,6 @@
 namespace caffe2 {
 namespace opt {
 
-const std::string kFP16_SUFFIX = "_fp16";
-const std::string kFP32_SUFFIX = "_fp32";
 const std::string kTILE_SUFFIX = "_tile";
 
 void inBatchBroadcast(
@@ -77,16 +75,17 @@ void inBatchBroadcast(
     broadcast_net.add_op()->CopyFrom(op);
   }
 
-  auto setShape = [&shape_hints, batch_size](
-                      const std::string& blob,
-                      const std::string& new_blob) mutable {
+  // We are done with the Fused8BitRowwiseQuantizedToFloat swapping heuristics.
+  // Now we focus on creating Tile ops based on `to_broadcast_copy`. Here is a
+  // convenient function to change the blob shape from batch size to 1, while
+  // returning the old batch size.
+  auto unbatchShape = [&shape_hints, batch_size](
+                          const std::string& blob) mutable {
     auto it = shape_hints.find(blob);
     CAFFE_ENFORCE(it != shape_hints.end(), "Cannot find shape info for ", blob);
     auto& shape = it->second;
     CAFFE_ENFORCE(shape.shape.dims_size(), "Dim size for ", blob, " is 0");
-    if (!new_blob.empty()) {
-      shape_hints.emplace(new_blob, shape);
-    }
+    auto old_shape = shape;
     CAFFE_ENFORCE_EQ(
         shape.shape.dims(0) % batch_size,
         0,
@@ -94,74 +93,92 @@ void inBatchBroadcast(
         blob,
         ": ",
         shape.shape.dims(0),
-        " cannot be divided by batch_size ",
-        batch_size);
+        " cannot be divided by batch_size ");
     shape.shape.set_dims(0, shape.shape.dims(0) / batch_size);
     shape.setDimType(0, TensorBoundShape_DimType_CONSTANT);
+    return old_shape;
   };
 
+  // Build the tile ops. For inputs that are 2D, we have this Concat/Tile/Split
+  // optimization. We hardcode it as 2D as this is our expected input shape to
+  // apply optimization. If certain to-broadcast inputs are not 2D, we end up
+  // lose some performance by adding one Tile for each such input. We can also
+  // improve this by covering the 1D, 3D cases but we can keep it simple for
+  // now.
+  int total_dim1 = 0;
+  std::vector<std::string> concatInputs;
+  std::vector<int> split;
+  std::vector<std::string> splitOutputs;
   for (const auto& blob : to_broadcast_copy) {
-    auto it = shape_hints.find(blob);
-    CAFFE_ENFORCE(it != shape_hints.end(), "Cannot find shape info for ", blob);
-    const auto& shape = it->second;
-    CAFFE_ENFORCE_GT(shape.shape.dims_size(), 0, "Dim size for ", blob, " is 0");
-
-    // If an op like Fused8BitRowwiseQuantizedToFloat ends up on CPU and
-    // Tile ends up on an accelerator and only FP16 is supported, then we want
-    // to make sure conversion from FP32 to FP16 is done on CPU to save cycles
-    // on accelerator.
-    const std::string blob_fp16 = blob + kFP16_SUFFIX;
-    const std::string blob_fp32 = blob + kFP32_SUFFIX;
-    const bool isFp32Optimization =
-        (shape.shape.data_type() == TensorProto_DataType_FLOAT);
-    if (isFp32Optimization) {
-      auto* op_fp16 = broadcast_net.add_op();
-      op_fp16->CopyFrom(CreateOperatorDef(
-          "FloatToHalf",
+    const auto new_blob = blob + kTILE_SUFFIX;
+    auto old_shape = unbatchShape(blob);
+    if (old_shape.shape.dims_size() == 2) {
+      // For 2D input we prepare info to create one Concat/Tile/Split chain
+      const auto& new_shape = shape_hints.at(blob);
+      total_dim1 += new_shape.shape.dims(1);
+      concatInputs.emplace_back(blob);
+      split.emplace_back(new_shape.shape.dims(1));
+      splitOutputs.emplace_back(new_blob);
+    } else {
+      // Otherwise we create one Tile for each input
+      broadcast_net.add_op()->CopyFrom(CreateOperatorDef(
+          "Tile",
           "",
           {blob},
-          {blob_fp16},
-          {MakeArgument<int>("net_pos", current_pos++)}));
-      auto* op_fp32 = broadcast_net.add_op();
-      op_fp32->CopyFrom(CreateOperatorDef(
-          "HalfToFloat",
-          "",
-          {blob_fp16},
-          {blob_fp32},
-          {MakeArgument<int>("net_pos", current_pos++)}));
+          {new_blob},
+          {MakeArgument<int>("tiles", batch_size),
+           MakeArgument<int>("axis", 0),
+           // Indicating that we are tiling to max_batch_size
+           MakeArgument<int>("dynamic", 1),
+           MakeArgument<int>("net_pos", current_pos++)}));
     }
+    shape_hints.emplace(new_blob, old_shape);
 
-    std::string blob_tile = blob + kTILE_SUFFIX;
-    auto* op_tile = broadcast_net.add_op();
-    op_tile->CopyFrom(CreateOperatorDef(
-        "Tile",
-        "",
-        {isFp32Optimization ? blob_fp32 : blob},
-        {blob_tile},
-        {MakeArgument<int>("tiles", batch_size),
-         MakeArgument<int>("axis", 0),
-         // Indicating that we are tiling to max_batch_size
-         MakeArgument<int>("dynamic", 1),
-         MakeArgument<int>("net_pos", current_pos++)}));
-
-    setShape(blob, blob_tile);
-    if (isFp32Optimization) {
-      const auto adjusted_shape = shape_hints[blob];
-
-      auto shape_fp16 = adjusted_shape;
-      shape_fp16.shape.set_data_type(TensorProto_DataType_FLOAT16);
-      shape_hints.emplace(blob_fp16, shape_fp16);
-
-      shape_hints.emplace(blob_fp32, adjusted_shape);
-    }
-
+    // If this blob is the output of a Fused8BitRowwiseQuantizedToFloat op, we
+    // need to further unbatch the input of that
+    // Fused8BitRowwiseQuantizedToFloat op.
     const auto rit = reversed.find(blob);
     if (rit != reversed.end()) {
-      const auto& original_input = rit->second;
-      setShape(original_input, "");
+      const auto& orignal_input = rit->second;
+      unbatchShape(orignal_input);
     }
   }
 
+  // Create one Concat/Tile/Split chain for all the 2D inputs
+  if (!concatInputs.empty()) {
+    broadcast_net.add_op()->CopyFrom(CreateOperatorDef(
+        "Concat",
+        "",
+        concatInputs,
+        {"inbatch_concat", "inbatch_concat_splitinfo"},
+        {MakeArgument<int>("axis", 1),
+         MakeArgument<int>("net_pos", current_pos++)}));
+    auto shape_info = shape_hints.at(concatInputs.front());
+    shape_info.shape.set_dims(1, total_dim1);
+    shape_hints.emplace("inbatch_concat", shape_info);
+    broadcast_net.add_op()->CopyFrom(CreateOperatorDef(
+        "Tile",
+        "",
+        {"inbatch_concat"},
+        {"inbatch_concat_tile"},
+        {MakeArgument<int>("tiles", batch_size),
+         MakeArgument<int>("axis", 0),
+         MakeArgument<int>("dynamic", 1),
+         MakeArgument<int>("net_pos", current_pos++)}));
+    shape_info.shape.set_dims(0, shape_info.shape.dims(0) * batch_size);
+    shape_info.setDimType(0, TensorBoundShape_DimType_BATCH);
+    shape_hints.emplace("inbatch_concat_tile", shape_info);
+    broadcast_net.add_op()->CopyFrom(CreateOperatorDef(
+        "Split",
+        "",
+        {"inbatch_concat_tile"},
+        splitOutputs,
+        {MakeArgument<int>("axis", 1),
+         MakeArgument<vector<int>>("split", split),
+         MakeArgument<int>("net_pos", current_pos++)}));
+  }
+
+  // Add rest of the ops and reroute them to consume the broadcasted blobs
   for (auto& op : post_ops) {
     for (int j = 0; j < op.input_size(); j++) {
       if (to_broadcast_copy.count(op.input(j))) {
