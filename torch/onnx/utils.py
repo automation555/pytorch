@@ -10,7 +10,7 @@ import torch.jit
 import torch.autograd
 import torch.serialization
 import re
-import collections
+from torch._six import container_abcs
 import contextlib
 import numbers
 import warnings
@@ -29,8 +29,6 @@ def is_in_onnx_export():
     global __IN_ONNX_EXPORT
     return __IN_ONNX_EXPORT
 
-# Skip check due to cannot import IValue from torch._C
-_params_dict = {}  # type: ignore
 
 @contextlib.contextmanager
 def select_model_mode_for_export(model, mode):
@@ -56,7 +54,7 @@ def select_model_mode_for_export(model, mode):
             from torch.onnx.symbolic_helper import _export_onnx_opset_version
             if _export_onnx_opset_version < 12:
                 warnings.warn("You are exporting the model in training mode with onnx opset version {}. "
-                              "Opset versions lower than opset 12 will not be able to export nodes such as "
+                              "Opset versions lower than opset 12 will not be able to export nodes such as"
                               "Dropout and BatchNorm correctly.".format(_export_onnx_opset_version))
             is_export_training = True
 
@@ -124,14 +122,19 @@ def _split_tensor_list_constants(g, block):
 
 
 def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=False, fixed_batch_size=False,
-                    params_dict=None, dynamic_axes=None, input_names=None, module=None):
+                    params_dict=None, use_new_jit_passes=True, dynamic_axes=None, input_names=None):
     # Inline everything
     torch._C._jit_pass_inline(graph)
 
     # Remove fork/wait nodes
     torch._C._jit_pass_inline_fork_wait(graph)
     torch._C._jit_pass_lint(graph)
-    torch._C._jit_pass_lower_all_tuples(graph)
+
+    if use_new_jit_passes:
+        torch._C._jit_pass_lower_all_tuples(graph)
+        torch._C._jit_pass_onnx_remove_inplace_ops_for_onnx(graph)
+    else:
+        torch._C._jit_pass_remove_inplace_ops(graph)
 
     # we record now record some ops like ones/zeros
     # into a trace where we previously recorded constants
@@ -139,7 +142,6 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
     # without implementing symbolics for all of them
     if _disable_torch_constant_prop is False:
         torch._C._jit_pass_constant_propagation(graph)
-
     _split_tensor_list_constants(graph, graph)
     # run dce to eliminate dead parts of the graph that might have been
     # left behind by things like symbolic_override
@@ -148,6 +150,7 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
 
     torch._C._jit_pass_canonicalize_graph_fuser_ops(graph)
     torch._C._jit_pass_lint(graph)
+
     torch._C._jit_pass_peephole(graph, True)
     torch._C._jit_pass_fuse_addmm(graph)
     torch._C._jit_pass_lint(graph)
@@ -161,8 +164,9 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
         # until the point where it is unpacked by listUnpack node.
         # This pass does a preprocess, and prepares the nodes such that enough context can be received
         # by the symbolic function.
-        torch._C._jit_pass_onnx_remove_inplace_ops_for_onnx(graph, module)
         torch._C._jit_pass_onnx_preprocess(graph)
+        # _prepare_inplace_ops makes the IR invalid for JIT passes / alias db
+        torch._C._jit_pass_onnx_prepare_inplace_ops_for_onnx(graph)
 
         # onnx does not support tuples, so try to remove them
         torch._C._jit_pass_lint(graph)
@@ -203,8 +207,6 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
         torch._C._jit_pass_onnx_scalar_type_analysis(graph)
         torch._C._jit_pass_lint(graph)
 
-        torch._C._jit_pass_onnx_fold_if(graph)
-
         from torch.onnx.symbolic_helper import _export_onnx_opset_version
         torch._C._jit_pass_onnx_peephole(graph, _export_onnx_opset_version, fixed_batch_size)
         torch._C._jit_pass_lint(graph)
@@ -220,7 +222,7 @@ def _optimize_graph(graph, operator_export_type, _disable_torch_constant_prop=Fa
     torch._C._jit_pass_lint(graph)
     from torch.onnx.symbolic_helper import _onnx_shape_inference, _export_onnx_opset_version
     if _onnx_shape_inference:
-        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version)
+        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, _export_onnx_opset_version)
     return graph
 
 
@@ -337,15 +339,12 @@ def _decide_input_format(model, args):
             args = tuple(args)
         return args
     # Cases of models without forward functions and dict inputs
-    except (AttributeError, ValueError):
+    except AttributeError:
         warnings.warn("Model has no forward function")
         return args
     # Cases of models with no input args
     except IndexError:
         warnings.warn("No input args")
-        return args
-    except Exception as e:
-        warnings.warn("Skipping _decide_input_format\n {}".format(e.args[0]))
         return args
 
 def _trace(func, args, operator_export_type, return_outs=False):
@@ -357,7 +356,7 @@ def _trace(func, args, operator_export_type, return_outs=False):
         torch.jit._get_trace_graph(func, args, strict=False, _force_outplace=False, _return_inputs_states=True)
     warn_on_static_input_change(inputs_states)
 
-    trace_graph = _optimize_graph(trace_graph, operator_export_type, params_dict={})
+    trace_graph = _optimize_graph(trace_graph, operator_export_type)
     if return_outs:
         return trace_graph, torch_out
     return trace_graph
@@ -380,23 +379,26 @@ def _trace_and_get_graph_from_model(model, args):
     return trace_graph, torch_out
 
 
-def _create_jit_graph(model, args, _retain_param_name):
+def _create_jit_graph(model, args, _retain_param_name, use_new_jit_passes):
     torch_out = None
     params: Union[List, Tuple]
     if isinstance(model, torch.jit.ScriptModule):
         try:
             graph = model.forward.graph
             torch._C._jit_pass_onnx_function_substitution(graph)
-            freezed_m = torch._C._freeze_module(model._c, preserveParameters=True)
-            module, params = torch._C._jit_onnx_list_model_parameters(freezed_m)
-            method_graph = module._get_method('forward').graph
+            if not use_new_jit_passes:
+                method_graph, params = torch._C._jit_pass_lower_graph(graph, model._c)
+            else:
+                freezed_m = torch._C._freeze_module(model._c, preserveParameters=True)
+                freezed_m, params = torch._C._jit_onnx_list_model_parameters(freezed_m)
+                method_graph = freezed_m._get_method('forward').graph
+                method_graph.eraseInput(0)  # Remove 'self' from model inputs
 
             in_vars, in_desc = torch.jit._flatten(tuple(args) + tuple(params))
             graph = _propagate_and_assign_input_shapes(
                 method_graph, tuple(in_vars), False, False)
         except AttributeError as e:
             raise RuntimeError('\'forward\' method must be a script method') from e
-        return graph, params, torch_out, module
     elif isinstance(model, torch.jit.ScriptFunction):
         params = ()
         in_vars, in_desc = torch.jit._flatten(tuple(args))
@@ -404,7 +406,6 @@ def _create_jit_graph(model, args, _retain_param_name):
         torch._C._jit_pass_onnx_function_substitution(graph)
         graph = _propagate_and_assign_input_shapes(
             graph, tuple(in_vars), False, False)
-        return graph, params, torch_out, None
     else:
         graph, torch_out = _trace_and_get_graph_from_model(model, args)
         state_dict = _unique_state_dict(model)
@@ -417,14 +418,7 @@ def _create_jit_graph(model, args, _retain_param_name):
                 if i >= user_input_num:
                     inp.setDebugName(param_names[i - user_input_num])
         torch._C._jit_pass_onnx_function_substitution(graph)
-        return graph, params, torch_out, None
-
-
-def _get_named_param_dict(graph, params):
-    input_and_param_names = [val.debugName() for val in graph.inputs()]
-    param_names = input_and_param_names[len(input_and_param_names) - len(params):]
-    _params_dict = dict(zip(param_names, params))
-    return _params_dict
+    return graph, params, torch_out
 
 
 def _model_to_graph(model, args, verbose=False,
@@ -433,45 +427,41 @@ def _model_to_graph(model, args, verbose=False,
                     example_outputs=None,
                     _retain_param_name=False, do_constant_folding=True,
                     _disable_torch_constant_prop=False, fixed_batch_size=False,
-                    training=None, dynamic_axes=None):
+                    training=None, use_new_jit_passes=True,
+                    dynamic_axes=None):
     from torch.onnx.symbolic_helper import _export_onnx_opset_version
     # Special case for common case of passing a single Tensor
-    if isinstance(args, (torch.Tensor, int, float, bool)):
+    if isinstance(args, torch.Tensor):
         args = (args, )
 
-    if isinstance(example_outputs, (torch.Tensor, int, float, bool)):
-        example_outputs = (example_outputs,)
+    if isinstance(example_outputs, torch.Tensor):
+        example_outputs = [example_outputs]
 
-    graph, params, torch_out, module = _create_jit_graph(model, args,
-                                                         _retain_param_name)
+    graph, params, torch_out = _create_jit_graph(model, args,
+                                                 _retain_param_name,
+                                                 use_new_jit_passes)
 
-    params_dict = _get_named_param_dict(graph, params)
+    input_and_param_names = [val.debugName() for val in graph.inputs()]
+    param_names = input_and_param_names[len(input_and_param_names) - len(params):]
+    params_dict = dict(zip(param_names, params))
 
     graph = _optimize_graph(graph, operator_export_type,
                             _disable_torch_constant_prop=_disable_torch_constant_prop,
                             fixed_batch_size=fixed_batch_size, params_dict=params_dict,
-                            dynamic_axes=dynamic_axes, input_names=input_names,
-                            module=module)
+                            use_new_jit_passes=use_new_jit_passes,
+                            dynamic_axes=dynamic_axes, input_names=input_names)
     from torch.onnx.symbolic_helper import _onnx_shape_inference
     if isinstance(model, torch.jit.ScriptModule) or isinstance(model, torch.jit.ScriptFunction):
         assert example_outputs is not None, "example_outputs must be provided when exporting a ScriptModule or " \
                                             "ScriptFunction."
-        if isinstance(example_outputs, list):
-            example_outputs = [example_outputs]
-
-        out_vars, desc = torch.jit._flatten(tuple(example_outputs))
-        torch._C._jit_pass_onnx_assign_output_shape(graph, out_vars, desc, _onnx_shape_inference)
+        out_vars, _ = torch.jit._flatten(tuple(example_outputs))
+        torch._C._jit_pass_onnx_assign_output_shape(graph, out_vars, _onnx_shape_inference)
 
     # NB: ONNX requires complete information about output types, which might be
     # erased by some optimizations, so we need to set it explicitly again.
     if torch_out is not None:
-        if not (isinstance(torch_out, list) or isinstance(torch_out, tuple)):
-            output_wrapped = [torch_out]  # type: ignore
-        else:
-            output_wrapped = torch_out  # type: ignore
-
-        output_tensors, out_desc = torch._C._jit_flatten(tuple(output_wrapped))
-        torch._C._jit_pass_onnx_assign_output_shape(graph, output_tensors, out_desc, _onnx_shape_inference)
+        output_tensors, _ = torch._C._jit_flatten(torch_out)
+        torch._C._jit_pass_onnx_assign_output_shape(graph, output_tensors, _onnx_shape_inference)
 
     _set_input_and_output_names(graph, input_names, output_names)
 
@@ -479,18 +469,17 @@ def _model_to_graph(model, args, verbose=False,
     flatten_args, _ = torch._C._jit_flatten(args)
     assert len(params) + len(flatten_args) == sum(1 for _ in graph.inputs())
 
-    params_dict = _get_named_param_dict(graph, params)
+    input_and_param_names = [val.debugName() for val in graph.inputs()]
+    param_names = input_and_param_names[len(input_and_param_names) - len(params):]
+    params_dict = dict(zip(param_names, params))
 
-    if training is None or training == TrainingMode.EVAL:
+    if do_constant_folding and (training is None or training == TrainingMode.EVAL):
         params_dict = torch._C._jit_pass_onnx_eval_peephole(graph, params_dict)
 
     if do_constant_folding and _export_onnx_opset_version in torch.onnx.constant_folding_opset_versions:
         params_dict = torch._C._jit_pass_onnx_constant_fold(graph, params_dict,
                                                             _export_onnx_opset_version)
         torch._C._jit_pass_dce_allow_deleting_nodes_with_side_effects(graph)
-
-    if _onnx_shape_inference:
-        torch._C._jit_pass_onnx_graph_shape_type_inference(graph, params_dict, _export_onnx_opset_version)
 
     params_dict = torch._C._jit_pass_onnx_eliminate_unused_items(graph, params_dict)
 
@@ -619,6 +608,10 @@ def _find_missing_ops_onnx_export(model, args, f, verbose=False, training=Traini
 # the trace of a Module. In the case that a torch.nn.ScriptModule is passed in,
 # this output will be None, since we are not doing any tracing but rather
 # directly extracting the graph.
+# use_new_jit_passes is a flag which enables new jit scripting API for ONNX export.
+# The purpose of this flag is to enable the new API temporarily for testing purposes.
+# Once these jit APIs are fully tested, they will become part of production code-path by
+# removing this flag.
 def _export(model, args, f, export_params=True, verbose=False, training=None,
             input_names=None, output_names=None, operator_export_type=None,
             export_type=ExportTypes.PROTOBUF_FILE, example_outputs=None,
@@ -626,7 +619,7 @@ def _export(model, args, f, export_params=True, verbose=False, training=None,
             strip_doc_string=True, dynamic_axes=None, keep_initializers_as_inputs=None,
             fixed_batch_size=False, custom_opsets=None, add_node_names=True,
             enable_onnx_checker=True, use_external_data_format=False,
-            onnx_shape_inference=True):
+            onnx_shape_inference=True, use_new_jit_passes=True):
 
     if isinstance(model, torch.nn.DataParallel):
         raise ValueError('torch.nn.DataParallel is not supported by ONNX '
@@ -679,6 +672,7 @@ def _export(model, args, f, export_params=True, verbose=False, training=None,
                                 val_do_constant_folding,
                                 fixed_batch_size=fixed_batch_size,
                                 training=training,
+                                use_new_jit_passes=use_new_jit_passes,
                                 dynamic_axes=dynamic_axes)
 
             # TODO: Don't allocate a in-memory string for the protobuf
@@ -775,7 +769,7 @@ def _run_symbolic_method(op_name, symbolic_fn, args):
 def _is_onnx_list(value):
     if not isinstance(value, string_classes) and \
             not isinstance(value, torch.Tensor) and \
-            isinstance(value, collections.abc.Iterable):
+            isinstance(value, container_abcs.Iterable):
         return True
     return False
 
@@ -837,7 +831,7 @@ def _graph_op(g, opname, *raw_args, **kwargs):
 
     This function is monkey-patched onto Graph.
 
-    Args:
+    Arguments:
         opname (string): The ONNX operator name, e.g., `Abs` or `Add`.
         args (Node...): The inputs to the operator; usually provided
             as arguments to the `symbolic` definition.
@@ -874,7 +868,7 @@ def _graph_op(g, opname, *raw_args, **kwargs):
     from torch.onnx.symbolic_helper import _onnx_shape_inference
     if _onnx_shape_inference:
         from torch.onnx.symbolic_helper import _export_onnx_opset_version as opset_version
-        torch._C._jit_pass_onnx_node_shape_type_inference(n, _params_dict, opset_version)
+        torch._C._jit_pass_onnx_node_shape_type_inference(n, opset_version)
 
     if outputs == 1:
         return n.output()
@@ -931,7 +925,7 @@ def _find_symbolic_in_registry(domain, op_name, opset_version, operator_export_t
     return sym_registry.get_registered_op(op_name, domain, opset_version)
 
 
-def _run_symbolic_function(g, block, n, inputs, env, operator_export_type=OperatorExportTypes.ONNX):
+def _run_symbolic_function(g, n, inputs, env, operator_export_type=OperatorExportTypes.ONNX):
     # NB: Returning None means the node gets cloned as is into
     # the new graph
     try:
@@ -954,12 +948,9 @@ def _run_symbolic_function(g, block, n, inputs, env, operator_export_type=Operat
             ns_op_name = n.kind()
         ns, op_name = ns_op_name.split("::")
         if ns == "onnx":
-            if op_name == "Placeholder":
-                return torch._C._jit_onnx_convert_pattern_from_subblock(block, n, env)
-            else:
-                # Use the original node directly
-                attrs = {k + "_" + n.kindOf(k)[0]: n[k] for k in n.attributeNames()}
-                return g.op(op_name, *inputs, **attrs, outputs=n.outputsSize())
+            # Clone node to trigger ONNX shape inference
+            attrs = {k + "_" + n.kindOf(k)[0]: n[k] for k in n.attributeNames()}
+            return g.op(op_name, *inputs, **attrs, outputs=n.outputsSize())
 
         elif ns == "aten":
             is_exportable_aten_op = sym_registry.is_registered_op(op_name, '', opset_version)
@@ -1031,7 +1022,7 @@ def _run_symbolic_function(g, block, n, inputs, env, operator_export_type=Operat
                 # Process Loop and If after subblock is converted.
                 from torch.onnx.symbolic_helper import _onnx_shape_inference
                 if _onnx_shape_inference:
-                    torch._C._jit_pass_onnx_node_shape_type_inference(new_node, _params_dict, opset_version)
+                    torch._C._jit_pass_onnx_node_shape_type_inference(new_node, opset_version)
                 return new_op_outputs
             else:
                 symbolic_name = 'prim_' + op_name
@@ -1145,9 +1136,9 @@ def register_custom_op_symbolic(symbolic_name, symbolic_fn, opset_version):
         raise RuntimeError("Failed to register operator {}. The domain {} is already a used domain."
                            .format(symbolic_name, ns))
     import torch.onnx.symbolic_registry as sym_registry
-    from torch.onnx.symbolic_helper import _onnx_stable_opsets, _onnx_main_opset
+    from torch.onnx.symbolic_helper import _onnx_stable_opsets
 
-    for version in _onnx_stable_opsets + [_onnx_main_opset]:
+    for version in _onnx_stable_opsets:
         if version >= opset_version:
             sym_registry.register_op(op_name, symbolic_fn, ns, version)
 
