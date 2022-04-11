@@ -37,8 +37,6 @@ builtin_cast_method_to_scalar_type() {
       {"char", at::kChar},
       {"double", at::kDouble},
       {"float", at::kFloat},
-      {"cfloat", at::kComplexFloat},
-      {"cdouble", at::kComplexDouble},
       {"int", at::kInt},
       {"long", at::kLong},
       {"short", at::kShort},
@@ -168,6 +166,12 @@ std::shared_ptr<SugaredValue> SimpleValue::attr(
     if (prop) {
       return MethodValue(value_, prop->getter->name())
           .call(loc, m, {}, {}, /*n_binders=*/1);
+    }
+    if (classType->hasClassAttribute(field)) {
+      ErrorReport report(loc);
+      report << "Class attribute '" << field << "' is not supported. "
+        "Please change it into instance attribute";
+      throw report;
     }
   } else if (auto iface = value_->type()->cast<InterfaceType>()) {
     // accessing methods of interfaces
