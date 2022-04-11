@@ -28,17 +28,15 @@ _backend_type_doc = """
 """
 
 # Create an enum type, `BackendType`, with empty members.
-# Can't handle Function Enum API (mypy bug #9079)
-BackendType = enum.Enum(value="BackendType", names=dict())  # type: ignore[misc]
-# Unable to assign a function a method (mypy bug #2427)
-BackendType.__repr__ = _backend_type_repr  # type: ignore[assignment]
+BackendType = enum.Enum(value="BackendType", names={})
+BackendType.__repr__ = _backend_type_repr
 BackendType.__doc__ = _backend_type_doc
 
 def backend_registered(backend_name):
     """
     Checks if backend_name is registered as an RPC backend.
 
-    Args:
+    Arguments:
         backend_name (str): string to identify the RPC backend.
     Returns:
         True if the backend has been registered with ``register_backend``, else
@@ -52,7 +50,7 @@ def register_backend(
 ):
     """Registers a new RPC backend.
 
-    Args:
+    Arguments:
         backend_name (str): backend string to identify the handler.
         construct_rpc_backend_options_handler (function):
             Handler that is invoked when
@@ -75,10 +73,8 @@ def register_backend(
         },
         **existing_enum_dict
     )
-    # Can't handle Function Enum API (mypy bug #9079)
-    BackendType = enum.Enum(value="BackendType", names=extended_enum_dict)  # type: ignore[misc]
-    # Unable to assign a function a method (mypy bug #2427)
-    BackendType.__repr__ = _backend_type_repr  # type: ignore[assignment]
+    BackendType = enum.Enum(value="BackendType", names=extended_enum_dict)
+    BackendType.__repr__ = _backend_type_repr
     BackendType.__doc__ = _backend_type_doc
     return BackendType[backend_name]
 
@@ -157,7 +153,6 @@ def _process_group_init_backend_handler(
 
     # TODO: add try-except and destroy _agent in all processes if any fails.
     return ProcessGroupAgent(
-        store,
         name,
         group,
         rpc_backend_options.num_send_recv_threads,
@@ -240,6 +235,10 @@ def _tensorpipe_check_device_maps(agent, device_maps):
 
     agent._set_reverse_device_maps(reverse_device_maps)
 
+    # Synchronize again to make sure that all device maps are properly
+    # configured before launching user RPCs.
+    api._all_gather(None)
+
 
 def _tensorpipe_init_backend_handler(store, name, rank, world_size, rpc_backend_options):
     from . import TensorPipeRpcBackendOptions
@@ -257,14 +256,6 @@ def _tensorpipe_init_backend_handler(store, name, rank, world_size, rpc_backend_
             )
         )
 
-    if torch.cuda.is_available():
-        # It's necessary to initialize PyTorch CUDA states here (e.g.,
-        # CUDACachingAllocator). If this is missing, we could hit errors like
-        # "allocator not initialized", because other processes might send
-        # CUDA-related RPC request to this process before user code in this
-        # process initializes its PyTorch CUDA states.
-        torch.cuda.init()
-
     # The agent's join method is required to behave like a barrier and perform
     # collective operations, for which it relies on a process group, instead of
     # re-implementing this on top of RPCs.
@@ -280,7 +271,6 @@ def _tensorpipe_init_backend_handler(store, name, rank, world_size, rpc_backend_
 
     try:
         _tensorpipe_check_device_maps(agent, rpc_backend_options.device_maps)
-        agent.join()
     except Exception:
         api.shutdown()
         raise
