@@ -317,7 +317,7 @@
 - name: clone(Tensor self, *, MemoryFormat? memory_format=None) -> Tensor
   self: grad
 
-- name: _coalesce(Tensor self) -> Tensor
+- name: coalesce(Tensor self) -> Tensor
   self: grad
 
 - name: complex(Tensor real, Tensor imag) -> Tensor
@@ -377,8 +377,8 @@
 - name: deg2rad(Tensor self) -> Tensor
   self: deg2rad_backward(grad)
 
-- name: linalg_det(Tensor self) -> Tensor
-  self: linalg_det_backward(grad, self, result)
+- name: det(Tensor self) -> Tensor
+  self: det_backward(grad, self, result)
 
 - name: diag(Tensor self, int diagonal=0) -> Tensor
   self: diag_backward(grad, self.sizes(), diagonal)
@@ -400,11 +400,11 @@
 - name: div.Scalar(Tensor self, Scalar other) -> Tensor
   self: div_tensor_self_backward(grad, at::scalar_to_tensor(other), self.scalar_type())
 
-- name: div.Tensor_mode(Tensor self, Tensor other, *, str? rounding_mode) -> Tensor
+- name: div.Tensor_mode(Tensor self, Tensor other, *, str rounding_mode) -> Tensor
   self: div_tensor_self_backward(grad, other, self.scalar_type(), rounding_mode)
   other: div_tensor_other_backward(grad, self, other, rounding_mode)
 
-- name: div.Scalar_mode(Tensor self, Scalar other, *, str? rounding_mode) -> Tensor
+- name: div.Scalar_mode(Tensor self, Scalar other, *, str rounding_mode) -> Tensor
   self: div_tensor_self_backward(grad, at::scalar_to_tensor(other), self.scalar_type(), rounding_mode)
 
 - name: dot(Tensor self, Tensor tensor) -> Tensor
@@ -662,6 +662,16 @@
 - name: xlogy.Scalar_Other(Tensor self, Scalar other) -> Tensor
   self: grad * at::xlogy((self != 0), other)
 
+- name: special_xlog1py(Tensor self, Tensor other) -> Tensor
+  self: grad * other.log1p()
+  other: grad * self / (other + 1)
+
+- name: special_xlog1py.self_scalar(Scalar self, Tensor other) -> Tensor
+  other: grad * self / (other + 1)
+
+- name: special_xlog1py.other_scalar(Tensor self, Scalar other) -> Tensor
+  self: grad * std::log1p(other.toDouble())
+
 - name: logdet(Tensor self) -> Tensor
   self: logdet_backward(grad, self, result)
 
@@ -912,9 +922,9 @@
   self: prod_backward(grad, self.to(grad.scalar_type()), result, dim, keepdim)
 
 - name: put_(Tensor(a!) self, Tensor index, Tensor source, bool accumulate=False) -> Tensor(a!)
-  self: "accumulate ? grad : grad.put(index, zeros_like(source), false)"
+  self: grad.clone().put_(index, zeros_like(source), accumulate)
   index: non_differentiable
-  source: grad.take(index).reshape_as(source)
+  source: grad.take(index)
 
 - name: linalg_qr(Tensor self, str mode='reduced') -> (Tensor Q, Tensor R)
   self: linalg_qr_backward(grads, self, mode, Q, R)
@@ -1098,9 +1108,6 @@
 - name: linalg_eigvalsh(Tensor self, str UPLO="L") -> Tensor
   self: non_differentiable
 
-- name: linalg_eigvals(Tensor self) -> Tensor
-  self: non_differentiable
-
 - name: t(Tensor(a) self) -> Tensor(a)
   self: grad.t()
 
@@ -1117,7 +1124,7 @@
   self: grad.rot90(-k, dims)
 
 - name: take(Tensor self, Tensor index) -> Tensor
-  self: zeros_like(self).put_(index, grad, true)
+  self: take_backward(grad, self, index)
   index: non_differentiable
 
 - name: tan(Tensor self) -> Tensor
@@ -1486,8 +1493,8 @@
 - name: _adaptive_avg_pool2d(Tensor self, int[2] output_size) -> Tensor
   self: _adaptive_avg_pool2d_backward(grad, self)
 
-- name: _adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
-  self: _adaptive_avg_pool3d_backward(grad, self)
+- name: adaptive_avg_pool3d(Tensor self, int[3] output_size) -> Tensor
+  self: adaptive_avg_pool3d_backward(grad, self)
 
 - name: adaptive_max_pool2d(Tensor self, int[2] output_size) -> (Tensor, Tensor)
   self: adaptive_max_pool2d_backward(grad, self, result1)
@@ -1595,8 +1602,8 @@
   grad_output: _adaptive_avg_pool2d(grad, { grad_output.size(-2), grad_output.size(-1) })
   self: zeros_like(self)
 
-- name: _adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
-  grad_output: _adaptive_avg_pool3d(grad, { grad_output.size(-3), grad_output.size(-2), grad_output.size(-1) })
+- name: adaptive_avg_pool3d_backward(Tensor grad_output, Tensor self) -> Tensor
+  grad_output: adaptive_avg_pool3d(grad, { grad_output.size(-3), grad_output.size(-2), grad_output.size(-1) })
   self: zeros_like(self)
 
 - name: adaptive_max_pool2d_backward(Tensor grad_output, Tensor self, Tensor indices) -> Tensor
