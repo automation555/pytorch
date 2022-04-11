@@ -56,14 +56,6 @@ void OptimizerParamState::serialize(torch::serialize::OutputArchive& archive) co
     "You must override it in your subclass of torch::optim::OptimizerCloneableParamState<YourOptimizerParamState>.");
 }
 
-double OptimizerOptions::get_lr() const {
-  TORCH_CHECK(false, "double get_lr() has not been overidden and implemented in subclass of torch::optim::OptimizerOptions, you must override it in your subclass.");
-}
-
-void OptimizerOptions::set_lr(const double lr) {
-  TORCH_CHECK(false, "double set_lr() has not been overidden and implemented in subclass of torch::optim::OptimizerOptions, you must override it in your subclass.");
-}
-
 std::unique_ptr<OptimizerOptions> OptimizerOptions::clone() const {
   TORCH_CHECK(false,
       "clone() has not been implemented for torch::optim::OptimizerOptions. ",
@@ -97,6 +89,24 @@ void Optimizer::add_param_group(const OptimizerParamGroup& param_group) {
   for (const auto& p : param_group_.params()) {
     TORCH_CHECK(state_.count(c10::guts::to_string(p.unsafeGetTensorImpl())) == 0,
       "some parameters appear in more than one parameter group");
+  }
+  bool has_duplicate_params = false;
+  auto& parameters = param_group_.params();
+  for (auto it_out = parameters.begin(); it_out != parameters.end() - 1; ++it_out) {
+    Tensor param_out = *it_out;
+    for (auto it_in = it_out + 1; it_in != parameters.end(); ++it_in) {
+      Tensor param_in = *it_in;
+      if (param_out.is_same(param_in)) {
+        has_duplicate_params = true;
+        break;
+      }
+    }
+  }
+  if (has_duplicate_params) {
+    TORCH_WARN(
+      "optimizer contains a parameter group with duplicate parameters; "
+      "in future, this will cause an error; "
+      "see github.com/pytorch/pytorch/issues/40967 for more information");
   }
   param_groups_.emplace_back(std::move(param_group_));
 }
