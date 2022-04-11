@@ -972,18 +972,6 @@ class TestONNXRuntime(unittest.TestCase):
         x = torch.rand(3, 3).to(dtype=torch.float32)
         self.run_test(MyModel(), x)
 
-    def test_hardsigmoid(self):
-        model = torch.nn.Hardsigmoid()
-
-        x = torch.rand(3, 3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
-        # corner cases
-        x = torch.tensor(3).to(dtype=torch.float32)
-        self.run_test(model, x)
-        x = torch.tensor(-3).to(dtype=torch.float32)
-        self.run_test(model, x)
-
     def test_clamp(self):
         class ClampModel(torch.nn.Module):
             def forward(self, x):
@@ -1431,6 +1419,16 @@ class TestONNXRuntime(unittest.TestCase):
         y = 2
         self.run_test(ArithmeticModule(), (x, y))
 
+    def test_tuple(self):
+        class Tuple(torch.nn.Module):
+            def forward(self, x):
+                l = (x, None, (x, None))
+                return (x, l)
+
+        model = Tuple()
+        x = torch.randn(3, 4)
+        self.run_model_test_with_external_data(Tuple(), (x,), example_outputs=model(x))
+
     # In scripting the first transpose node do not carry shape and dtype info.
     # The following test only works when onnx shape inference is enabled.
     @skipIfONNXShapeInference(False)
@@ -1552,8 +1550,8 @@ class TestONNXRuntime(unittest.TestCase):
     def test_div_rounding_mode(self):
         class TrueDivModule(torch.nn.Module):
             def forward(self, x, y):
-                return (x.div(y, rounding_mode=None),
-                        torch.div(x, y, rounding_mode=None))
+                return (x.div(y, rounding_mode='true'),
+                        torch.div(x, y, rounding_mode='true'))
 
         class TruncDivModule(torch.nn.Module):
             def forward(self, x, y):
@@ -5404,7 +5402,7 @@ class TestONNXRuntime(unittest.TestCase):
     def test_det(self):
         class Det(torch.nn.Module):
             def forward(self, x):
-                return torch.linalg.det(x)
+                return torch.det(x)
 
         x = torch.randn(2, 3, 5, 5)
         self.run_test(Det(), x)
