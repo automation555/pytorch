@@ -46,8 +46,6 @@ endif()
 # 3. If MSVC_Z7_OVERRIDE is ON, then /Zi and /ZI will be replaced with /Z7
 #    for Debug and RelWithDebInfo builds
 if(MSVC)
-  # skip unwanted includes from windows.h
-  add_definitions(-DWIN32_LEAN_AND_MEAN)
   foreach(flag_var
       CMAKE_C_FLAGS CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_MINSIZEREL
       CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_MINSIZEREL)
@@ -109,8 +107,6 @@ if(CAFFE2_CMAKE_BUILDING_WITH_MAIN_REPO)
 endif()
 
 # ---[ BLAS
-
-# setting default preferred BLAS options if not already present.
 if(NOT INTERN_BUILD_MOBILE)
   set(BLAS "MKL" CACHE STRING "Selected BLAS library")
 else()
@@ -118,7 +114,7 @@ else()
   set(AT_MKLDNN_ENABLED 0)
   set(AT_MKL_ENABLED 0)
 endif()
-set_property(CACHE BLAS PROPERTY STRINGS "ATLAS;BLIS;Eigen;FLAME;Generic;MKL;OpenBLAS;vecLib")
+set_property(CACHE BLAS PROPERTY STRINGS "Eigen;ATLAS;OpenBLAS;MKL;vecLib;FLAME;Generic")
 message(STATUS "Trying to find preferred BLAS backend of choice: " ${BLAS})
 
 if(BLAS STREQUAL "Eigen")
@@ -133,10 +129,6 @@ elseif(BLAS STREQUAL "OpenBLAS")
   find_package(OpenBLAS REQUIRED)
   include_directories(SYSTEM ${OpenBLAS_INCLUDE_DIR})
   list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${OpenBLAS_LIB})
-elseif(BLAS STREQUAL "BLIS")
-  find_package(BLIS REQUIRED)
-  include_directories(SYSTEM ${BLIS_INCLUDE_DIR})
-  list(APPEND Caffe2_PUBLIC_DEPENDENCY_LIBS ${BLIS_LIB})
 elseif(BLAS STREQUAL "MKL")
   if(BLAS_SET_BY_USER)
     find_package(MKL REQUIRED)
@@ -154,6 +146,7 @@ elseif(BLAS STREQUAL "MKL")
     set(CAFFE2_USE_MKL ON)
   else()
     message(WARNING "MKL could not be found. Defaulting to Eigen")
+    set(BLAS "Eigen" CACHE STRING "Selected BLAS library")
     set(CAFFE2_USE_EIGEN_FOR_BLAS ON)
     set(CAFFE2_USE_MKL OFF)
   endif()
@@ -175,11 +168,14 @@ if(NOT INTERN_BUILD_MOBILE)
   set(AT_MKL_ENABLED 0)
   set(AT_MKL_MT 0)
   set(USE_BLAS 1)
-  if(NOT (ATLAS_FOUND OR BLIS_FOUND OR GENERIC_BLAS_FOUND OR MKL_FOUND OR OpenBLAS_FOUND OR VECLIB_FOUND))
+  if(NOT (ATLAS_FOUND OR OpenBLAS_FOUND OR MKL_FOUND OR VECLIB_FOUND OR GENERIC_BLAS_FOUND))
     message(WARNING "Preferred BLAS (" ${BLAS} ") cannot be found, now searching for a general BLAS library")
     find_package(BLAS)
     if(NOT BLAS_FOUND)
       set(USE_BLAS 0)
+      set(BLAS "" CACHE STRING "Selected BLAS library")
+    else()
+      set(BLAS BLAS_INFO CACHE STRING "Selected BLAS library")
     endif()
   endif()
 
@@ -193,26 +189,6 @@ if(NOT INTERN_BUILD_MOBILE)
       set(AT_MKL_MT 1)
     endif()
     set(AT_MKL_ENABLED 1)
-  endif()
-elseif(INTERN_USE_EIGEN_BLAS)
-  # Eigen BLAS for Mobile
-  set(USE_BLAS 1)
-  include(${CMAKE_CURRENT_LIST_DIR}/External/EigenBLAS.cmake)
-  list(APPEND Caffe2_DEPENDENCY_LIBS eigen_blas)
-endif()
-
-# ---[ FFTW
-set(AT_FFTW_ENABLED 0)
-set(USE_FFTW OFF)
-if(USE_FFTW OR NOT MKL_FOUND)
-  find_library(LIBFFTW3 fftw3)
-  if(LIBFFTW3)
-    find_path(FFTW3_INCLUDE_DIR NAMES fftw3.h ONLY_CMAKE_FIND_ROOT_PATH)
-    if(FFTW3_INCLUDE_DIR)
-      SET(AT_FFTW_ENABLED 1)
-      SET(USE_FFTW ON)
-      include_directories(${FFTW3_INCLUDE_DIR})
-    endif()
   endif()
 endif()
 
@@ -246,7 +222,7 @@ if(USE_NNPACK OR USE_QNNPACK OR USE_PYTORCH_QNNPACK OR USE_XNNPACK)
       set(DISABLE_NNPACK_AND_FAMILY ON)
     endif()
   else()
-    if(NOT IOS AND NOT (CMAKE_SYSTEM_NAME MATCHES "^(Android|Linux|Darwin|Windows)$"))
+    if(NOT IOS AND NOT (CMAKE_SYSTEM_NAME MATCHES "^(Android|Linux|Darwin)$"))
       message(WARNING
         "Target platform \"${CMAKE_SYSTEM_NAME}\" is not supported in {Q/X}NNPACK. "
         "Supported platforms are Android, iOS, Linux, and macOS. "
@@ -268,13 +244,6 @@ if(USE_NNPACK OR USE_QNNPACK OR USE_PYTORCH_QNNPACK OR USE_XNNPACK)
     caffe2_update_option(USE_PYTORCH_QNNPACK OFF)
     caffe2_update_option(USE_XNNPACK OFF)
   else()
-    # Disable unsupported NNPack combinations with MSVC
-    if(MSVC)
-      caffe2_update_option(USE_NNPACK OFF)
-      caffe2_update_option(USE_QNNPACK OFF)
-      caffe2_update_option(USE_PYTORCH_QNNPACK OFF)
-    endif()
-
     set(CAFFE2_THIRD_PARTY_ROOT "${PROJECT_SOURCE_DIR}/third_party")
 
     if(NOT DEFINED CPUINFO_SOURCE_DIR)
@@ -297,17 +266,17 @@ else()
   set(DISABLE_NNPACK_AND_FAMILY ON)
 endif()
 
-if(USE_QNNPACK AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64" AND CMAKE_SYSTEM_NAME STREQUAL "Darwin")
-  message(WARNING
-    "QNNPACK does not compile for Apple Silicon. "
-    "Turn this warning off by explicit USE_QNNPACK=OFF.")
-  caffe2_update_option(USE_QNNPACK OFF)
-endif()
-
 set(CONFU_DEPENDENCIES_SOURCE_DIR ${PROJECT_BINARY_DIR}/confu-srcs
   CACHE PATH "Confu-style dependencies source directory")
 set(CONFU_DEPENDENCIES_BINARY_DIR ${PROJECT_BINARY_DIR}/confu-deps
   CACHE PATH "Confu-style dependencies binary directory")
+
+# ---[ Eigen BLAS for Mobile
+if(INTERN_BUILD_MOBILE AND INTERN_USE_EIGEN_BLAS)
+  set(USE_BLAS 1)
+  include(${CMAKE_CURRENT_LIST_DIR}/External/EigenBLAS.cmake)
+  list(APPEND Caffe2_DEPENDENCY_LIBS eigen_blas)
+endif()
 
 # ---[ pthreadpool
 # Only add a dependency on pthreadpool if we are on a mobile build
@@ -534,13 +503,6 @@ if(USE_XNNPACK AND NOT USE_SYSTEM_XNNPACK)
       "${CONFU_DEPENDENCIES_BINARY_DIR}/XNNPACK")
 
     set_property(TARGET XNNPACK PROPERTY POSITION_INDEPENDENT_CODE ON)
-    # Workaround for https://github.com/pytorch/pytorch/issues/47292
-    if(CMAKE_BUILD_TYPE STREQUAL "Debug" AND CMAKE_COMPILER_IS_GNUCXX AND (CMAKE_CXX_COMPILER_VERSION VERSION_LESS 7.5.0))
-      # Compiling qu8-requantization/precise-psimd.c without any optimization flags on gcc-7.4 or older i
-      # Fails with internal compiler error
-      # Workaround by forcing -O1 for XNNPACK (i.e. build it with RelWithDebInfo)
-      set_property(TARGET XNNPACK APPEND_STRING PROPERTY COMPILE_FLAGS "-O1")
-    endif()
   endif()
 
   include_directories(SYSTEM ${XNNPACK_INCLUDE_DIR})
@@ -558,13 +520,11 @@ endif()
 
 # ---[ Vulkan deps
 if(USE_VULKAN)
-  set(Vulkan_DEFINES)
-  set(Vulkan_INCLUDES)
   set(Vulkan_LIBS)
+  set(Vulkan_INCLUDES)
   include(${CMAKE_CURRENT_LIST_DIR}/VulkanDependencies.cmake)
-  string(APPEND CMAKE_CXX_FLAGS ${Vulkan_DEFINES})
-  include_directories(SYSTEM ${Vulkan_INCLUDES})
   list(APPEND Caffe2_DEPENDENCY_LIBS ${Vulkan_LIBS})
+  include_directories(SYSTEM ${Vulkan_INCLUDES})
 endif()
 
 # ---[ gflags
@@ -739,6 +699,7 @@ else()
     "Turning USE_FAKELOWP off as it depends on USE_FBGEMM.")
   caffe2_update_option(USE_FAKELOWP OFF)
 endif()
+
 
 # ---[ LMDB
 if(USE_LMDB)
@@ -1218,38 +1179,32 @@ if(USE_ROCM)
     list(APPEND HIP_CXX_FLAGS -std=c++14)
 
     if(CMAKE_BUILD_TYPE MATCHES Debug)
-       list(APPEND HIP_CXX_FLAGS -g2)
+       list(APPEND HIP_CXX_FLAGS -g)
        list(APPEND HIP_CXX_FLAGS -O0)
-       list(APPEND HIP_HIPCC_FLAGS -fdebug-info-for-profiling)
     endif(CMAKE_BUILD_TYPE MATCHES Debug)
 
-    set(HIP_CLANG_FLAGS ${HIP_CXX_FLAGS})
+    set(HIP_HCC_FLAGS ${HIP_CXX_FLAGS})
     # Ask hcc to generate device code during compilation so we can use
     # host linker to link.
-    list(APPEND HIP_CLANG_FLAGS -fno-gpu-rdc)
+    list(APPEND HIP_HCC_FLAGS -fno-gpu-rdc)
     foreach(pytorch_rocm_arch ${PYTORCH_ROCM_ARCH})
-      list(APPEND HIP_CLANG_FLAGS --amdgpu-target=${pytorch_rocm_arch})
+      list(APPEND HIP_HCC_FLAGS --amdgpu-target=${pytorch_rocm_arch})
     endforeach()
 
     set(Caffe2_HIP_INCLUDE
-       $<INSTALL_INTERFACE:include> ${Caffe2_HIP_INCLUDE})
+       ${thrust_INCLUDE_DIRS} ${hipcub_INCLUDE_DIRS} ${rocprim_INCLUDE_DIRS} ${miopen_INCLUDE_DIRS} ${rocblas_INCLUDE_DIRS} ${rocrand_INCLUDE_DIRS} ${hiprand_INCLUDE_DIRS} ${roctracer_INCLUDE_DIRS} ${hip_INCLUDE_DIRS} ${hcc_INCLUDE_DIRS} ${hsa_INCLUDE_DIRS} $<INSTALL_INTERFACE:include> ${Caffe2_HIP_INCLUDE})
     # This is needed for library added by hip_add_library (same for hip_add_executable)
     hip_include_directories(${Caffe2_HIP_INCLUDE})
 
-    set(Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
+    set(Caffe2_HIP_DEPENDENCY_LIBS
       ${PYTORCH_HIP_HCC_LIBRARIES} ${PYTORCH_MIOPEN_LIBRARIES} ${PYTORCH_RCCL_LIBRARIES} ${hipcub_LIBRARIES} ${ROCM_HIPRTC_LIB} ${ROCM_ROCTX_LIB})
 
     # Note [rocblas & rocfft cmake bug]
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     # TODO: There is a bug in rocblas's & rocfft's cmake files that exports the wrong targets name in ${rocblas_LIBRARIES}
     # If you get this wrong, you'll get a complaint like 'ld: cannot find -lrocblas-targets'
-    if(ROCM_VERSION_DEV VERSION_GREATER_EQUAL "4.1.0")
-      list(APPEND Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
-        roc::rocblas hip::hipfft hip::hiprand roc::hipsparse)
-    else()
-      list(APPEND Caffe2_PUBLIC_HIP_DEPENDENCY_LIBS
-        roc::rocblas roc::rocfft hip::hiprand roc::hipsparse)
-    endif()
+    list(APPEND Caffe2_HIP_DEPENDENCY_LIBS
+      roc::rocblas roc::rocfft hip::hiprand roc::hipsparse)
   else()
     caffe2_update_option(USE_ROCM OFF)
   endif()
@@ -1261,11 +1216,7 @@ if(USE_ROCM)
   # in the if above
   include_directories(SYSTEM ${HIP_PATH}/include)
   include_directories(SYSTEM ${ROCBLAS_PATH}/include)
-  if(ROCM_VERSION_DEV VERSION_GREATER_EQUAL "4.1.0")
-    include_directories(SYSTEM ${HIPFFT_PATH}/include)
-  else()
-    include_directories(SYSTEM ${ROCFFT_PATH}/include)
-  endif()
+  include_directories(SYSTEM ${ROCFFT_PATH}/include)
   include_directories(SYSTEM ${HIPSPARSE_PATH}/include)
   include_directories(SYSTEM ${HIPRAND_PATH}/include)
   include_directories(SYSTEM ${ROCRAND_PATH}/include)
@@ -1357,11 +1308,9 @@ if(USE_DISTRIBUTED AND USE_TENSORPIPE)
   if(MSVC)
     message(WARNING "Tensorpipe cannot be used on Windows.")
   else()
-    if(USE_CUDA)
-      set(TP_USE_CUDA ON CACHE BOOL "" FORCE)
-      set(TP_ENABLE_CUDA_IPC ON CACHE BOOL "" FORCE)
-    endif()
     set(TP_BUILD_LIBUV ON CACHE BOOL "" FORCE)
+    set(TP_ENABLE_SHM OFF CACHE BOOL "" FORCE)
+    set(TP_ENABLE_CMA OFF CACHE BOOL "" FORCE)
     set(TP_STATIC_OR_SHARED STATIC CACHE STRING "" FORCE)
 
     add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/tensorpipe)
@@ -1528,7 +1477,9 @@ if(NOT INTERN_BUILD_MOBILE)
   if(MSVC)
     # we want to respect the standard, and we are bored of those **** .
     add_definitions(-D_CRT_SECURE_NO_DEPRECATE=1)
-    list(APPEND CUDA_NVCC_FLAGS "-Xcompiler=/wd4819,/wd4503,/wd4190,/wd4244,/wd4251,/wd4275,/wd4522")
+    # skip unwanted includes from windows.h
+    add_definitions(-DWIN32_LEAN_AND_MEAN)
+    list(APPEND CUDA_NVCC_FLAGS "-Xcompiler" "/wd4819" "-Xcompiler" "/wd4503" "-Xcompiler" "/wd4190" "-Xcompiler" "/wd4244" "-Xcompiler" "/wd4251" "-Xcompiler" "/wd4275" "-Xcompiler" "/wd4522")
   endif()
 
   if(NOT MSVC)
@@ -1553,8 +1504,7 @@ if(NOT INTERN_BUILD_MOBILE)
 
   if(CUDA_HAS_FP16 OR NOT ${CUDA_VERSION} LESS 7.5)
     message(STATUS "Found CUDA with FP16 support, compiling with torch.cuda.HalfTensor")
-    list(APPEND CUDA_NVCC_FLAGS "-DCUDA_HAS_FP16=1" "-D__CUDA_NO_HALF_OPERATORS__" "-D__CUDA_NO_HALF_CONVERSIONS__"
-      "-D__CUDA_NO_BFLOAT16_CONVERSIONS__" "-D__CUDA_NO_HALF2_OPERATORS__")
+    list(APPEND CUDA_NVCC_FLAGS "-DCUDA_HAS_FP16=1" "-D__CUDA_NO_HALF_OPERATORS__" "-D__CUDA_NO_HALF_CONVERSIONS__" "-D__CUDA_NO_HALF2_OPERATORS__")
     add_compile_options(-DCUDA_HAS_FP16=1)
   else()
     message(STATUS "Could not find CUDA with FP16 support, compiling without torch.CudaHalfTensor")
@@ -1579,14 +1529,9 @@ if(NOT INTERN_BUILD_MOBILE)
   set(CUDA_ATTACH_VS_BUILD_RULE_TO_CUDA_FILE OFF)
 
   find_package(MAGMA)
-  if((USE_CUDA OR USE_ROCM) AND MAGMA_FOUND)
+  if(USE_CUDA AND MAGMA_FOUND)
     include_directories(SYSTEM ${MAGMA_INCLUDE_DIR})
-    if(USE_CUDA)
-      set(CMAKE_REQUIRED_INCLUDES "${MAGMA_INCLUDE_DIR};${CUDA_INCLUDE_DIRS}")
-    endif()
-    if(USE_ROCM)
-      set(CMAKE_REQUIRED_INCLUDES "${MAGMA_INCLUDE_DIR}")
-    endif()
+    set(CMAKE_REQUIRED_INCLUDES "${MAGMA_INCLUDE_DIR};${CUDA_INCLUDE_DIRS}")
     include(CheckPrototypeDefinition)
     check_prototype_definition(magma_get_sgeqrf_nb
      "magma_int_t magma_get_sgeqrf_nb( magma_int_t m, magma_int_t n );"
@@ -1656,7 +1601,6 @@ if(NOT INTERN_BUILD_MOBILE)
     add_compile_options(-DUSE_GCC_GET_CPUID)
   endif()
 
-  find_package(VSX) # checks VSX
   find_package(AVX) # checks AVX and AVX2
 
   # we don't set -mavx and -mavx2 flags globally, but only for specific files
@@ -1679,9 +1623,6 @@ if(NOT INTERN_BUILD_MOBILE)
   find_package(LAPACK)
   if(LAPACK_FOUND)
     set(USE_LAPACK 1)
-    list(APPEND Caffe2_PRIVATE_DEPENDENCY_LIBS ${LAPACK_LIBRARIES})
-  else()
-    set(USE_LAPACK 0)
   endif()
 
   if(NOT USE_CUDA)
@@ -1789,101 +1730,23 @@ endif()
 #
 # End ATen checks
 #
-set(TEMP_BUILD_SHARED_LIBS ${BUILD_SHARED_LIBS})
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libs" FORCE)
-add_subdirectory(${PROJECT_SOURCE_DIR}/third_party/fmt)
 
-# Disable compiler feature checks for `fmt`.
+# ---[ fmt
 #
-# CMake compiles a little program to check compiler features. Some of our build
-# configurations (notably the mobile build analyzer) will populate
-# CMAKE_CXX_FLAGS in ways that break feature checks. Since we already know
-# `fmt` is compatible with a superset of the compilers that PyTorch is, it
-# shouldn't be too bad to just disable the checks.
-set_target_properties(fmt-header-only PROPERTIES INTERFACE_COMPILE_FEATURES "")
+# We define a custom target instead of using `add_subdirectory` because we need
+# to install the resulting target into the `Caffe2Targets` export set. Before
+# CMake 3.13, install(TARGETS) only accepts targets created within the same
+# directory.
+# See: https://stackoverflow.com/questions/34443128/cmake-install-targets-in-subdirectories/34444949
 
-list(APPEND Caffe2_DEPENDENCY_LIBS fmt::fmt-header-only)
-set(BUILD_SHARED_LIBS ${TEMP_BUILD_SHARED_LIBS} CACHE BOOL "Build shared libs" FORCE)
+set(FMT_INCLUDE_DIR ${PROJECT_SOURCE_DIR}/third_party/fmt/include)
+add_library(torch-fmt INTERFACE)
+target_compile_definitions(torch-fmt INTERFACE FMT_HEADER_ONLY=1)
+target_include_directories(torch-fmt INTERFACE
+  $<BUILD_INTERFACE:${FMT_INCLUDE_DIR}>
+  $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-# ---[ Kineto
-if(USE_KINETO AND INTERN_BUILD_MOBILE)
-  message(STATUS "Not using libkineto in a mobile build.")
-  set(USE_KINETO OFF)
-endif()
-if(USE_KINETO AND MSVC)
-  message(STATUS "Not using libkineto in a Windows build.")
-  set(USE_KINETO OFF)
-endif()
-if(USE_KINETO AND APPLE)
-  message(STATUS "Not using libkineto in a Mac build.")
-  set(USE_KINETO OFF)
-endif()
-if(USE_KINETO AND (NOT USE_CUDA))
-  set(LIBKINETO_NOCUPTI ON CACHE STRING "")
-  message(STATUS "Using CPU-only Kineto in the non-CUDA build.")
-else()
-  set(LIBKINETO_NOCUPTI OFF CACHE STRING "")
-  message(STATUS "CUDA build detected, configuring Kineto with CUPTI support.")
-endif()
-if(USE_KINETO)
-  set(CAFFE2_THIRD_PARTY_ROOT "${PROJECT_SOURCE_DIR}/third_party" CACHE STRING "")
-  set(KINETO_SOURCE_DIR "${CAFFE2_THIRD_PARTY_ROOT}/kineto/libkineto" CACHE STRING "")
-  set(KINETO_BUILD_TESTS OFF CACHE BOOL "")
-  set(KINETO_LIBRARY_TYPE "static" CACHE STRING "")
-
-  message(STATUS "Configuring Kineto dependency:")
-  message(STATUS "  KINETO_SOURCE_DIR = ${KINETO_SOURCE_DIR}")
-  message(STATUS "  KINETO_BUILD_TESTS = ${KINETO_BUILD_TESTS}")
-  message(STATUS "  KINETO_LIBRARY_TYPE = ${KINETO_LIBRARY_TYPE}")
-
-  if(NOT LIBKINETO_NOCUPTI)
-    set(CUDA_SOURCE_DIR "${CUDA_TOOLKIT_ROOT_DIR}" CACHE STRING "")
-    message(STATUS "  CUDA_SOURCE_DIR = ${CUDA_SOURCE_DIR}")
-
-    if(EXISTS ${CUDA_SOURCE_DIR}/extras/CUPTI/lib64/libcupti_static.a)
-      set(CUDA_cupti_LIBRARY "${CUDA_SOURCE_DIR}/extras/CUPTI/lib64/libcupti_static.a")
-    elseif(EXISTS ${CUDA_SOURCE_DIR}/lib64/libcupti_static.a)
-      set(CUDA_cupti_LIBRARY "${CUDA_SOURCE_DIR}/lib64/libcupti_static.a")
-    elseif(USE_CUPTI_SO)
-      if(EXISTS ${CUDA_SOURCE_DIR}/extras/CUPTI/lib64/libcupti.so)
-        set(CUDA_cupti_LIBRARY "${CUDA_SOURCE_DIR}/extras/CUPTI/lib64/libcupti.so")
-      elseif(EXISTS ${CUDA_SOURCE_DIR}/lib64/libcupti.so)
-        set(CUDA_cupti_LIBRARY "${CUDA_SOURCE_DIR}/lib64/libcupti.so")
-      endif()
-    endif()
-
-    if(EXISTS ${CUDA_SOURCE_DIR}/extras/CUPTI/include)
-      set(CUPTI_INCLUDE_DIR "${CUDA_SOURCE_DIR}/extras/CUPTI/include")
-    elseif(EXISTS ${CUDA_SOURCE_DIR}/include/cupti.h)
-      set(CUPTI_INCLUDE_DIR "${CUDA_SOURCE_DIR}/include")
-    endif()
-
-    set(FOUND_CUPTI FALSE)
-    if((DEFINED CUPTI_INCLUDE_DIR) AND (DEFINED CUDA_cupti_LIBRARY))
-      if((CUDA_cupti_LIBRARY MATCHES "libcupti_static.a") OR ((CUDA_cupti_LIBRARY MATCHES "libcupti.so") AND (USE_CUPTI_SO)))
-        set(FOUND_CUPTI TRUE)
-      endif()
-    endif()
-
-    if(FOUND_CUPTI)
-      message(STATUS "  CUDA_cupti_LIBRARY = ${CUDA_cupti_LIBRARY}")
-      message(STATUS "  CUPTI_INCLUDE_DIR = ${CUPTI_INCLUDE_DIR}")
-      if(NOT TARGET kineto)
-        add_subdirectory("${KINETO_SOURCE_DIR}")
-      endif()
-      string(APPEND CMAKE_CXX_FLAGS " -DUSE_KINETO")
-      list(APPEND Caffe2_DEPENDENCY_LIBS kineto)
-      message(STATUS "Configured Kineto")
-    else()
-      message(STATUS "Could not find CUPTI library, skipping Kineto build")
-      set(USE_KINETO OFF)
-    endif()
-  else()
-      if(NOT TARGET kineto)
-        add_subdirectory("${KINETO_SOURCE_DIR}")
-      endif()
-      string(APPEND CMAKE_CXX_FLAGS " -DUSE_KINETO")
-      list(APPEND Caffe2_DEPENDENCY_LIBS kineto)
-      message(STATUS "Configured Kineto (CPU)")
-  endif()
-endif()
+install(TARGETS torch-fmt EXPORT Caffe2Targets)
+install(DIRECTORY ${FMT_INCLUDE_DIR}
+        DESTINATION ${CMAKE_INSTALL_PREFIX}
+        FILES_MATCHING PATTERN "*.h")
