@@ -256,6 +256,9 @@ def __getitem_(g, self, i):
         from torch.onnx.symbolic_opset9 import __getitem_ as getitem
         return getitem(g, self, i)
 
+def _set_item(g, tensor_list, i, v):
+    tensor_list = g.op("SequenceErase", tensor_list, i)
+    return g.op("SequenceInsert", tensor_list, v, i)
 
 def append(g, self, tensor):
     return g.op("SequenceInsert", self, tensor)
@@ -446,13 +449,13 @@ replication_pad2d = replication_pad
 replication_pad3d = replication_pad
 
 
-def linalg_det(g, self):
+def det(g, self):
     return g.op("Det", self)
 
 
 def logdet(g, input):
     from torch.onnx.symbolic_opset9 import log
-    return log(g, linalg_det(g, input))
+    return log(g, det(g, input))
 
 
 def arange(g, *args):
