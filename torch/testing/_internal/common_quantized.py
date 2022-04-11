@@ -21,21 +21,32 @@ def _conv_output_shape(input_size, kernel_size, padding, stride, dilation,
                      * (dilation - 1)) / stride) + 2 * output_padding + 1
 
 # Quantization references
-def _quantize(x, scale, zero_point, qmin=None, qmax=None, dtype=np.uint8):
+def _quantize(x, scale=None, zero_point=None, qmin=None, qmax=None,
+              dtype=np.uint8):
     """Quantizes a numpy array."""
     if qmin is None:
         qmin = np.iinfo(dtype).min
     if qmax is None:
         qmax = np.iinfo(dtype).max
+    if scale is None:
+        fmin = min(x.min().item(), 0)
+        fmax = max(x.max().item(), 0)
+        if fmin == fmax:
+            scale = 1.0
+        else:
+            scale = (fmax - fmin) / (qmax - qmin)
+    if zero_point is None:
+        zero_point = int(round(qmin - fmin / scale))
+        zero_point = np.clip(zero_point, qmin, qmax)
     qx = np.round(x / scale + zero_point).astype(np.int64)
     qx = np.clip(qx, qmin, qmax)
     qx = qx.astype(dtype)
-    return qx
+    return qx, scale, zero_point
 
 
 def _dequantize(qx, scale, zero_point):
     """Dequantizes a numpy array."""
-    x = (qx.astype(float) - zero_point) * scale
+    x = (qx.astype(np.float) - zero_point) * scale
     return x
 
 
@@ -102,35 +113,6 @@ def _calculate_dynamic_per_channel_qparams(X, dtype):
 
     return scale, zero_point
 
-def _snr(x, x_hat):
-    """Calculates the signal to noise ratio and returns the signal and noise
-    power, as well as the SNR in dB.
-    If the input is a list/tuple this function is called recursively on each
-    element. The result will have the same nested structure as the inputs.
-
-    Args:
-        x, x_hat: Either a tensor or a nested list/tuple of tensors.
-    Returns:
-        signal, noise, SNR(in dB): Either floats or a nested list of floats
-    """
-    if isinstance(x, (list, tuple)):
-        assert(len(x) == len(x_hat))
-        res = []
-        for idx in range(len(x)):
-            res.append(_snr(x[idx], x_hat[idx]))
-        return res
-    if x_hat.is_quantized:
-        x_hat = x_hat.dequantize()
-    if x.is_quantized:
-        x = x.dequantize()
-    noise = (x - x_hat).norm()
-    if noise == 0:
-        return 0.0, float('inf'), float('inf')
-    signal = x.norm()
-    snr = signal / noise
-    snr_db = 20 * snr.log10()
-    return signal, noise, snr_db
-
 @contextmanager
 def override_quantized_engine(qengine):
     previous = torch.backends.quantized.engine
@@ -139,16 +121,6 @@ def override_quantized_engine(qengine):
         yield
     finally:
         torch.backends.quantized.engine = previous
-
-@contextmanager
-def override_cpu_allocator_for_qnnpack(qengine_is_qnnpack):
-    try:
-        if qengine_is_qnnpack:
-            torch._C._set_default_mobile_cpu_allocator()
-        yield
-    finally:
-        if qengine_is_qnnpack:
-            torch._C._unset_default_mobile_cpu_allocator()
 
 # TODO: Update all quantization tests to use this decorator.
 # Currently for some of the tests it seems to have inconsistent params
