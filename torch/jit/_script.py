@@ -19,7 +19,7 @@ from typing import Any, Dict
 import torch
 import torch._jit_internal as _jit_internal
 from torch.utils import set_module
-from torch.jit._recursive import ScriptMethodStub, wrap_cpp_module, infer_methods_to_compile
+from torch.jit._recursive import ScriptMethodStub, wrap_cpp_module, infer_methods_to_compile, _compile_and_register_class
 from torch.nn import Module
 from torch.jit._state import _enabled
 from torch.jit._builtins import _register_builtin
@@ -53,59 +53,6 @@ else:
     def Attribute(value, type):  # type: ignore
         return value
 
-Attribute.__doc__ = """
-    This method is a pass-through function that returns `value`, mostly
-    used to indicate to the TorchScript compiler that the left-hand side
-    expression is a class instance attribute with type of `type`. Note that
-    `torch.jit.Attribute` should only be used in `__init__` method of `nn.Module`
-    subclasses.
-
-    Though TorchScript can infer correct type for most Python expressions, there are some cases where
-    type infernece can be wrong, including:
-    - Empty containers like `[]` and `{}`, which TorchScript assumes to be container of `Tensor`s
-    - Optional types like `Optional[T]` but assigned a valid value of type `T`, TorchScript would assume
-    it is type `T` rather than `Optional[T]`
-
-    In eager mode, it is simply a pass-through function that returns `value`
-    without other implications.
-
-    Example:
-
-    .. testcode::
-
-        import torch
-        from typing import Dict
-
-        class AttributeModule(torch.nn.Module):
-            def __init__(self):
-                super(M, self).__init__()
-                self.foo = torch.jit.Attribute(0.1, float)
-
-                # we should be able to use self.foo as a float here
-                assert 0.0 < self.foo
-
-                self.names_ages = torch.jit.Attribute({}, Dict[str, int])
-                self.names_ages["someone"] = 20
-                assert isinstance(self.names_ages["someone"], int)
-
-        m = AttributeModule()
-        # m will contain two attributes
-        # 1. foo of type float
-        # 2. names_ages of type Dict[str, int]
-
-    .. testcleanup::
-
-        del AttributeModule
-        del m
-
-    Args:
-        value: An initial value to be assigned to attribute.
-        type: A Python type
-
-    Returns:
-        Returns `value`
-"""
-
 
 # Gets a function from the name of a method on a type
 def _get_function_from_type(cls, name):
@@ -117,14 +64,6 @@ def _get_function_from_type(cls, name):
 def _is_new_style_class(cls):
     if hasattr(cls, "__class__"):
         return "__dict__" in dir(cls) or hasattr(cls, "__slots__")
-
-
-def _compile_and_register_class(obj, rcb, qualified_name):
-    ast = get_jit_class_def(obj, obj.__name__)
-    defaults = torch.jit.frontend.get_default_args_for_class(obj)
-    script_class = torch._C._jit_script_class_compile(qualified_name, ast, defaults, rcb)
-    torch.jit._state._add_script_class(obj, script_class)
-    return script_class
 
 
 # These OrderedDictWrapper classes replace the actual OrderedDicts in
@@ -324,6 +263,148 @@ class ConstMap:
 
 
 if _enabled:
+    class RecursiveScriptClass(object):
+        """
+        An analogue of RecursiveScriptModule for regular objects that are not modules.
+        This class is a wrapper around a torch._C.ScriptObject that represents an instance
+        of a TorchScript class and allows it to be used in Python.
+
+        Attributes:
+            _c [torch._C.ScriptObject]: The C++ object to which attribute lookups and method
+                calls are forwarded.
+            _props [Dict[str, property]]: A dictionary of properties fetched from self._c and
+                exposed on this wrppaer.
+        """
+        def __init__(self, cpp_class):
+            super(RecursiveScriptClass, self).__init__()
+            self.__dict__["_initializing"] = True
+            self._c = cpp_class
+
+            # Add wrapped object's properties to this class instance.
+            self._props = {prop.name(): property(prop.getter(), prop.setter()) for prop in self._c._properties()}
+
+            self.__dict__["_initializing"] = False
+
+        def __getattr__(self, attr):
+            if "_initializing" in self.__dict__ and self.__dict__["_initializing"]:
+                return super(RecursiveScriptClass, self).__getattr__(attr)  # type: ignore
+
+            if attr in self._props:
+                return self._props[attr].fget()
+
+            return getattr(self._c, attr)
+
+        def __setattr__(self, attr, value):
+            if "_initializing" in self.__dict__ and self.__dict__["_initializing"]:
+                return super(RecursiveScriptClass, self).__setattr__(attr, value)
+
+            if attr in self._props:
+                return self._props[attr].fset(value)
+
+            setattr(self._c, attr, value)
+
+        # Delegate calls to magic methods like __len__ to the C++ module backing the
+        # RecursiveScriptClass.
+        def forward_magic_method(self, method_name, *args, **kwargs):
+            if not self._c._has_method(method_name):
+                raise TypeError()
+
+            self_method = self.__getattr__(method_name)
+            return self_method(*args, **kwargs)
+
+        def __getstate__(self):
+            raise pickle.PickleError("ScriptClasses cannot be pickled")
+
+        def __iter__(self):
+            return self.forward_magic_method("__iter__")
+
+        def __len__(self):
+            return self.forward_magic_method("__len__")
+
+        def __neg__(self):
+            return self.forward_magic_method("__neg__")
+
+        def __mul__(self, other):
+            return self.forward_magic_method("__mul__", other)
+
+        def __contains__(self, key):
+            return self.forward_magic_method("__contains__", key)
+
+        def __add__(self, other):
+            return self.forward_magic_method("__add__", other)
+
+        def __iadd__(self, other):
+            if self._c._has_method("__iadd__"):
+                return self.forward_magic_method("__iadd__", other)
+            else:
+                return self.forward_magic_method("__add__", other)
+
+        def __sub__(self, other):
+            return self.forward_magic_method("__sub__", other)
+
+        def __pow__(self, other):
+            return self.forward_magic_method("__pow__", other)
+
+        def __truediv__(self, other):
+            return self.forward_magic_method("__truediv__", other)
+
+        def __mod__(self, other):
+            return self.forward_magic_method("__mod__", other)
+
+        def __ne__(self, other):  # noqa T484
+            return self.forward_magic_method("__ne__", other)
+
+        def __eq__(self, other):  # noqa T484
+            return self.forward_magic_method("__eq__", other)
+
+        def __lt__(self, other):
+            return self.forward_magic_method("__lt__", other)
+
+        def __gt__(self, other):
+            return self.forward_magic_method("__gt__", other)
+
+        def __le__(self, other):
+            return self.forward_magic_method("__le__", other)
+
+        def __ge__(self, other):
+            return self.forward_magic_method("__ge__", other)
+
+        def __and__(self, other):
+            return self.forward_magic_method("__and__", other)
+
+        def __or__(self, other):
+            return self.forward_magic_method("__or__", other)
+
+        def __xor__(self, other):
+            return self.forward_magic_method("__xor__", other)
+
+        def __getitem__(self, other):
+            return self.forward_magic_method("__getitem__", other)
+
+        def __setitem__(self, idx, val):
+            return self.forward_magic_method("__setitem__", idx, val)
+
+        def __call__(self, val):
+            return self.forward_magic_method("__call__", val)
+
+        def __int__(self):
+            return self.forward_magic_method("__int__")
+
+        def __float__(self):
+            return self.forward_magic_method("__float__")
+
+        def __bool__(self):
+            return self.forward_magic_method("__bool__")
+
+        def __str__(self):
+            return self.forward_magic_method("__str__")
+
+        def __enter__(self):
+            return self.forward_magic_method("__enter__")
+
+        def __exit__(self, type, tb, traceback):
+            return self.forward_magic_method("__exit__", type, tb, traceback)
+
     # this is a Python 'non-data descriptor' that causes the first access
     # to ScriptModule's forward to lookup the forward method and stash
     # it in the objects dict. Due to the standard rules for attribute lookup
@@ -795,6 +876,10 @@ if _enabled:
 
 else:
     # TODO MAKE SURE THAT DISABLING WORKS
+    class RecursiveScriptClass(object):  # type: ignore
+        def __init__(self):
+            super().__init__()
+
     class ScriptModule(torch.nn.Module):  # type: ignore
         def __init__(self, arg=None):
             super().__init__()
@@ -991,6 +1076,8 @@ def script(obj, optimize=None, _frames_up=0, _rcb=None):
         )
 
     # No-op for modules and functions that are already scripted
+    if isinstance(obj, RecursiveScriptClass):
+        return obj
     if isinstance(obj, ScriptModule):
         return obj
     if isinstance(obj, ScriptFunction):
@@ -1002,8 +1089,8 @@ def script(obj, optimize=None, _frames_up=0, _rcb=None):
             obj, torch.jit._recursive.infer_methods_to_compile
         )
 
-    qualified_name = _qualified_name(obj)
     if inspect.isclass(obj):
+        qualified_name = _qualified_name(obj)
         # If this type is a `nn.Module` subclass, they probably meant to pass
         # an instance instead of a Module
         if issubclass(obj, torch.nn.Module):
@@ -1032,7 +1119,8 @@ def script(obj, optimize=None, _frames_up=0, _rcb=None):
             _rcb = _jit_internal.createResolutionCallbackFromFrame(_frames_up + 1)
         _compile_and_register_class(obj, _rcb, qualified_name)
         return obj
-    else:
+    elif inspect.isfunction(obj):
+        qualified_name = _qualified_name(obj)
         # this is a decorated fn, and we need to the underlying fn and its rcb
         if hasattr(obj, "__script_if_tracing_wrapper"):
             obj = obj.__original_fn
@@ -1052,6 +1140,8 @@ def script(obj, optimize=None, _frames_up=0, _rcb=None):
         fn.__doc__ = obj.__doc__
         _set_jit_function_cache(obj, fn)
         return fn
+    else:
+        return torch.jit._recursive.create_script_class(obj)
 
 
 # overloads are registered in _jit_internal and compiled here so that _overload
@@ -1149,10 +1239,10 @@ def interface(obj):
     # instead of a class interface type, an module interface type only compile
     # the user provided methods as part of the interface
     ast = get_jit_class_def(obj, obj.__name__)
-    mangled_classname = torch._C._jit_script_interface_compile(
+    torch._C._jit_script_interface_compile(
         qualified_name, ast, rcb, is_module_interface
     )
-    obj.__torch_script_interface__ = mangled_classname
+    obj.__torch_script_interface__ = True
     return obj
 
 
@@ -1162,7 +1252,7 @@ def _recursive_compile_class(obj, loc):
     # case it fails
     error_stack = torch._C.CallStack(_qual_name, loc)
     rcb = _jit_internal.createResolutionCallbackForClassMethods(obj)
-    return _compile_and_register_class(obj, rcb, _qual_name)
+    _compile_and_register_class(obj, rcb, _qual_name)
 
 CompilationUnit = torch._C.CompilationUnit
 set_module(CompilationUnit, "torch.jit")

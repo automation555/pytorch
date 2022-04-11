@@ -45,8 +45,6 @@ const static std::unordered_set<std::string> reserved_names = {
     "getattr",
     "inf",
     "nan",
-    "infj",
-    "nanj",
     "ops",
     "__torch__",
     // the python keywords
@@ -1409,6 +1407,32 @@ struct PythonPrintImpl {
         printConstant(*ss, v);
         body_ << ss->str() << "\n";
       }
+
+      indent();
+      body_ << "__properties__ = [";
+
+      bool first = true;
+      for (const auto& property : classType->properties()) {
+        if (!first) {
+          body_ << ", ";
+        } else {
+          first = false;
+        }
+
+        body_ << "("
+              << "\"" << property.name << "\""
+              << ", "
+              << "\"" << property.getter->name() << "\"";
+
+        if (property.setter) {
+          body_ << ", "
+                << "\"" << property.setter->name() << "\"";
+        }
+
+        body_ << ")";
+      }
+
+      body_ << "]\n";
 
       // TODO fields
       for (auto& method : classType->methods()) {

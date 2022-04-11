@@ -214,12 +214,6 @@ Node* Graph::createPythonOp(
 
 void initPythonIRBindings(PyObject* module_) {
   auto m = py::handle(module_).cast<py::module>();
-
-  py::class_<AliasDb, std::shared_ptr<AliasDb>>(m, "AliasDb")
-      .def("dump", &AliasDb::dump)
-      .def("to_graphviz_str", &AliasDb::toGraphviz)
-      .def("__str__", &AliasDb::toString);
-
 #define GS(name) def(#name, &Graph ::name)
   py::class_<Graph, std::shared_ptr<Graph>>(m, "Graph")
       .def(py::init<>())
@@ -233,11 +227,6 @@ void initPythonIRBindings(PyObject* module_) {
           "set_global_print_source_ranges",
           [&](const bool enabled) { global_print_source_ranges = enabled; },
           py::arg("enabled") = true)
-      .def(
-          "alias_db",
-          [](std::shared_ptr<Graph> g) {
-            return std::make_shared<AliasDb>(std::move(g));
-          })
       .def(
           "dump_alias_db",
           [](std::shared_ptr<Graph> g) {
@@ -615,7 +604,6 @@ void initPythonIRBindings(PyObject* module_) {
   })
       .CREATE_ACCESSOR(Float, f)
       .CREATE_ACCESSOR(Floats, fs)
-      .CREATE_ACCESSOR(Complex, c)
       .CREATE_ACCESSOR(String, s)
       .CREATE_ACCESSOR(Strings, ss)
       .CREATE_ACCESSOR(Int, i)
@@ -791,10 +779,10 @@ void initPythonIRBindings(PyObject* module_) {
           [](const std::shared_ptr<Type>& self) {
             return self->cast<InterfaceType>() != nullptr;
           })
-      .def_property_readonly(
-          "annotation_str", [](const std::shared_ptr<Type>& self) {
-            return self->annotation_str();
-          });
+      .def("is_class_type", [](const std::shared_ptr<Type>& self) {
+        auto cls = self->cast<ClassType>();
+        return cls != nullptr && !cls->is_module();
+      });
 
   py::class_<AnyType, Type, std::shared_ptr<AnyType>>(m, "AnyType")
       .def_static("get", &AnyType::get);
@@ -868,10 +856,7 @@ void initPythonIRBindings(PyObject* module_) {
       .def(py::init([](const std::string& qualified_name) {
         return get_python_cu()->get_class(c10::QualifiedName(qualified_name));
       }))
-      .def("name", [](ClassType& self) { return self.name()->name(); })
-      .def("qualified_name", [](ClassType& self) {
-        return self.name()->qualifiedName();
-      });
+      .def("name", [](ClassType& self) { return self.name()->name(); });
   py::class_<EnumType, Type, std::shared_ptr<EnumType>>(m, "EnumType")
       .def(py::init([](const std::string& qualified_name,
                        TypePtr value_type,
