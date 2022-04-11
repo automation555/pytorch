@@ -2,8 +2,9 @@ import os
 import sys
 
 import torch
+from torch.nn import functional as F
 from torch.testing import FileCheck
-from typing import List
+from typing import Dict
 
 # Make the helper files in test/ importable
 pytorch_test_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -16,6 +17,26 @@ if __name__ == '__main__':
                        "instead.")
 
 class TestRemoveMutation(JitTestCase):
+    def test_lower_linear(self):
+        # linear is one of main use cases of removing mutation so add test so it doesnt regress
+        @torch.jit.script
+        def foo(x):
+            return F.linear(x, torch.randn(20, 20), torch.randn(20))
+
+        self.run_pass('inline', foo.graph)
+        self.run_pass('peephole', foo.graph)
+        self.run_pass('constant_propagation', foo.graph)
+        FileCheck().check("aten::add_").run(foo.graph)
+        input = torch.randn(20, 20)
+        with freeze_rng_state():
+            out1 = foo(input)
+
+        self.run_pass('remove_mutation', foo.graph)
+        FileCheck().check_not("aten::add_").run(foo.graph)
+        with freeze_rng_state():
+            out2 = foo(input)
+        self.assertEqual(out1, out2)
+
     def test_aten_inplace(self):
         def test_not_new_alias(x):
             y = x[0]
@@ -155,19 +176,6 @@ class TestRemoveMutation(JitTestCase):
         self.run_pass('remove_mutation', graph)
         FileCheck().check('aten::fill_').run(graph)
 
-        def normal():
-            return torch.rand(2, 1, 3, 4).normal_()
-
-        fn = torch.jit.script(normal)
-        graph = fn.graph
-        self.run_pass('remove_mutation', graph)
-        FileCheck().check_not("normal_").run(graph)
-        with freeze_rng_state():
-            out_eager = normal()
-        with freeze_rng_state():
-            out_script = fn()
-        self.assertEqual(out_eager, out_script)
-
     def test_lists_append(self):
         def successful_remove():
             return [i for i in range(5)]  # noqa: C416
@@ -194,22 +202,47 @@ class TestRemoveMutation(JitTestCase):
         FileCheck().check_not("append").run(graph)
         self.assertEqual(intermediary_use(), fn())
 
-    def test_lists_insert(self):
-        def successful_remove():
-            a : List[int] = []
-            a.insert(0, 1)
-            a.insert(0, 2)
-            a.insert(-10, 3)
-            a.insert(-9, 4)
-            a.insert(10, 5)
-            return a
+    def test_dicts_succesful(self):
+        def foo():
+            x: Dict[int, int] = {}
+            x[1] = 2
+            x[2] = 3
+            x[3] = 4
+            return x
 
-        fn = torch.jit.script(successful_remove)
+        fn = torch.jit.script(foo)
         graph = fn.graph
-        torch._C._jit_pass_remove_mutation(graph)
-        torch._C._jit_pass_constant_propagation(graph)
-        FileCheck().check("graph").check_next("Constant").check_next("return").run(graph)
-        self.assertEqual(successful_remove(), fn())
+        FileCheck().check("set_item").run(graph)
+        self.run_pass('remove_mutation', graph)
+        FileCheck().check_not("set_item").check("DictConstruct").run(graph)
+        self.assertEqual(fn(), foo())
+
+        def foo():
+            x: Dict[int, int] = {1: 4, 5: 6}
+            x[1] = 2
+            x[2] = 3
+            x[3] = 4
+            return x
+
+        fn = torch.jit.script(foo)
+        graph = fn.graph
+        FileCheck().check("set_item").run(graph)
+        self.run_pass('remove_mutation', graph)
+        FileCheck().check_not("set_item").check("DictConstruct").run(graph)
+        self.assertEqual(fn(), foo())
+
+    def test_dicts_unsuccesful(self):
+        def foo():
+            x: Dict[int, int] = {1: 2}
+            out = x[1]
+            x[3] = 4
+            return x, out
+        fn = torch.jit.script(foo)
+        graph = fn.graph
+        self.run_pass('remove_mutation', graph)
+        # creation and mutation cannot be made atomic, remove mutation fails
+        FileCheck().check("DictConstruct").check("set_item").run(graph)
+        self.assertEqual(fn(), foo())
 
     def test_common_pytorch_list_ops(self):
         for op in ["cat", "stack", "vstack", "hstack", "dstack"]:
