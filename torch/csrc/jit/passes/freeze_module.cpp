@@ -1,9 +1,7 @@
 #include <torch/csrc/jit/passes/freeze_module.h>
-
 #include <torch/csrc/jit/jit_log.h>
 
 #include <torch/csrc/jit/ir/alias_analysis.h>
-#include <torch/csrc/jit/passes/clear_profiling.h>
 #include <torch/csrc/jit/passes/inliner.h>
 #include <torch/csrc/jit/runtime/graph_executor_impl.h>
 
@@ -19,11 +17,8 @@ class AttributePropagator {
   AttributePropagator(
       Module& module,
       std::vector<std::string>& preservedAttrs,
-      bool freezeInterfaces,
-      bool preserveParameters)
-      : module_(module),
-        freezeInterfaces_(freezeInterfaces),
-        preserveParameters_(preserveParameters) {
+      bool freezeInterfaces)
+      : module_(module), freezeInterfaces_(freezeInterfaces) {
     // Currently only top level attributes and functions can  be preserved
     // explicitly.
     auto checkName = [this](std::string& name) {
@@ -48,12 +43,9 @@ class AttributePropagator {
       return false;
     };
 
-    // forward is preserved by default, but
-    // not all modules have a forward function defined
-    if (module_.find_method("forward")) {
-      auto method = module_.get_method("forward");
-      preservedMethods_.insert(&method.function());
-    }
+    // forward is preserved by default.
+    auto method = module_.get_method("forward");
+    preservedMethods_.insert(&method.function());
 
     for (auto name : preservedAttrs) {
       TORCH_CHECK(checkName(name), "Unknown name: " + name);
@@ -83,11 +75,9 @@ class AttributePropagator {
   void run() {
     auto applyInline = [](std::shared_ptr<Graph>& subgraph) {
       Inline(*subgraph);
-      ClearProfilingInformation(subgraph);
     };
     auto applyOptimizations = [](std::shared_ptr<Graph>& subgraph) {
-      runOptimization(
-          subgraph, /* unroll? */ false, /* const_prop_user_classes? */ false);
+      runOptimization(subgraph, /* unroll? */ false);
     };
 
     for (auto function : preservedMethods_) {
@@ -159,7 +149,7 @@ class AttributePropagator {
       Module& attrModule,
       std::shared_ptr<Graph>& graph) {
     if (!input->type()->cast<InterfaceType>() &&
-        !input->type()->expectRef<ClassType>().is_module()) {
+        !input->type()->expect<ClassType>()->is_module()) {
       return false;
     }
 
@@ -222,13 +212,6 @@ class AttributePropagator {
         for (Block* sub_block : n->blocks()) {
           blocks.push(sub_block);
         }
-
-        // Modules with prim::ModuleContainerIndex cannot be frozen because they
-        // return InterfaceTypes.
-        TORCH_CHECK(
-            n->kind() != prim::ModuleContainerIndex,
-            "Freezing modules containing prim::ModuleContainerIndex is not supported");
-
         if (n->kind() == prim::SetAttr || n->kind() == prim::GetAttr) {
           // By default if interface attributes are present then fail freezing.
           // If freezingInterfaces is on then Interfaces are folded similarly
@@ -293,11 +276,11 @@ class AttributePropagator {
 
   IValue overrideGradient(IValue attr) {
     if (attr.isTensor()) {
-      auto& t = attr.toTensor();
+      auto t = attr.toTensor();
       if (t.requires_grad()) {
-        auto detached = t.detach();
-        detached.set_requires_grad(false);
-        attr = IValue(std::move(detached));
+        t = t.detach();
+        t.set_requires_grad(false);
+        attr = IValue(t);
       }
     } else if (attr.isTuple()) {
       auto tuple = std::move(attr).toTuple();
@@ -320,15 +303,6 @@ class AttributePropagator {
         val = overrideGradient(val);
       }
       attr = std::move(dict);
-    } else if (attr.isObject() && !attr.toObjectRef().type()->is_module()) {
-      auto obj_type = attr.type()->expect<ClassType>();
-      auto obj_value = std::move(attr).toObject();
-      auto sub_attributes = obj_type->getAttributes();
-      for (const auto& sub_attr : sub_attributes) {
-        auto sub_attr_val = obj_value->getAttr(sub_attr.getName());
-        sub_attr_val = overrideGradient(sub_attr_val);
-      }
-      return obj_value;
     }
 
     return attr;
@@ -428,7 +402,7 @@ class AttributePropagator {
           if (!findConstantAttr(input, name, attrModule, graph)) {
             GRAPH_DEBUG(
                 input->type()->cast<InterfaceType>() ||
-                        input->type()->expectRef<ClassType>().is_module()
+                        input->type()->expect<ClassType>()->is_module()
                     ? "attribute: " + name + " is mutable."
                     : "");
             continue;
@@ -443,20 +417,8 @@ class AttributePropagator {
           }
           if (!paramConst) {
             auto attr = attrModule.attr(name);
-            if (!isEval || preserveParameters_) {
-              auto type = attrModule.type();
-              auto slot = *type->findAttributeSlot(name);
-              if (type->is_parameter(slot) || type->is_buffer(slot) ||
-                  (attr.isObject() &&
-                   !attr.toObjectRef().type()->is_module())) {
-                continue;
-              } else {
-                attr = overrideGradient(attr);
-              }
-              if (!isEval && name == "training") {
-                continue;
-              }
-            } else {
+
+            if (isEval) {
               attr = overrideGradient(attr);
             }
             if (auto attrVal = tryInsertConstant(*graph, attr)) {
@@ -532,31 +494,6 @@ class AttributePropagator {
     return preservedSubModule_.count(subModule._ivalue());
   }
 
-  void removeExtraWaitCalls(Block* b) {
-    auto nodes = b->nodes();
-    for (auto it = nodes.begin(); it != nodes.end(); it++) {
-      auto node = *it;
-      if (node->kind() != aten::wait) {
-        continue;
-      }
-      TORCH_INTERNAL_ASSERT(node->inputs().size() == 1);
-      TORCH_INTERNAL_ASSERT(node->outputs().size() == 1);
-      // If input type is not a from aten::fork call then the
-      // aten::wait operator can be deleted.
-      if (node->input()->type()->kind() != TypeKind::FutureType) {
-        node->output()->replaceAllUsesWith(node->input());
-        it.destroyCurrent();
-      }
-    }
-    // For the remaining nodes, recurse.
-    for (auto it = nodes.begin(); it != nodes.end(); it++) {
-      auto node = *it;
-      for (auto sub_b : node->blocks()) {
-        removeExtraWaitCalls(sub_b);
-      }
-    }
-  }
-
   // cleanupFrozenModule function cleans up the Frozen module. It performs the
   // following:
   // 1) Remove unused attributes.
@@ -567,7 +504,6 @@ class AttributePropagator {
       auto graph = function->graph();
       recordReferencedAttrs(graph);
       handleSharedClassType(module_, graph);
-      removeExtraWaitCalls(graph->block());
     }
     removeUnusedAttrs();
   }
@@ -742,9 +678,6 @@ class AttributePropagator {
   // Allow to freeze modules containing interfaces.
   bool freezeInterfaces_;
 
-  // Preserve module parameters
-  bool preserveParameters_;
-
   // Contains the attributes names (e.g. {"self", "subModule", "a"}
   std::deque<std::string> names_;
 }; // class AttributePropagator
@@ -753,21 +686,29 @@ class AttributePropagator {
 Module freeze_module(
     const Module& module,
     std::vector<std::string> preservedAttrs,
-    bool freezeInterfaces,
-    bool preserveParameters) {
-  if (module.find_method("forward")) {
-    Method method = module.get_method("forward");
-    // Check that module does not return itself.
-    for (auto& output : method.graph()->outputs()) {
-      TORCH_CHECK(
-          output->type() != module.type(),
-          "attempted to freeze a module that return itself");
-    }
+    bool freezeInterfaces) {
+  // Currently freezing module is supported only in eval mode.
+  // If assertion below is commented and module is in training mode then this
+  // implementation folds attributes correctly. Tensor attributes with
+  // required_grad set are not folded and 'training' attribute is also not
+  // folded.
+  // TODO: Determine if freezing in training mode is useful and further clarify
+  // its semantics.
+  TORCH_CHECK(
+      !module.hasattr("training") || !module.is_training(),
+      "Freezing module in training mode is not yet supported");
+
+  Method method = module.get_method("forward");
+  // Check that module does not return itself.
+  for (auto& output : method.graph()->outputs()) {
+    TORCH_CHECK(
+        output->type() != module.type(),
+        "attempted to freeze a module that return itself");
   }
 
   auto moduleClone = module.clone(true);
   AttributePropagator attrPropagator(
-      moduleClone, preservedAttrs, freezeInterfaces, preserveParameters);
+      moduleClone, preservedAttrs, freezeInterfaces);
   attrPropagator.run();
   return moduleClone;
 }
