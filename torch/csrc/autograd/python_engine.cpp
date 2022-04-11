@@ -1,11 +1,11 @@
 #include <torch/csrc/autograd/python_engine.h>
 
 #include <torch/csrc/DynamicTypes.h>
+#include <torch/csrc/PtrWrapper.h>
 #include <torch/csrc/THP.h>
 #include <torch/csrc/autograd/edge.h>
 #include <torch/csrc/autograd/engine.h>
 #include <torch/csrc/autograd/function.h>
-#include <torch/csrc/autograd/functions/basic_ops.h>
 #include <torch/csrc/autograd/python_anomaly_mode.h>
 #include <torch/csrc/autograd/python_function.h>
 #include <torch/csrc/utils/pycfunction_helpers.h>
@@ -33,7 +33,10 @@ namespace torch { namespace autograd { namespace python {
 PythonEngine::PythonEngine() = default;
 
 Engine& PythonEngine::get_python_engine() {
-  static PythonEngine engine;
+  // It's ok to "leak" PythonEngine singleton during application shutdown.
+  // Otherwise destructor needs to wait for all the worker/device threads to finish,
+  // which can be tricky as Python runtime was already destroyed at that point.
+  static PythonEngine *engine = new PythonEngine();
   // This is "probably" thread-safe because the flag is set in a fork handler
   // before any threads are created, and this function is only called with the
   // GIL held. However, using fork + threads is playing with fire so this is
@@ -41,47 +44,26 @@ Engine& PythonEngine::get_python_engine() {
   // backwards threads hold a lock, we'll probably deadlock in the engine
   // destructor.
   if (_reinitialize_engine) {
-    engine.release_workers();
-    engine.~PythonEngine();
-    new (&engine) torch::autograd::python::PythonEngine();
+    engine->release_workers();
+    delete engine;
+    engine = new PythonEngine();
     _reinitialize_engine = false;
   }
-  return engine;
+  return *engine;
 }
 
-#if PY_MAJOR_VERSION == 3 && PY_MINOR_VERSION >= 9
-#define IS_PYTHON_3_9_PLUS
-#endif
-
 void PythonEngine::thread_init(int device, const std::shared_ptr<ReadyQueue>& ready_queue, bool should_increment) {
-  // Increment thread usage count before acquiring the GIL
-  if (should_increment) {
-    increment_non_reentrant_thread_count();
-  }
+  //Ignore `should_increment` option, as PythonEngine device threads should never be destroyed
+  // (as Python runtime most likely is invalid during the destruction of singletons/global variables
+  (void)should_increment;
+
   // Create a PyThreadState, but release the GIL. This lets pybind11::gil_scoped_acquire calls
   // inside thread_main acquire the GIL without having to create a new
   // PyThreadState each time.
-#ifdef IS_PYTHON_3_9_PLUS
-  auto gil = std::make_unique<pybind11::gil_scoped_acquire>();
-#else
   pybind11::gil_scoped_acquire gil;
-#endif
   pybind11::gil_scoped_release no_gil;
   Engine::thread_init(device, ready_queue, false);
 
-  if (should_increment) {
-    // Decrement the count during shutdown if we incremented earlier.
-    decrement_non_reentrant_thread_count();
-  }
-
-#ifdef IS_PYTHON_3_9_PLUS
-  // Do not call PyEval_RestoreThread, PyThreadState_[Clear|DeleteCurrent] if runtime is finalizing
-  if (_Py_IsFinalizing()) {
-    no_gil.disarm();
-    // TODO: call disarm rather than leak gil_scoped_acquired once PyThreadState_Clear can safely be called from finalize
-    gil.release();
-  }
-#endif
 }
 
 void PythonEngine::thread_on_exception(
@@ -238,12 +220,7 @@ PyObject *THPEngine_run_backward(PyObject *self, PyObject *args, PyObject *kwarg
       THPUtils_assert(input_var->cdata.requires_grad(),
           "One of the differentiated Tensors does not require grad");
       if (!grad_fn) {
-        // NOTE [ Autograd Unreachable Input ]
-        // Since input has no grad_accumulator, its guaranteed to be unreachable.
-        // We initialize an edge pointing to a non-nullptr Node so nodes in the graph
-        // (e.g., mul when an operand is scalar) that have edges pointing to nullptr
-        // don't get erroneously assigned `needed = True` in exec_info.
-        output_edges.emplace_back(std::make_shared<Identity>(), 0);
+        output_edges.emplace_back();
       } else {
         output_edges.emplace_back(grad_fn, output_nr);
       }
