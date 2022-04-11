@@ -4,25 +4,19 @@ import unittest
 from copy import deepcopy
 from collections import OrderedDict
 from itertools import product
-import functools
 
 import torch
 from torch import nn
-from torch.cuda.amp import autocast
 import torch.nn.parallel as dp
 from torch.testing._internal.common_cuda import TEST_MULTIGPU, TEST_CUDA
 from torch.testing._internal.common_utils import run_tests, TestCase, repeat_test_for_types, ALL_TENSORTYPES
-from torch.testing._internal.common_utils import _assertGradAndGradgradChecks, gradcheck
+from torch.testing._internal.common_utils import _assertGradAndGradgradChecks
 from torch.testing._internal.common_utils import dtype2prec_DONTUSE
+from torch.testing._internal.common_utils import skipIfRocm
 import torch.nn.functional as F
 
 torch.set_default_dtype(torch.double)
 
-NO_NCCL = not hasattr(torch.distributed, "ProcessGroupNCCL")
-
-# batched grad doesn't support data parallel
-gradcheck = functools.partial(gradcheck, check_batched_grad=False)
-_assertGradAndGradgradChecks = functools.partial(_assertGradAndGradgradChecks, check_batched_grad=False)
 
 class TestDataParallel(TestCase):
 
@@ -46,7 +40,7 @@ class TestDataParallel(TestCase):
         def fn(t):
             return dpm(inp)
 
-        gradcheck(fn, (m.t_rg,))
+        torch.autograd.gradcheck(fn, (m.t_rg,))
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_data_parallel_rnn(self):
@@ -84,13 +78,6 @@ class TestDataParallel(TestCase):
             self.assertTrue(p1.allclose(p2))
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
-    def test_data_parallel_lazy_linear(self):
-
-        with self.assertRaisesRegex(RuntimeError, 'Modules with uninitialized parameters'):
-            model_dp = torch.nn.DataParallel(torch.nn.LazyLinear(10).to(0))
-            model_dp(torch.rand(10, 10).to(0))
-
-    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_parallel_apply(self):
         l1 = nn.Linear(10, 5).to("cuda:0", torch.float)
         l2 = nn.Linear(10, 5).to("cuda:1", torch.float)
@@ -105,26 +92,6 @@ class TestDataParallel(TestCase):
         #                       or an object representing the single argument
         for inputs in [((i1,), (i2,)), (i1, i2)]:
             outputs = dp.parallel_apply(modules, inputs, None)
-            for out, expected in zip(outputs, expected_outputs):
-                self.assertEqual(out, expected)
-
-    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
-    def test_parallel_apply_autocast(self):
-        l1 = nn.Linear(10, 5).to("cuda:0", torch.float)
-        l2 = nn.Linear(10, 5).to("cuda:1", torch.float)
-        i1 = torch.randn(2, 10, device="cuda:0", dtype=torch.float)
-        i2 = torch.randn(2, 10, device="cuda:1", dtype=torch.float)
-        with autocast():
-            expected1 = l1(i1)
-            expected2 = l2(i2)
-        modules = (l1, l2)
-        expected_outputs = (expected1, expected2)
-
-        # each input can be either a collection of positional arguments
-        #                       or an object representing the single argument
-        for inputs in [((i1,), (i2,)), (i1, i2)]:
-            with autocast():
-                outputs = dp.parallel_apply(modules, inputs, None)
             for out, expected in zip(outputs, expected_outputs):
                 self.assertEqual(out, expected)
 
@@ -520,25 +487,6 @@ class TestDataParallel(TestCase):
         self.assertEqual(out, expected_out, atol=dtype2prec_DONTUSE[dtype], rtol=0)
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
-    def test_data_parallel_module_zero_inputs(self):
-        class TestModule(nn.Module):
-            def forward(self):
-                t = torch.eye(2, 3, device='cuda:0')
-                return t + (1 - t)
-
-        def test_helper(output, expected):
-            self.assertEqual(output.get_device(), 0)
-            self.assertEqual(output, expected)
-
-        expected = torch.ones(2, 3, device='cuda:0')
-        model = TestModule()
-
-        test_helper(nn.DataParallel(model, [0])(), expected)
-        test_helper(nn.DataParallel(model, [0, 1])(), expected)
-        test_helper(dp.data_parallel(model, None, [0]), expected)
-        test_helper(dp.data_parallel(model, (), [0, 1]), expected)
-
-    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_data_parallel_device_args(self):
         cuda0 = torch.device('cuda:0')
         cuda1 = torch.device('cuda:1')
@@ -601,25 +549,6 @@ class TestDataParallel(TestCase):
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_scatter_gpu(self):
         self._test_scatter(torch.randn((4, 4)).cuda())
-
-    @unittest.skipIf(not TEST_MULTIGPU, "At least 2 CUDA GPUS needed")
-    @unittest.skipIf(NO_NCCL, "NCCL needed")
-    def test_data_parallel_complex(self):
-        # We expect complex parameters to be broadcast by view_as_real, e.g. move from C to R^2
-        class Cplx(torch.nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.cplx = torch.nn.Parameter(torch.zeros(1, 10, dtype=torch.cfloat).cuda())
-
-            def forward(self, x):
-                return x + self.cplx
-
-        cplx = torch.nn.DataParallel(Cplx().cuda())
-        input = torch.rand(1, 10, dtype=torch.cfloat).cuda()
-        result = cplx(input)
-        # 2 is the extra real view dimension here
-        self.assertEqual(result.size(), torch.Size([1, 10, 2]))
-        self.assertEqual(result, torch.view_as_real(input))
 
     def _test_gather(self, output_device):
         inputs = (
@@ -709,6 +638,107 @@ class TestDataParallel(TestCase):
                 self.assertEqual(replica.bn.num_batches_tracked.get_device(), i, msg='buffer on wrong device')
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    def test_replicate_parameters_list_dict(self):
+        nested_net = nn.Module()
+        net = nn.Module()
+        net.alpha = nn.Parameter(torch.tensor(0.0))
+        net.beta = nn.ParameterList([
+            nn.Parameter(torch.tensor(1.0)), nn.Parameter(torch.tensor(2.0)), nn.Parameter(torch.tensor(3.0))
+        ])
+        net.gamma = nn.ParameterDict({
+            "g0": nn.Parameter(torch.tensor(3.0)),
+            "g1": nn.Parameter(torch.tensor(4.0)),
+            "g2": nn.Parameter(torch.tensor(5.0)),
+        })
+
+        nested_net.net = net
+        nested_net.alpha = nn.Parameter(torch.tensor(10.0))
+        nested_net.beta = nn.ParameterList([
+            nn.Parameter(torch.tensor(11.0)), nn.Parameter(torch.tensor(12.0)), nn.Parameter(torch.tensor(13.0))
+        ])
+        nested_net.gamma = nn.ParameterDict({
+            "G0": nn.Parameter(torch.tensor(13.0)),
+            "G1": nn.Parameter(torch.tensor(14.0)),
+            "G2": nn.Parameter(torch.tensor(15.0)),
+        })
+        nested_net.cuda()
+        for devices in [(0, 1), [0, 1]]:
+            replicas = dp.replicate(nested_net, devices)
+            for i, replica in enumerate(replicas):
+                self.assertIsInstance(replica.alpha, torch.Tensor, msg='replicated parameter should be Tensor')
+                self.assertEqual(replica.alpha.get_device(), i, msg='parameter on wrong device')
+
+                self.assertIsInstance(replica.beta, list)
+                self.assertEqual(len(replica.beta), 3, msg='parameter list does not contain correct number of tensors')
+                for t in replica.beta:
+                    self.assertIsInstance(t, torch.Tensor, msg='replicated parameter should be Tensor')
+                    self.assertEqual(t.get_device(), i, msg='parameter on wrong device')
+
+                self.assertIsInstance(replica.gamma, OrderedDict)
+                self.assertEqual(len(replica.gamma), 3, msg='parameter dict does not contain correct number of tensors')
+                for key in replica.gamma:
+                    t = replica.gamma[key]
+                    self.assertIsInstance(t, torch.Tensor, msg='replicated parameter should be Tensor')
+                    self.assertEqual(t.get_device(), i, msg='parameter on wrong device')
+
+                self.assertIsInstance(replica.net.alpha, torch.Tensor, msg='replicated parameter should be Tensor')
+                self.assertEqual(replica.net.alpha.get_device(), i, msg='parameter on wrong device')
+
+                self.assertIsInstance(replica.net.beta, list)
+                self.assertEqual(len(replica.net.beta), 3, msg='parameter list does not contain correct number of tensors')
+                for t in replica.net.beta:
+                    self.assertIsInstance(t, torch.Tensor, msg='replicated parameter should be Tensor')
+                    self.assertEqual(t.get_device(), i, msg='parameter on wrong device')
+
+                self.assertIsInstance(replica.net.gamma, OrderedDict)
+                self.assertEqual(len(replica.net.gamma), 3, msg='parameter dict does not contain correct number of tensors')
+                for key in replica.net.gamma:
+                    t = replica.net.gamma[key]
+                    self.assertIsInstance(t, torch.Tensor, msg='replicated parameter should be Tensor')
+                    self.assertEqual(t.get_device(), i, msg='parameter on wrong device')
+
+    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    def test_parameters_list_dict_grads(self):
+        class TestNetWithParamListDict(nn.Module):
+
+            def __init__(self):
+                super().__init__()
+                self.beta = nn.ParameterList([
+                    nn.Parameter(torch.tensor(1.0)), nn.Parameter(torch.tensor(2.0)), nn.Parameter(torch.tensor(3.0))
+                ])
+                self.gamma = nn.ParameterDict({
+                    "g0": nn.Parameter(torch.tensor(4.0)),
+                    "g1": nn.Parameter(torch.tensor(5.0)),
+                    "g2": nn.Parameter(torch.tensor(6.0)),
+                })
+
+            def forward(self, x):
+                o1 = self.beta[0] * x[:, 0] + self.beta[1] * x[:, 1] + self.beta[2] * x[:, 2]
+                o2 = self.gamma["g0"] * x[:, 0] ** 2 + self.gamma["g1"] * x[:, 1] ** 2 + self.gamma["g2"] * x[:, 2] ** 2
+                return o1 + o2
+
+        net = TestNetWithParamListDict().cuda()
+
+        copy_net = TestNetWithParamListDict().cuda()
+        dpnet = nn.parallel.DataParallel(copy_net, device_ids=[0, 1])
+
+        x = torch.tensor([[1.1, 1.2, 1.3], [2.1, 2.2, 2.3]], device="cuda")
+
+        # compute param grads on non-wrapped model
+        res = net(x)
+        res.sum().backward()
+
+        # compute param grads on DP model
+        res = dpnet(x)
+        res.sum().backward()
+
+        for i in range(3):
+            self.assertTrue(net.beta[i].grad.equal(dpnet.module.beta[i].grad))
+
+        for key in ["g0", "g1", "g2"]:
+            self.assertTrue(net.gamma[key].grad.equal(dpnet.module.gamma[key].grad))
+
+    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
     def test_zero_grad(self):
         # zero_grad should warn about using gradients inside forward
 
@@ -729,6 +759,7 @@ class TestDataParallel(TestCase):
         dpm(torch.rand(4, 3, 6, 5))
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    @skipIfRocm
     def test_autocast(self):
         class Model(torch.nn.Linear):
             def __init__(self):
@@ -743,6 +774,7 @@ class TestDataParallel(TestCase):
         self.assertTrue(model(input).dtype is torch.float16)
 
     @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
+    @skipIfRocm
     def test_save_replica_module(self):
         # DataParallel replicas can be saved (gh-37182)
         module = torch.nn.Linear(8, 8).cuda()
@@ -821,36 +853,6 @@ class TestDataParallel(TestCase):
                         # Makes sure we still get info if an error occurred somewhere other than the asserts.
                         print("Caught exception during iterations at " + named_msg, flush=True)
                         raise
-
-    @unittest.skipIf(not TEST_MULTIGPU, "multi-GPU not supported")
-    def test_parameter_list_dict_replica(self):
-        class MyMod(torch.nn.Module):
-            def __init__(self, data):
-                super(MyMod, self).__init__()
-                self.data = data
-
-            def forward(self, inp):
-                return inp
-
-        p1 = torch.nn.Parameter(torch.rand(10))
-        p2 = torch.nn.Parameter(torch.rand(10))
-        module = MyMod(torch.nn.ParameterList([p1, p2])).cuda()
-        model = dp.DataParallel(module)
-        input = torch.randn((8, 8), device="cuda")
-
-        with self.assertWarnsRegex(
-                UserWarning,
-                r"nn\.ParameterList is being used with DataParallel but this"):
-            model(input)
-
-        module = MyMod(torch.nn.ParameterDict({"0": p1, "1": p2})).cuda()
-        model = dp.DataParallel(module)
-        input = torch.randn((8, 8), device="cuda")
-
-        with self.assertWarnsRegex(
-                UserWarning,
-                r"nn\.ParameterDict is being used with DataParallel but this"):
-            model(input)
 
 
 if __name__ == '__main__':
