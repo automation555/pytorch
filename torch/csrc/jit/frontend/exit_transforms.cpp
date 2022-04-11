@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/frontend/exit_transforms.h>
-
 #include <ATen/core/jit_type.h>
 #include <torch/csrc/jit/frontend/error_report.h>
 #include <torch/csrc/jit/ir/ir.h>
@@ -120,7 +119,7 @@ struct ExitTransformer {
 
   static bool isGraphOrClosureBlock(Block* block) {
     return block->owningNode() == nullptr ||
-        owningNodeKind(block) == prim::Closure;
+        owningNodeKind(block) == prim::Function;
   }
 
   static void removeOutputs(Block* b) {
@@ -274,8 +273,8 @@ struct ExitTransformer {
       return constructWontExitPair();
     }
 
-    // The exit values of the block that is not exiting will not get
-    // used, so we create uninitialized values of the same type as the other
+    // for the block that is not exitting, its' exit values will not get
+    // used so we create uninitialized values of the same type as the other
     // block.
     if (then_status == ExitStatus::WONT || then_status == ExitStatus::THROWS) {
       std::vector<Value*> exit_vals =
@@ -426,7 +425,7 @@ struct ExitTransformer {
         case prim::With: {
           exit_pair = transformWith(node);
         } break;
-        case prim::Closure: {
+        case prim::Function: {
           // exits of closure declaration stay local to the closure
           transformExits(node->blocks().at(0));
         } break;
