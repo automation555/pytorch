@@ -31,13 +31,48 @@ enum class ScalarType : int8_t {
   NumOptions
 };
 
+static inline const char* toString(ScalarType t) {
+#define DEFINE_CASE(_, name) \
+  case ScalarType::name:     \
+    return #name;
+
+  switch (t) {
+    AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_AND_QINTS(DEFINE_CASE)
+    DEFINE_CASE(_, Undefined)
+    DEFINE_CASE(_, Handle)
+    DEFINE_CASE(_, Uninitialized)
+    DEFINE_CASE(_, None)
+    DEFINE_CASE(_, NumOptions)
+    default:
+      return "UNKNOWN_SCALAR";
+  }
+
+  assert(false);
+#undef DEFINE_CASE
+}
+
+static inline ScalarType toDtype(const std::string& s) {
+#define DEFINE_CASE(_, name) \
+  if (s == #name) {          \
+    return ScalarType::name; \
+  }
+  AT_FORALL_SCALAR_TYPES_WITH_COMPLEX_AND_QINTS(DEFINE_CASE)
+  DEFINE_CASE(_, Undefined)
+  DEFINE_CASE(, Handle)
+  DEFINE_CASE(_, Uninitialized)
+  DEFINE_CASE(_, None)
+  DEFINE_CASE(_, NumOptions)
+
+  assert(false);
+#undef DEFINE_CASE
+}
+
 TORCH_API std::ostream& operator<<(
     std::ostream& stream,
     const ScalarType& dtype);
 
 TORCH_API bool is_integral(const ScalarType& type);
 TORCH_API bool is_floating_point(const ScalarType& type);
-TORCH_API bool is_signed(const ScalarType& type);
 
 // Data types for scalar and vector elements.
 class TORCH_API Dtype {
@@ -76,13 +111,6 @@ class TORCH_API Dtype {
   bool is_floating_point() const {
     return tensorexpr::is_floating_point(scalar_type_);
   }
-  bool is_signed() const {
-    return tensorexpr::is_signed(scalar_type_);
-  }
-
-  Dtype cloneWithScalarType(ScalarType nt) const {
-    return Dtype(nt, lanes_);
-  }
 
  private:
   friend std::ostream& operator<<(std::ostream& stream, const Dtype& dtype);
@@ -90,16 +118,12 @@ class TORCH_API Dtype {
   int lanes_; // the width of the element for a vector time
 };
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 extern TORCH_API Dtype kUninitialized;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 extern TORCH_API Dtype kHandle;
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 extern TORCH_API Dtype kVoid;
 
 #define NNC_DTYPE_DECLARATION(ctype, name) extern TORCH_API Dtype k##name;
 
-// NOLINTNEXTLINE(cppcoreguidelines-avoid-non-const-global-variables)
 AT_FORALL_SCALAR_TYPES_AND2(Bool, Half, NNC_DTYPE_DECLARATION)
 #undef NNC_DTYPE_DECLARATION
 
@@ -136,6 +160,10 @@ inline Dtype BinaryOpDtype(
     Dtype op1_dtype,
     Dtype op2_dtype,
     ScalarType ret_type = ScalarType::None) {
+  if (op1_dtype.scalar_type() == ScalarType::Bool ||
+      op2_dtype.scalar_type() == ScalarType::Bool) {
+    throw malformed_input("arithmetic binary operations on Bool not supported");
+  }
   if (op1_dtype == op2_dtype) {
     if (ret_type == ScalarType::None) {
       return op1_dtype;
