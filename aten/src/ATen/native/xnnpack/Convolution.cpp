@@ -40,11 +40,11 @@ bool available(
          (4 == weight.ndimension()) &&
          (weight.size(Layout::Filter::height) > 0) &&
          (weight.size(Layout::Filter::width) > 0) &&
-         (weight.device().is_cpu()) &&
+         (c10::DeviceType::CPU == weight.device().type()) &&
          (kFloat == weight.scalar_type()) &&
          // Bias
          ((bias && bias->defined()) ? ((1 == bias->ndimension()) &&
-                                       (bias->device().is_cpu()) &&
+                                       (c10::DeviceType::CPU == bias->device().type()) &&
                                        (kFloat == bias->scalar_type()) &&
                                        ((transposed ? (weight.size(Layout::Filter::input) == (bias->size(0) / groups))
                                                     : (weight.size(Layout::Filter::output) == (bias->size(0))))))
@@ -75,7 +75,7 @@ bool available(
 bool usable(const Tensor& input) {
        // Input
   return (4 == input.ndimension()) &&
-         (input.device().is_cpu()) &&
+         (c10::DeviceType::CPU == input.device().type()) &&
          (kFloat == input.scalar_type()) &&
          (input.size(Layout::Activation4D::batch) >= 0) &&
          (input.size(Layout::Activation4D::channels) > 0) &&
@@ -205,6 +205,7 @@ ContextConv2D create(
   xnn_status create_status;
   std::array<int64_t, 4> weight_sizes;
 
+  Tensor bias_contig = bias && bias->defined() ? bias->contiguous() : Tensor();
   if (transposed) {
     const Tensor weight_reordered = reorder_weights_for_transpose_conv(weight_nhwc, groups);
     for (int i = 0; i < 4; i++) {
@@ -227,9 +228,7 @@ ContextConv2D create(
       weight_reordered.size(Layout::Filter::output),                  // input_pixel_stride
       weight_reordered.size(Layout::Filter::input) * groups,          // output_pixel_stride
       weight_reordered.data_ptr<float>(),                             // kernel
-      (bias && bias->defined())
-          ? bias->contiguous().data_ptr<float>()
-          : nullptr,                                                  // bias
+      bias_contig.defined() ? bias_contig.data_ptr<float>() : nullptr,// bias
       output_min,                                                     // output_min
       output_max,                                                     // output_max
       0u,                                                             // flags
@@ -255,9 +254,7 @@ ContextConv2D create(
       weight_nhwc.size(Layout::Filter::input) * groups,               // input_pixel_stride
       weight_nhwc.size(Layout::Filter::output),                       // output_pixel_stride
       weight_nhwc.data_ptr<float>(),                                  // kernel
-      (bias && bias->defined())
-          ? bias->contiguous().data_ptr<float>()
-          : nullptr,                                                  // bias
+      bias_contig.defined() ? bias_contig.data_ptr<float>() : nullptr,// bias
       output_min,                                                     // output_min
       output_max,                                                     // output_max
       0u,                                                             // flags
@@ -388,8 +385,8 @@ c10::intrusive_ptr<xnnpack::Conv2dOpContext>
         std::vector<int64_t> padding,
         std::vector<int64_t> dilation,
         int64_t groups,
-        const c10::optional<Scalar>& output_min,
-        const c10::optional<Scalar>& output_max) {
+        c10::optional<Scalar> output_min,
+        c10::optional<Scalar> output_max) {
       return xnnpack::XNNPackConv2dOpContext::create_context(
           std::move(weight),
           std::move(bias),
@@ -410,8 +407,8 @@ c10::intrusive_ptr<xnnpack::TransposeConv2dOpContext>
         std::vector<int64_t> output_padding,
         std::vector<int64_t> dilation,
         int64_t groups,
-        const c10::optional<Scalar>& output_min,
-        const c10::optional<Scalar>& output_max) {
+        c10::optional<Scalar> output_min,
+        c10::optional<Scalar> output_max) {
       return xnnpack::XNNPackTransposeConv2dOpContext::create_context(
           std::move(weight),
           std::move(bias),

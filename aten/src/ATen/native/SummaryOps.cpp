@@ -21,7 +21,7 @@ Tensor _bincount_cpu_template(
   if (self.dim() == 1 && self.numel() == 0) {
     return native::zeros({minlength}, kLong);
   }
-  if (self.dim() != 1 || *self.min().data_ptr<input_t>() < 0) {
+  if (self.dim() != 1 || self.min().item<input_t>() < 0) {
     AT_ERROR("bincount only supports 1-d non-negative integral inputs.");
   }
 
@@ -32,17 +32,12 @@ Tensor _bincount_cpu_template(
 
   Tensor output;
   int64_t self_size = self.size(0);
-  int64_t nbins = static_cast<int64_t>(*self.max().data_ptr<input_t>()) + 1L;
+  int64_t nbins = static_cast<int64_t>(self.max().item<input_t>()) + 1L;
   nbins = std::max(nbins, minlength); // at least minlength # of bins
 
   const input_t* self_p = self.data_ptr<input_t>();
   if (has_weights) {
-    output = native::zeros(
-        {nbins},
-        optTypeMetaToScalarType(weights.options().dtype_opt()),
-        weights.options().layout_opt(),
-        weights.options().device_opt(),
-        weights.options().pinned_memory_opt());
+    output = native::zeros({nbins}, weights.options());
     weights_t* output_p = output.data_ptr<weights_t>();
     const weights_t* weights_p = weights.data_ptr<weights_t>();
     for (int64_t i = 0; i < self_size; i++) {
@@ -60,10 +55,7 @@ Tensor _bincount_cpu_template(
 } // namespace
 
 Tensor
-_bincount_cpu(const Tensor& self, const c10::optional<Tensor>& weights_opt, int64_t minlength) {
-  // See [Note: hacky wrapper removal for optional tensor]
-  const Tensor& weights = c10::value_or_else(weights_opt, [] {return Tensor();});
-
+_bincount_cpu(const Tensor& self, const Tensor& weights, int64_t minlength) {
   return AT_DISPATCH_INTEGRAL_TYPES(self.scalar_type(), "bincount_cpu", [&] {
     const auto scalar = weights.scalar_type();
     if (scalar == ScalarType::Undefined || scalar == ScalarType::Float)
