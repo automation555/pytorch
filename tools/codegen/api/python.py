@@ -2,7 +2,8 @@ from dataclasses import dataclass
 from typing import Optional, Union, Sequence, Set, List, Dict, Tuple
 
 from tools.codegen.api.types import *
-from tools.codegen.api import cpp
+import tools.codegen.api.cpp as cpp
+import tools.codegen.local as local
 from tools.codegen.gen import pythonify_default
 from tools.codegen.model import *
 
@@ -227,7 +228,7 @@ class PythonArgument:
     # Compute argument formal for python argument parsing.
     # Needs to be consistent with torch/csrc/utils/python_arg_parser.h.
     def argument_str(self, *, method: bool = False) -> str:
-        type_str = argument_type_str(self.type).replace('const ', '').replace(' &', '')
+        type_str = argument_type_str(self.type)
 
         name = self.name
         # s/self/input/ outside method bindings
@@ -565,7 +566,7 @@ class DispatchLambdaArgumentExprs:
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ #
 
 def _cpp_signature(f: NativeFunction, *, method: bool = False) -> CppSignature:
-    return CppSignatureGroup.from_native_function(f, method=method).signature
+    return CppSignatureGroup.from_schema(f.func, method=method).signature
 
 def has_tensor_options(f: NativeFunction) -> bool:
     return f.func.arguments.tensor_options is not None
@@ -598,8 +599,11 @@ def argument_type_str(t: Type, *, simple_type: bool = False) -> str:
 
     elif isinstance(t, OptionalType):
         if str(t.elem) == 'Tensor':
-            # Is it desired to keep '?' for simple_type with new style dispatcher?
-            return 'Tensor?'
+            if not simple_type or local.use_c10_dispatcher().dispatcher_uses_new_style():
+                # Is it desired to keep '?' for simple_type with new style dispatcher?
+                return 'Tensor?'
+            else:
+                return 'Tensor'
         elem = argument_type_str(t.elem, simple_type=simple_type)
         if elem == 'Layout':
             # TODO: fix this special case in PythonArgParser?
@@ -620,9 +624,10 @@ def argument_type_str(t: Type, *, simple_type: bool = False) -> str:
             return f'ScalarList[{size}]' if size is not None else 'ScalarList'
         elif str(t.elem) == 'Tensor?':
             if simple_type:
-                return 'c10::List<c10::optional<Tensor>>'
+                return 'TensorList'
             else:
-                return 'const c10::List<c10::optional<Tensor>> &'
+                # TODO: clone the old codegen behavior but does it make sense?
+                return 'TensorList?'
         elif str(t.elem) == 'Dimname':
             return f'DimnameList[{size}]' if size is not None else 'DimnameList'
         elem = argument_type_str(t.elem, simple_type=simple_type)
@@ -701,7 +706,7 @@ def signature(f: NativeFunction, *, method: bool = False, pyi: bool = False) -> 
             name='layout',
             type=OptionalType(BaseType(BaseTy.Layout)),
             default='strided' if pyi else 'torch.strided',
-            default_init='self.layout()' if is_like_or_new_function else None,
+            default_init='layout_from_backend(self.options().backend())' if is_like_or_new_function else None,
         ))
         tensor_options_args.append(PythonArgument(
             name='device',
@@ -812,7 +817,8 @@ def argument_type_str_pyi(t: Type) -> str:
             ret = 'Union[Tensor, Tuple[Tensor, ...], List[Tensor]]' if t.size is not None else \
                   'Union[Tuple[Tensor, ...], List[Tensor]]'
         elif str(t.elem) == 'float':
-            ret = 'Sequence[float]'
+            # Hack to get the tests to pass
+            ret = 'Sequence[_float]'
         else:
             elem = argument_type_str_pyi(t.elem)
             ret = f'Sequence[{elem}]'
@@ -1018,7 +1024,10 @@ def arg_parser_unpack_method(t: Type, has_default: bool) -> str:
 
     elif isinstance(t, OptionalType):
         if str(t.elem) == 'Tensor':
-            return 'optionalTensor'
+            if local.use_c10_dispatcher().dispatcher_uses_new_style():
+                return 'optionalTensor'
+            else:
+                return 'tensor'
 
         elif isinstance(t.elem, BaseType):
             if t.elem.name in [BaseTy.ScalarType, BaseTy.Scalar,
@@ -1043,14 +1052,12 @@ def arg_parser_unpack_method(t: Type, has_default: bool) -> str:
                 return 'toDimnameListOptional'
 
     elif isinstance(t, ListType):
-        if str(t.elem) == 'Tensor':
+        if str(t.elem) == 'Tensor' or str(t.elem) == 'Tensor?':
             # accept and use definite size
             if t.size is not None:
                 return f'tensorlist_n<{t.size}>'
             else:
                 return 'tensorlist'
-        elif str(t.elem) == 'Tensor?':
-            return 'list_of_optional_tensors'
         elif str(t.elem) == 'Dimname':
             # accept definite size
             return 'dimnamelist'
