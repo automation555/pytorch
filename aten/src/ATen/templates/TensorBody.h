@@ -4,24 +4,19 @@
 #include <c10/core/Layout.h>
 #include <c10/core/MemoryFormat.h>
 #include <c10/core/QScheme.h>
-#include <c10/core/Stream.h>
 #include <c10/core/Scalar.h>
 #include <c10/core/ScalarType.h>
-#include <c10/core/ScalarTypeToTypeMeta.h>
 #include <c10/core/Storage.h>
 #include <ATen/core/TensorAccessor.h>
 #include <c10/core/TensorImpl.h>
 #include <c10/core/UndefinedTensorImpl.h>
-#include <c10/core/WrapDimMinimal.h>
 #include <c10/util/Exception.h>
 #include <c10/util/Deprecated.h>
-#include <c10/util/MaybeOwned.h>
 #include <c10/util/Optional.h>
 #include <c10/util/intrusive_ptr.h>
 #include <ATen/core/DeprecatedTypePropertiesRegistry.h>
 #include <ATen/core/DeprecatedTypeProperties.h>
 #include <ATen/core/NamedTensor.h>
-#include <ATen/core/QuantizerBase.h>
 #include <torch/csrc/WindowsTorchApiMacro.h>
 
 namespace caffe2 {
@@ -29,7 +24,6 @@ class Tensor;
 }
 namespace c10{
 struct TensorOptions;
-template<class T> class List;
 }
 namespace at {
 struct Generator;
@@ -54,7 +48,12 @@ namespace at {
 class Tensor;
 using TensorList = ArrayRef<Tensor>;
 
-using Stream = c10::Stream;
+struct Quantizer;
+// This is temporary typedef to enable Quantizer in aten native function API
+// we'll remove them when we are actually exposing Quantizer class
+// to frontend
+using QuantizerPtr = c10::intrusive_ptr<Quantizer>;
+using ConstQuantizerPtr = const c10::intrusive_ptr<Quantizer>&;
 
 namespace impl {
 inline bool variable_excluded_from_dispatch() {
@@ -62,8 +61,7 @@ inline bool variable_excluded_from_dispatch() {
   // Please read the comment in `VariableFallbackKernel.cpp` about the background of this change.
   return true;
 #else
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!c10::impl::tls_local_dispatch_key_set().excluded_.has(DispatchKey::Autograd));
-  return c10::impl::tls_local_dispatch_key_set().excluded_.isSupersetOf(c10::autograd_dispatch_keyset);
+  return c10::impl::tls_local_dispatch_key_set().excluded_.has(DispatchKey::Autograd);
 #endif
 }
 }
@@ -85,7 +83,7 @@ inline bool variable_excluded_from_dispatch() {
 //
 // Note that Tensor can also be NULL, i.e. it is not associated with any underlying TensorImpl, and
 // special care must be taken to handle this.
-class TORCH_API Tensor {
+class CAFFE2_API Tensor {
  public:
   Tensor(){};
   // This constructor should not be used by end users and is an implementation
@@ -118,56 +116,6 @@ class TORCH_API Tensor {
     return impl_->storage_offset();
   }
 
-  Tensor contiguous(MemoryFormat memory_format=MemoryFormat::Contiguous) const {
-    if (is_contiguous(memory_format)) {
-      return *this;
-    } else {
-      return __dispatch_contiguous(memory_format);
-    }
-  }
-
-  /// Should be used if *this can reasonably be expected to be contiguous and
-  /// performance is important.
-  /// Compared to contiguous, it saves a reference count
-  /// increment/decrement if *this is already contiguous, at the cost
-  /// in all cases of an extra pointer of stack usage, an extra branch
-  /// to access, and an extra branch at destruction time.
-  c10::MaybeOwned<Tensor> expect_contiguous(MemoryFormat memory_format=MemoryFormat::Contiguous) const & {
-    if (is_contiguous(memory_format)) {
-      return c10::MaybeOwned<Tensor>::borrowed(*this);
-    } else {
-      return c10::MaybeOwned<Tensor>::owned(__dispatch_contiguous(memory_format));
-    }
-  }
-
-  // Use .contiguous() instead. Trying to borrow from a prvalue Tensor
-  // will only lead to trouble and dangling references.
-  c10::MaybeOwned<Tensor> expect_contiguous(MemoryFormat memory_format=MemoryFormat::Contiguous) && = delete;
-
-  bool is_complex() const {
-    return at::isComplexType(this->scalar_type());
-  }
-
-  bool is_floating_point() const {
-    return at::isFloatingType(this->scalar_type());
-  }
-
-  bool is_signed() const {
-    return at::isSignedType(this->scalar_type());
-  }
-
-  int64_t size(int64_t dim) const {
-    // false is passed to maybe_wrap_dim so behavior is identical to array access (but with wrapping)
-    dim = c10::maybe_wrap_dim(dim, this->dim(), false);
-    return sizes()[dim];
-  }
-
-  int64_t stride(int64_t dim) const {
-    // false is passed to maybe_wrap_dim so behavior is identical to array access (but with wrapping)
-    dim = c10::maybe_wrap_dim(dim, this->dim(), false);
-    return strides()[dim];
-  }
-
   TensorImpl * unsafeGetTensorImpl() const {
     return impl_.get();
   }
@@ -176,10 +124,6 @@ class TORCH_API Tensor {
   }
   const c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl>& getIntrusivePtr() const {
     return impl_;
-  }
-
-  c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl> unsafeReleaseIntrusivePtr()  {
-    return std::move(impl_);
   }
 
   bool defined() const {
@@ -243,6 +187,10 @@ class TORCH_API Tensor {
   Tensor& operator=(const Tensor&) &&;
   Tensor& operator=(Tensor&&) &&;
 
+  #ifdef _MSC_VER
+  #pragma warning( pop )
+  #endif
+
   bool is_same(const Tensor& other) const noexcept {
     return impl_ == other.impl_;
   }
@@ -262,7 +210,7 @@ class TORCH_API Tensor {
     return impl_->strides();
   }
   // See impl::get_opt_names in ATen/NamedTensor.h for docs.
-  c10::optional<DimnameList> opt_names() const {
+  optional<DimnameList> opt_names() const {
     return impl::get_opt_names(unsafeGetTensorImpl());
   }
   // See impl::get_names in ATen/NamedTensor.h for docs.
@@ -359,112 +307,49 @@ class TORCH_API Tensor {
     return !at::impl::variable_excluded_from_dispatch();
   }
 
-  /// Returns a `Tensor`'s layout.
-  Layout layout() const noexcept {
-    return impl_->layout();
-  }
+  /// Returns a `Tensor`'s layout. Defined in Type.h
+  Layout layout() const noexcept;
 
-  /// Returns a `Tensor`'s dtype (`TypeMeta`).
-  caffe2::TypeMeta dtype() const noexcept {
-    return impl_->dtype();
-  }
+  /// Returns a `Tensor`'s dtype (`TypeMeta`). Defined in TensorMethods.cpp
+  caffe2::TypeMeta dtype() const noexcept;
 
   /// Returns a `Tensor`'s device.
-  inline Device device() const {
-    return impl_->device();
-  }
+  Device device() const;
+
+  /// Returns a `Tensor`'s device.
+  c10::optional<Device> optional_device() const;
 
   /// Returns a `Tensor`'s device index.
-  int64_t get_device() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->get_device();
-  }
-
-
-  /// Returns if a `Tensor` has CPU backend.
-  bool is_cpu() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_cpu();
-  }
+  int64_t get_device() const;
 
   /// Returns if a `Tensor` has CUDA backend.
-  bool is_cuda() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_cuda();
-  }
-
-  /// Returns if a `Tensor` has XPU backend.
-  bool is_xpu() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_xpu();
-  }
-
-  /// Returns if a `Tensor` has XLA backend.
-  bool is_xla() const {
-    return impl_->is_xla();
-  }
+  bool is_cuda() const;
 
   /// Returns if a `Tensor` has HIP backend.
-  bool is_hip() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_hip();
-  }
+  bool is_hip() const;
 
   /// Returns if a `Tensor` has sparse backend.
-  bool is_sparse() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_sparse();
-  }
+  bool is_sparse() const;
 
   /// Returns if a `Tensor` is mkldnn tensor.
-  bool is_mkldnn() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_mkldnn();
-  }
-
-  /// Returns if a `Tensor` is mlc tensor.
-  bool is_mlc() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_mlc();
-  }
+  bool is_mkldnn() const;
 
   /// Returns if a `Tensor` is vulkan tensor.
-  bool is_vulkan() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_vulkan();
-  }
-
-  /// Returns if a `Tensor` is metal tensor.
-  bool is_metal() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_metal();
-  }
+  bool is_vulkan() const;
 
   /// Returns if a `Tensor` has quantized backend.
-  bool is_quantized() const {
-    // NB: this is not a native function to avoid dispatching overhead.
-    return impl_->is_quantized();
-  }
+  bool is_quantized() const;
 
   /// Returns if a `Tensor` is a meta tensor.  Meta tensors can
   /// also have other designations.
-  bool is_meta() const {
-    return impl_->is_meta();
-  }
+  bool is_meta() const;
 
   /// If a tensor is a quantized tensor, returns its quantizer
   /// TODO: it's not in native_functions.yaml yet as it's not exposed to python
   QuantizerPtr quantizer() const;
 
   /// Returns if a `Tensor` has any dimension names
-  bool has_names() const {
-    // If a user is using unnamed tensors, then we can short-circuit right here.
-    // Otherwise, impl::has_names attempts to retrieve names.
-    if (!impl_->has_named_tensor_meta()) {
-      return false;
-    }
-    return impl::has_names(unsafeGetTensorImpl());
-  }
+  bool has_names() const;
 
   /// Returns a `Tensor`'s dimension names data structure
   const NamedTensorMeta* get_named_tensor_meta() const;
@@ -498,7 +383,7 @@ class TORCH_API Tensor {
   template<typename T, size_t N>
   TensorAccessor<T,N> accessor() const& {
     static_assert(N > 0, "accessor is used for indexing tensor, for scalars use *data_ptr<T>()");
-    TORCH_CHECK(dim() == N, "TensorAccessor expected ", N, " dims but tensor has ", dim());
+    TORCH_CHECK(dim() == N, "expected ", N, " dims but tensor has ", dim());
     return TensorAccessor<T,N>(data_ptr<T>(),sizes().data(),strides().data());
   }
   template<typename T, size_t N>
@@ -512,7 +397,7 @@ class TORCH_API Tensor {
   template<typename T, size_t N, template <typename U> class PtrTraits = DefaultPtrTraits, typename index_t = int64_t>
   GenericPackedTensorAccessor<T,N,PtrTraits,index_t> generic_packed_accessor() const& {
     static_assert(N > 0, "accessor is used for indexing tensor, for scalars use *data_ptr<T>()");
-    TORCH_CHECK(dim() == N, "TensorAccessor expected ", N, " dims but tensor has ", dim());
+    TORCH_CHECK(dim() == N, "expected ", N, " dims but tensor has ", dim());
     return GenericPackedTensorAccessor<T,N,PtrTraits,index_t>(static_cast<typename PtrTraits<T>::PtrType>(data_ptr<T>()),sizes().data(),strides().data());
   }
   template<typename T, size_t N, template <typename U> class PtrTraits = DefaultPtrTraits, typename index_t = int64_t>
@@ -562,15 +447,14 @@ class TORCH_API Tensor {
   Tensor index(std::initializer_list<at::indexing::TensorIndex> indices) const;
 
   Tensor & index_put_(ArrayRef<at::indexing::TensorIndex> indices, Tensor const & rhs);
-  Tensor & index_put_(ArrayRef<at::indexing::TensorIndex> indices, const Scalar& v);
+  Tensor & index_put_(ArrayRef<at::indexing::TensorIndex> indices, Scalar v);
   Tensor & index_put_(std::initializer_list<at::indexing::TensorIndex> indices, Tensor const & rhs);
-  Tensor & index_put_(std::initializer_list<at::indexing::TensorIndex> indices, const Scalar& v);
+  Tensor & index_put_(std::initializer_list<at::indexing::TensorIndex> indices, Scalar v);
 
   Tensor cpu() const;
   Tensor cuda() const;
   Tensor hip() const;
   Tensor vulkan() const;
-  Tensor metal() const;
 
   // ~~~~~ Autograd API ~~~~~
 
@@ -611,7 +495,7 @@ class TORCH_API Tensor {
   /// // f requires grad, has no operation creating it
   /// @endcode
 
-  /// \fn void backward(const Tensor & gradient={}, c10::optional<bool> retain_graph=c10::nullopt, bool create_graph=false, c10::optional<TensorList> inputs=c10::nullopt) const;
+  /// \fn void backward(const Tensor & gradient={}, c10::optional<bool> retain_graph=c10::nullopt, bool create_graph=false) const;
   ///
   /// Computes the gradient of current tensor with respect to graph leaves.
   ///
@@ -638,23 +522,6 @@ class TORCH_API Tensor {
   /// \param create_graph If ``true``, graph of the derivative will
   ///     be constructed, allowing to compute higher order derivative
   ///     products. Defaults to ``false``.
-  /// \param inputs Inputs w.r.t. which the gradient will be accumulated into
-  ///     ``at::Tensor::grad``. All other Tensors will be ignored. If not
-  ///     provided, the gradient is accumulated into all the leaf Tensors
-  ///     that were used to compute the current tensor. All the provided inputs
-  ///     must be leaf Tensors.
-  void backward(const Tensor & gradient={}, c10::optional<bool> retain_graph=c10::nullopt, bool create_graph=false, c10::optional<TensorList> inputs=c10::nullopt) const {
-    // NB: Adding this wrapper to _backward here because we'd like our
-    // 'backwards' api to accept the 'inputs' argument optionally. Since code gen
-    // currently does not support optional of TensorList our approach is to replace
-    // backward in native_functions.yaml with _backward and call it here instead.
-    if (inputs.has_value()) {
-      TORCH_CHECK(inputs.value().size() > 0, "'inputs' argument to backward cannot be empty")
-      this->_backward(inputs.value(), gradient, retain_graph, create_graph);
-    } else {
-      this->_backward({}, gradient, retain_graph, create_graph);
-    }
-  }
 
   /// \fn Tensor detach() const;
   ///
@@ -693,23 +560,6 @@ class TORCH_API Tensor {
   const Tensor& grad() const {
     return impl_->grad();
   }
-
-  // The Forward AD API functions below are low level and are not to be used by end
-  // users who should use the API provided in torch/csrc/autograd.h
-
-  /// This function returns the forward gradient for this Tensor at the given level.
-  const Tensor& _fw_grad(uint64_t level) const {
-    return impl_->_fw_grad(level, *this);
-  }
-
-  /// This function can be used to set the value of the forward grad.
-  /// Note that the given new_grad might not be used directly if it has different
-  /// metadata (size/stride/storage offset) compared to this Tensor. In that case,
-  /// new_grad content will be copied into a new Tensor
-  void _set_fw_grad(const Tensor& new_grad, uint64_t level, bool is_inplace_op) {
-    impl_->_set_fw_grad(new_grad, *this, level, is_inplace_op);
-  }
-
 
   // STOP.  Thinking of adding a method here, which only makes use
   // of other ATen methods?  Define it in native_functions.yaml.
@@ -833,25 +683,6 @@ public:
   /// Remove hook at given position
   void remove_hook(unsigned pos) const;
 
-  // Variable methods
-  //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-  bool is_leaf() const;
-
-  int64_t output_nr() const;
-
-  void set_data(const Tensor & new_data) const;
-
-  Tensor data() const;
-
-  int64_t _version() const;
-
-  void retain_grad() const;
-
-  void _backward(TensorList inputs, const c10::optional<Tensor>& gradient, c10::optional<bool> keep_graph, bool create_graph) const;
-
-  Tensor& requires_grad_(bool _requires_grad=true) const;
-
   // View Variables
   //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -874,23 +705,14 @@ protected:
   c10::intrusive_ptr<TensorImpl, UndefinedTensorImpl> impl_;
 };
 
-// For "multiple ... operators specified" warnings, closing brace of class
-// declaration must be included between pragma push & pop
-#ifdef _MSC_VER
-#pragma warning( pop )
-#endif
-
-inline int64_t get_device(const Tensor& self) {
-  return self.get_device();
-}
+int64_t get_device(Tensor self);
 
 template <typename T>
 auto Tensor::register_hook(T&& hook) const -> Tensor::hook_return_void_t<T> {
   // Return the grad argument in case of a hook with void return type to have an
   // std::function with Tensor return type
-  static_assert(std::is_same<decltype(hook(Tensor())), void>::value,
-                "Expected hook to return void");
-  return _register_hook([fn=std::forward<T>(hook)](const Tensor& grad) {
+  std::function<void(Tensor)> fn(hook);
+  return _register_hook([fn](const Tensor& grad) {
     fn(grad);
     return Tensor();
   });
@@ -898,7 +720,7 @@ auto Tensor::register_hook(T&& hook) const -> Tensor::hook_return_void_t<T> {
 
 template <typename T>
 auto Tensor::register_hook(T&& hook) const -> Tensor::hook_return_var_t<T> {
-  return _register_hook(std::forward<T>(hook));
+  return _register_hook(hook);
 }
 
 namespace detail {

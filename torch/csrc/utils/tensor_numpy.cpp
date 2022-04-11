@@ -1,6 +1,5 @@
 #include <torch/csrc/THP.h>
 #include <torch/csrc/utils/tensor_numpy.h>
-#define WITH_NUMPY_IMPORT_ARRAY
 #include <torch/csrc/utils/numpy_stub.h>
 
 #ifndef USE_NUMPY
@@ -8,14 +7,9 @@ namespace torch { namespace utils {
 PyObject* tensor_to_numpy(const at::Tensor& tensor) {
   throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
-at::Tensor tensor_from_numpy(PyObject* obj, bool warn_if_not_writeable/*=true*/) {
+at::Tensor tensor_from_numpy(PyObject* obj) {
   throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
-
-bool is_numpy_available() {
-  throw std::runtime_error("PyTorch was compiled without NumPy support");
-}
-
 bool is_numpy_int(PyObject* obj) {
   throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
@@ -23,7 +17,7 @@ bool is_numpy_scalar(PyObject* obj) {
   throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
 at::Tensor tensor_from_cuda_array_interface(PyObject* obj) {
-  throw std::runtime_error("PyTorch was compiled without NumPy support");
+    throw std::runtime_error("PyTorch was compiled without NumPy support");
 }
 }}
 #else
@@ -44,30 +38,6 @@ using namespace torch::autograd;
 
 namespace torch { namespace utils {
 
-bool is_numpy_available() {
-  static bool available = []() {
-    if (_import_array() >= 0) {
-      return true;
-    }
-    // Try to get exception message, print warning and return false
-    std::string message = "Failed to initialize NumPy";
-    PyObject *type, *value, *traceback;
-    PyErr_Fetch(&type, &value, &traceback);
-    if (auto str = value ? PyObject_Str(value) : nullptr) {
-      if (auto enc_str = PyUnicode_AsEncodedString(str, "utf-8", "strict")) {
-        if (auto byte_str = PyBytes_AS_STRING(enc_str)) {
-          message += ": " + std::string(byte_str);
-        }
-        Py_XDECREF(enc_str);
-      }
-      Py_XDECREF(str);
-    }
-    PyErr_Clear();
-    TORCH_WARN(message);
-    return false;
-  }();
-  return available;
-}
 static std::vector<npy_intp> to_numpy_shape(IntArrayRef x) {
   // shape and stride conversion from int64_t to npy_intp
   auto nelem = x.size();
@@ -103,10 +73,8 @@ static std::vector<int64_t> seq_to_aten_shape(PyObject *py_seq) {
   return result;
 }
 
-PyObject* tensor_to_numpy(const at::Tensor& tensor) {
-  if (!is_numpy_available()) {
-    throw std::runtime_error("Numpy is not available");
-  }
+PyObject* tensor_to_numpy(const at::Tensor& tensor_) {
+  Tensor tensor = tensor_.decheckpoint();
   if (tensor.device().type() != DeviceType::CPU) {
     throw TypeError(
       "can't convert %s device type tensor to numpy. Use Tensor.cpu() to "
@@ -158,18 +126,13 @@ PyObject* tensor_to_numpy(const at::Tensor& tensor) {
   return array.release();
 }
 
-at::Tensor tensor_from_numpy(PyObject* obj, bool warn_if_not_writeable/*=true*/) {
-  if (!is_numpy_available()) {
-    throw std::runtime_error("Numpy is not available");
-  }
+at::Tensor tensor_from_numpy(PyObject* obj) {
   if (!PyArray_Check(obj)) {
     throw TypeError("expected np.ndarray (got %s)", Py_TYPE(obj)->tp_name);
   }
   auto array = (PyArrayObject*)obj;
 
-  // warn_if_not_writable is true when a copy of numpy variable is created.
-  // the warning is suppressed when a copy is being created.
-  if (!PyArray_ISWRITEABLE(array) && warn_if_not_writeable) {
+  if (!PyArray_ISWRITEABLE(array)) {
     TORCH_WARN_ONCE(
       "The given NumPy array is not writeable, and PyTorch does "
       "not support non-writeable tensors. This means you can write to the "
@@ -281,18 +244,14 @@ ScalarType numpy_dtype_to_aten(int dtype) {
 }
 
 bool is_numpy_int(PyObject* obj) {
-  return is_numpy_available() && PyArray_IsScalar((obj), Integer);
+  return PyArray_IsScalar((obj), Integer);
 }
 
 bool is_numpy_scalar(PyObject* obj) {
-  return is_numpy_available() && (is_numpy_int(obj) || PyArray_IsScalar(obj, Bool) ||
-         PyArray_IsScalar(obj, Floating) || PyArray_IsScalar(obj, ComplexFloating));
+  return is_numpy_int(obj) || PyArray_IsScalar(obj, Floating);
 }
 
 at::Tensor tensor_from_cuda_array_interface(PyObject* obj) {
-  if (!is_numpy_available()) {
-    throw std::runtime_error("Numpy is not available");
-  }
   auto cuda_dict = THPObjectPtr(PyObject_GetAttrString(obj, "__cuda_array_interface__"));
   TORCH_INTERNAL_ASSERT(cuda_dict);
 
