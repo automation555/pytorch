@@ -16,9 +16,6 @@ namespace jit {
 struct TORCH_API RegisterOperators {
   RegisterOperators() = default;
 
-  /// Registers a vector of already created `Operator`s.
-  /// The operator element is now optional to filter null ops. It's backward
-  /// compatible and works for selective operator registration.
   RegisterOperators(std::vector<c10::optional<Operator>> operators) {
     for (c10::optional<Operator>& o : operators) {
       if (o) {
