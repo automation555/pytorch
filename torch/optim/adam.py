@@ -1,5 +1,5 @@
 import torch
-from . import _functional as F
+from . import functional as F
 from .optimizer import Optimizer
 
 
@@ -7,8 +7,7 @@ class Adam(Optimizer):
     r"""Implements Adam algorithm.
 
     It has been proposed in `Adam: A Method for Stochastic Optimization`_.
-    The implementation of the L2 penalty follows changes proposed in
-    `Decoupled Weight Decay Regularization`_.
+    The implementation of the L2 penalty is based on the original algorithm.
 
     Args:
         params (iterable): iterable of parameters to optimize or dicts defining
@@ -25,8 +24,6 @@ class Adam(Optimizer):
 
     .. _Adam\: A Method for Stochastic Optimization:
         https://arxiv.org/abs/1412.6980
-    .. _Decoupled Weight Decay Regularization:
-        https://arxiv.org/abs/1711.05101
     .. _On the Convergence of Adam and Beyond:
         https://openreview.net/forum?id=ryQu7f-RZ
     """
@@ -70,9 +67,9 @@ class Adam(Optimizer):
             grads = []
             exp_avgs = []
             exp_avg_sqs = []
+            state_sums = []
             max_exp_avg_sqs = []
             state_steps = []
-            beta1, beta2 = group['betas']
 
             for p in group['params']:
                 if p.grad is not None:
@@ -104,6 +101,7 @@ class Adam(Optimizer):
                     # record the step after step update
                     state_steps.append(state['step'])
 
+            beta1, beta2 = group['betas']
             F.adam(params_with_grad,
                    grads,
                    exp_avgs,
@@ -115,5 +113,6 @@ class Adam(Optimizer):
                    beta2,
                    group['lr'],
                    group['weight_decay'],
-                   group['eps'])
+                   group['eps']
+                   )
         return loss
