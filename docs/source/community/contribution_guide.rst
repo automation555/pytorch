@@ -1,8 +1,8 @@
 PyTorch Contribution Guide
 ==========================
 
-PyTorch is a GPU-accelerated Python tensor computation package for
-building deep neural networks built on tape-based autograd systems.
+PyTorch is a GPU-accelerated Python written tensor computation package for
+developing deep neural networks built on tape-based autograd systems.
 
 The PyTorch Contribution Process
 --------------------------------
@@ -10,10 +10,10 @@ The PyTorch Contribution Process
 The PyTorch organization is governed by :doc:`PyTorch
 Governance <governance>`.
 
-The PyTorch development process involves a healthy amount of open
+The PyTorch development process and environment involves a healthy amount of open
 discussions between the core development team and the community.
 
-PyTorch operates similar to most open source projects on GitHub.
+PyTorch operates similar to the most open source projects on GitHub.
 However, if you've never contributed to an open source project before,
 here is the basic process.
 
@@ -21,7 +21,7 @@ here is the basic process.
    source contributions come from people scratching their own itches.
    However, if you don't know what you want to work on, or are just
    looking to get more acquainted with the project, here are some tips
-   for how to find appropriate tasks:
+   on finding appropriate tasks:
 
    -  Look through the `issue
       tracker <https://github.com/pytorch/pytorch/issues/>`__ and see if
@@ -29,8 +29,8 @@ here is the basic process.
       confirmed by other contributors tend to be better to investigate.
       We also maintain some labels for issues which are likely to be
       good for new people, e.g., **bootcamp** and **1hr**, although
-      these labels are less well maintained.
-   -  Join us on Slack and let us know you're interested in getting to
+      these labels are not much well maintained.
+   -  Join us on Slack and let us know if you're interested in getting to
       know PyTorch. We're very happy to help out researchers and
       partners get up to speed with the codebase.
 
@@ -70,7 +70,7 @@ here is the basic process.
 -  **Open a pull request.**
 
    -  If you are not ready for the pull request to be reviewed, tag it
-      with [WIP]. We will ignore it when doing review passes. If you are
+      with [WIP]. We will ignore it while doing review passes. If you are
       working on a complex change, it's good to start things off as WIP,
       because you will need to spend time looking at CI results to see
       if things worked out or not.
