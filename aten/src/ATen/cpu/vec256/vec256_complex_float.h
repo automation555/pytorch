@@ -241,7 +241,9 @@ public:
     return Vec256(_mm256_permute_ps(ln.values, 0xB1)).conj();         //-i*ln()
   }
   Vec256<c10::complex<float>> acos() const {
-    return map(std::acos);
+    // acos(x) = pi/2 - asin(x)
+    const __m256 pi_2 = _mm256_setr_ps(M_PI/2, 0.0, M_PI/2, 0.0, M_PI/2, 0.0, M_PI/2, 0.0);
+    return _mm256_sub_ps(pi_2, asin());
   }
   Vec256<c10::complex<float>> atan() const;
   Vec256<c10::complex<float>> atan2(const Vec256<c10::complex<float>> &b) const {
@@ -254,15 +256,104 @@ public:
     AT_ERROR("not supported for complex numbers");
   }
   Vec256<c10::complex<float>> exp() const {
-    //exp(a + bi)
-    // = exp(a)*(cos(b) + sin(b)i)
-    auto exp = Sleef_expf8_u10(values);                               //exp(a)           exp(b)
+    // Non Vectorized Code for Reference
+    // Link:
+    // https://github.com/llvm/llvm-project/blob/5e9e335a247040a175855f99dbab5957064434ba/libcxx/include/complex#L1054-L1077
+    // _Tp __i = __x.imag();
+    // if (std::isinf(__x.real()))
+    // {
+    //     if (__x.real() < _Tp(0)) // Step 1
+    //     {
+    //         if (!std::isfinite(__i))
+    //             __i = _Tp(1);
+    //     }
+    //     else if (__i == 0 || !std::isfinite(__i)) // Step 2
+    //     {
+    //         if (std::isinf(__i)) // Step 2.1
+    //             __i = _Tp(NAN);
+    //         return std::complex<_Tp>(__x.real(), __i);
+    //     }
+    // }
+    // else if (std::isnan(__x.real()) && __x.imag() == 0) // Step 3
+    //     return __x;
+    // _Tp __e = exp(__x.real());
+    // return std::complex<_Tp>(__e * cos(__i), __e * sin(__i));
+
+    auto pos_inf = __m256{INFINITY,INFINITY, INFINITY,INFINITY,INFINITY,INFINITY,INFINITY,INFINITY};
+    auto neg_inf = __m256{-INFINITY,-INFINITY, -INFINITY,-INFINITY,-INFINITY,-INFINITY,-INFINITY,-INFINITY};
+    auto nan_vec = __m256{NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+    auto one_vec = __m256{1, 1, 1, 1, 1, 1, 1, 1};
+    auto zero_vec = _mm256_setzero_ps();
+    auto real_mask = __m256{-NAN, 0, -NAN, 0, -NAN, 0, -NAN, 0};
+    auto imag_mask = __m256{0, -NAN, 0, -NAN, 0, -NAN, 0, -NAN};
+
+    auto zero_mask = _mm256_cmp_ps(values, zero_vec, _CMP_EQ_OQ);
+    auto pos_inf_mask = _mm256_cmp_ps(values, pos_inf, _CMP_EQ_OQ);
+    auto neg_inf_mask = _mm256_cmp_ps(values, neg_inf, _CMP_EQ_OQ);
+    auto is_inf_mask = _mm256_or_ps(pos_inf_mask, neg_inf_mask);
+    auto not_nan_mask = _mm256_cmp_ps(values, values, _CMP_EQ_OQ);
+    auto nan_mask = _mm256_cmp_ps(not_nan_mask, zero_vec, _CMP_EQ_OQ);
+    auto not_is_finite_mask = _mm256_or_ps(is_inf_mask, nan_mask);
+
+    // if real is neginf and imag is not finite [Step 1]
+    auto neg_inf_real_mask = _mm256_permute_ps(neg_inf_mask, 0xB1);
+    auto real_neg_inf_imag_not_finite = _mm256_and_ps(not_is_finite_mask, neg_inf_real_mask);
+    auto real_neg_inf_imag_not_finite_mask = _mm256_and_ps(real_neg_inf_imag_not_finite, imag_mask);
+    auto updated_values = _mm256_blendv_ps(values, one_vec, real_neg_inf_imag_not_finite_mask);
+
+    // if real is pos_inf and imag is 0 or not-finite [Step 2]
+    auto pos_inf_real_mask = _mm256_permute_ps(pos_inf_mask, 0xB1);
+
+    auto zero_or_not_finite = _mm256_or_ps(zero_mask, not_is_finite_mask);
+    auto zero_or_not_finite_imag = _mm256_and_ps(zero_or_not_finite, imag_mask);
+    auto pos_inf_real_zero_or_not_finite_imag =
+        _mm256_and_ps(zero_or_not_finite_imag, pos_inf_real_mask);
+
+    // if real is pos_inf and imag is inf [Step 2.1]
+    auto infinity_imag = _mm256_and_ps(is_inf_mask, imag_mask);
+    auto pos_inf_real_zero_or_infinity_imag =
+        _mm256_and_ps(infinity_imag, pos_inf_real_mask);
+    auto pos_inf_real_not_finite_imag =
+        _mm256_blendv_ps(values, nan_vec, pos_inf_real_zero_or_infinity_imag);
+    auto pos_inf_real_not_finite_imag_mask = _mm256_blend_ps(
+        pos_inf_real_zero_or_not_finite_imag,
+        _mm256_permute_ps(pos_inf_real_zero_or_not_finite_imag, 0xB1),
+        0x55);
+
+    //(std::isnan(__x.real()) && __x.imag() == 0) [Step 3]
+    auto real_is_nan = _mm256_and_ps(nan_mask, real_mask);
+    auto imag_is_zero = _mm256_and_ps(zero_mask, imag_mask);
+    auto imag_is_zero_shift = _mm256_permute_ps(imag_is_zero, 0xB1);
+    auto real_is_nan_imag_zero_mask = _mm256_and_ps(real_is_nan, imag_is_zero_shift);
+    real_is_nan_imag_zero_mask = _mm256_blend_ps(
+        real_is_nan_imag_zero_mask,
+        _mm256_permute_ps(real_is_nan_imag_zero_mask, 0xB1),
+        0xAA);
+
+    // Exp MUL
+    auto exp = Sleef_expf8_u10(updated_values);                               //exp(a)           exp(b)
     exp = _mm256_blend_ps(exp, _mm256_permute_ps(exp, 0xB1), 0xAA);   //exp(a)           exp(a)
 
-    auto sin_cos = Sleef_sincosf8_u10(values);                        //[sin(a), cos(a)] [sin(b), cos(b)]
+    auto sin_cos = Sleef_sincosf8_u10(updated_values);                        //[sin(a), cos(a)] [sin(b), cos(b)]
     auto cos_sin = _mm256_blend_ps(_mm256_permute_ps(sin_cos.y, 0xB1),
                                    sin_cos.x, 0xAA);                  //cos(b)           sin(b)
-    return _mm256_mul_ps(exp, cos_sin);
+
+    auto exp_computed = _mm256_mul_ps(exp, cos_sin);
+
+    // Handle inf in computation.
+    auto computed_pos_inf_mask = _mm256_cmp_ps(exp, pos_inf, _CMP_EQ_OQ);
+    auto computed_pos_inf_real_mask_exp = _mm256_permute_ps(computed_pos_inf_mask, 0xB1);
+    auto computed_zero_mask = _mm256_and_ps(zero_mask, imag_mask);
+    auto pos_inf_real_zero_imag_exp = _mm256_and_ps(computed_zero_mask, computed_pos_inf_real_mask_exp);
+    exp_computed = _mm256_blendv_ps(exp_computed, values, pos_inf_real_zero_imag_exp);
+
+    // Handle previously computed extremal values [Step 1, Step 2]
+    exp_computed = _mm256_blendv_ps(
+        exp_computed,
+        pos_inf_real_not_finite_imag,
+        pos_inf_real_not_finite_imag_mask);
+    exp_computed = _mm256_blendv_ps(exp_computed, values, real_is_nan_imag_zero_mask);
+    return exp_computed;
   }
   Vec256<c10::complex<float>> expm1() const {
     AT_ERROR("not supported for complex numbers");
