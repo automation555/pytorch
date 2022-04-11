@@ -192,7 +192,6 @@ class CuDNNSpatialBNOp final : public SpatialBNOp<CUDAContext> {
       }
       const double alpha = static_cast<double>(1.0f - momentum_);
 
-#if CUDNN_VERSION_MIN(8, 0, 0)
       // Currently not supporting CUDNN_BATCHNORM_OPS_BN_ADD_ACTIVATION
       auto op = CUDNN_BATCHNORM_OPS_BN;
 
@@ -250,26 +249,6 @@ class CuDNNSpatialBNOp final : public SpatialBNOp<CUDAContext> {
               state->workspace().get(reserve_size),
               reserve_size));
           });
-#else
-      CUDNN_ENFORCE(cudnnBatchNormalizationForwardTraining(
-          cudnn_wrapper_.inline_cudnn_handle(),
-          mode_,
-          cudnnTypeWrapper<T>::kOne(),
-          cudnnTypeWrapper<T>::kZero(),
-          data_desc_,
-          X_data,
-          data_desc_,
-          Y_data,
-          param_desc_,
-          scale_data,
-          bias_data,
-          alpha,
-          running_mean_data,
-          running_var_data,
-          epsilon_,
-          saved_mean_data,
-          saved_inv_std_data));
-#endif // CUDNN_VERSION_MIN(8, 0, 0)
     }
     return true;
   }
@@ -375,7 +354,7 @@ class CuDNNSpatialBNGradientOp final : public SpatialBNGradientOp<CUDAContext> {
           data_desc_,
           param_desc_);
     }
-#if CUDNN_VERSION_MIN(8, 0, 0)
+
     // Currently not supporting CUDNN_BATCHNORM_OPS_BN_ADD_ACTIVATION
     auto op = CUDNN_BATCHNORM_OPS_BN;
 
@@ -439,28 +418,7 @@ class CuDNNSpatialBNGradientOp final : public SpatialBNGradientOp<CUDAContext> {
             state->workspace().get(reserve_size),
             reserve_size));
       });
-#else
-    CUDNN_ENFORCE(cudnnBatchNormalizationBackward(
-        cudnn_wrapper_.inline_cudnn_handle(),
-        mode_,
-        cudnnTypeWrapper<T>::kOne(),
-        cudnnTypeWrapper<T>::kZero(),
-        cudnnTypeWrapper<T>::kOne(),
-        cudnnTypeWrapper<T>::kZero(),
-        data_desc_,
-        X_data,
-        data_desc_,
-        dY_data,
-        data_desc_,
-        dX_data,
-        param_desc_,
-        scale_data,
-        dscale_data,
-        dbias_data,
-        epsilon_,
-        saved_mean_data,
-        saved_rstd_data));
-#endif // CUDNN_VERSION_MIN(8, 0, 0)
+
     return true;
   }
 
