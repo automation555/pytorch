@@ -814,6 +814,10 @@ class TestOperators(TestCase):
         x = torch.randn(2, 8, 3, 4).float()
         self.assertONNX(lambda x: torch.pixel_shuffle(x, upscale_factor=2), x, opset_version=11)
 
+    def test_pixel_unshuffle(self):
+        x = torch.randn(2, 2, 6, 8).float()
+        self.assertONNX(lambda x: torch.pixel_unshuffle(x, downscale_factor=2), x, opset_version=11)
+
     def test_frobenius_norm(self):
         x = torch.randn(2, 3, 4).float()
         self.assertONNX(lambda x: torch.norm(x, p="fro", dim=(0, 1), keepdim=True), x)
@@ -875,7 +879,6 @@ class TestOperators(TestCase):
     def test_det(self):
         x = torch.randn(2, 3, 5, 5, device=torch.device('cpu'))
         self.assertONNX(lambda x: torch.det(x), x, opset_version=11)
-        self.assertONNX(lambda x: torch.linalg.det(x), x, opset_version=11)
 
     def test_softmaxcrossentropy(self):
         x = torch.randn(3, 5)
