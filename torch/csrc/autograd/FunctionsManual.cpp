@@ -2437,54 +2437,92 @@ Tensor linalg_qr_backward(const std::vector<torch::autograd::Variable> &grads, c
   }
 }
 
-// Invertible case is derived from Jacobi's formula, and also can be found at:
-// http://eprints.maths.ox.ac.uk/1079/1/NA-08-01.pdf
 Tensor linalg_det_backward(const Tensor & grad, const Tensor& self, const Tensor& det) {
-  auto singular_case_backward = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
-    Tensor u, sigma, v;
-    std::tie(u, sigma, v) = self.svd();
-    auto gsigma = prod_backward(grad.unsqueeze(-1), sigma, det.unsqueeze(-1));
-    return svd_backward({{}, gsigma, {}}, self, true, true, u, sigma, v);
+  auto det_backward_nonsingular = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
+    // Derived from Jacobi's formula for partial derivative, which can be
+    // found at https://en.wikipedia.org/wiki/Jacobi%27s_formula
+    auto det_grad = (unsqueeze_multiple(det, {-1, -2}, self.dim()) * self.inverse().transpose(-2, -1)).conj();
+    return unsqueeze_multiple(grad, {-1, -2}, self.dim()) * det_grad;
   };
 
-  auto nonsingular_case_backward = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
-    return unsqueeze_multiple(grad * det, {-1, -2}, self.dim()) * self.inverse().transpose(-2, -1);
+  auto det_backward_singular_real = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
+    Tensor u, sigma, v;
+    std::tie(u, sigma, v) = self.svd();
+    auto sigma_grad = prod_backward(grad, sigma, det, -1, false);
+    return svd_backward({{}, sigma_grad, {}}, self, true, true, u, sigma, v);
+  };
+
+  auto det_backward_singular_complex = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
+    Tensor u, sigma, v;
+    std::tie(u, sigma, v) = self.svd();
+    auto u_det = u.det();
+    auto v_det = v.det();
+    auto sigma_prod = sigma.prod(-1);
+    auto sigma_grad = (u_det * v_det).unsqueeze(-1) * prod_backward(grad, sigma, sigma_prod, -1, false);
+    auto u_grad = unsqueeze_multiple(sigma_prod * v_det, {-1, -2}, self.dim()) * det_backward_nonsingular(grad, u, u_det);
+    auto v_grad = unsqueeze_multiple(sigma_prod * u_det, {-1, -2}, self.dim()) * det_backward_nonsingular(grad, v, v_det);
+    return svd_backward({u_grad, sigma_grad, v_grad}, self, true, true, u, sigma, v);
+  };
+
+  auto det_backward_singular = [&](const Tensor& grad, const Tensor& self, const Tensor& det) -> Tensor {
+    // Formula is derived starting with:
+    //    det(A) = det(u) * prod(sigma) * det(v)
+    //    u, sigma, v = svd(A)
+    //
+    // Using the product rule, we can find that
+    //    d(det(A))/dA = prod(s) * det(v) * d(det(u))/dA
+    //                 + det(u) * det(v) * d(prod(s))/dA
+    //                 + det(u) * prod(s) * d(det(v))/dA
+    //
+    // where "d(x)/dA" indicates the partial derivative of x with
+    // respect to the corresponding element from matrix A.
+
+    if (self.is_complex()) {
+      return det_backward_singular_complex(grad, self, det);
+    } else {
+      // For real matrices, det(u) and det(v) will always be +/-1, and
+      // the previous formula will simplify to
+      //    d(det(A))/dA =  det(u) * det(v) * d(prod(s))/dA
+      //
+      // so we use the simplified implementation in this case.
+      return det_backward_singular_real(grad, self, det);
+    }
   };
 
   if (self.dim() == 2) {
-    if (det.item<double>() == 0) {
-      return singular_case_backward(grad, self, det);
+    if (det.eq(0).item<bool>()) {
+      return det_backward_singular(grad, self, det);
     } else {
-      return nonsingular_case_backward(grad, self, det);
+      return det_backward_nonsingular(grad, self, det);
     }
   } else {
-    auto nonzero_det_indices = at::native::toListOfOptionalTensors(at::where(det));
-    c10::optional<Tensor> first_nonzero_det_index = nonzero_det_indices[0];
-
-    if (first_nonzero_det_index->size(0) == det.numel()) {  // all determinants are nonzero (non-singular)
-      return nonsingular_case_backward(grad, self, det);
+    auto nonzero_det_mask = det.ne(0);
+    if (nonzero_det_mask.all().item<bool>()) {
+      return det_backward_nonsingular(grad, self, det);
     }
 
-    auto zero_det_indices = at::native::toListOfOptionalTensors(at::where(det == 0));
-    c10::optional<Tensor> first_zero_det_index = zero_det_indices[0];
-
-    if (first_zero_det_index->size(0) == det.numel()) {  // all determinants are zero (singular)
-      return singular_case_backward(grad, self, det);
+    auto zero_det_mask = nonzero_det_mask.logical_not();
+    if (zero_det_mask.all().item<bool>()) {
+      return det_backward_singular(grad, self, det);
     }
 
-    Tensor grad_det = at::empty_like(self, LEGACY_CONTIGUOUS_MEMORY_FORMAT);
+    Tensor grad_det = grad.new_empty(self.sizes(), self.options());
 
-    // invertible case
-    grad_det.index_put_(/*indices=*/nonzero_det_indices,
-                        /*value=*/nonsingular_case_backward(grad.index(nonzero_det_indices),
-                                                            self.index(nonzero_det_indices),
-                                                            det.index(nonzero_det_indices)));
+    auto nonzero_det_list = at::native::toListOfOptionalTensors(nonzero_det_mask);
+    grad_det.index_put_(
+        nonzero_det_list,
+        det_backward_nonsingular(
+          grad.index(nonzero_det_list),
+          self.index(nonzero_det_list),
+          det.index(nonzero_det_list)));
 
-    // non-invertible case, uses SVD
-    grad_det.index_put_(/*indices=*/zero_det_indices,
-                        /*value=*/singular_case_backward(grad.index(zero_det_indices),
-                                                         self.index(zero_det_indices),
-                                                         det.index(zero_det_indices)));
+    auto zero_det_list = at::native::toListOfOptionalTensors(zero_det_mask);
+    grad_det.index_put_(
+        zero_det_list,
+        det_backward_singular(
+          grad.index(zero_det_list),
+          self.index(zero_det_list),
+          det.index(zero_det_list)));
 
     return grad_det;
   }
