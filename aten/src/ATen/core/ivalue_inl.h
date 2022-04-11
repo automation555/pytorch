@@ -15,6 +15,7 @@
 #include <c10/core/UndefinedTensorImpl.h>
 #include <c10/util/intrusive_ptr.h>
 #include <c10/util/hash.h>
+#include <c10/util/ComplexHolder.h>
 
 namespace torch {
 namespace jit {
@@ -56,12 +57,13 @@ c10::intrusive_ptr<T, NullType> IValue::moveToIntrusivePtr() {
 }
 template <typename T, class NullType>
 c10::intrusive_ptr<T, NullType> IValue::toIntrusivePtr() const {
-  if (payload.u.as_intrusive_ptr == c10::UndefinedTensorImpl::singleton()) {
-    return c10::intrusive_ptr<T, NullType>();
-  }
-  c10::raw::intrusive_ptr::incref(payload.u.as_intrusive_ptr);
-  return c10::intrusive_ptr<T, NullType>::reclaim(
-      static_cast<T*>(payload.u.as_intrusive_ptr));
+  auto r = c10::intrusive_ptr<T, NullType>::reclaim(
+      payload.u.as_intrusive_ptr == c10::UndefinedTensorImpl::singleton()
+      ? NullType::singleton()
+      : static_cast<T*>(payload.u.as_intrusive_ptr));
+  auto p = r;
+  r.release();
+  return p;
 }
 
 template <class T, class U>
@@ -134,13 +136,11 @@ inline c10::intrusive_ptr<ivalue::EnumHolder> IValue::toEnumHolder() const& {
 }
 inline c10::complex<double> IValue::toComplexDouble() const {
   TORCH_INTERNAL_ASSERT(isComplexDouble(), "Expected ComplexDouble but got ", tagKind());
-  auto ptr = toIntrusivePtr<ivalue::ComplexHolder>();
+  auto ptr = toIntrusivePtr<c10::ComplexHolder>();
   return (*ptr).val;
 }
 inline at::Tensor IValue::toTensor() && {
-  if (C10_UNLIKELY(!isTensor())) {
-    reportToTensorTypeError();
-  }
+  AT_ASSERT(isTensor(), "Expected Tensor but got ", tagKind());
   auto result = std::move(payload.as_tensor);
   // As far as I can tell, omitting the usual explicit destructor call
   // is not UB in and of itself, and it's a slight perf win. The
@@ -155,15 +155,11 @@ inline at::Tensor IValue::toTensor() && {
   return result;
 }
 inline at::Tensor& IValue::toTensor() & {
-  if (C10_UNLIKELY(!isTensor())) {
-    reportToTensorTypeError();
-  }
+  AT_ASSERT(isTensor(), "Expected Tensor but got ", tagKind());
   return payload.as_tensor;
 }
 inline const at::Tensor& IValue::toTensor() const& {
-  if (C10_UNLIKELY(!isTensor())) {
-    reportToTensorTypeError();
-  }
+  AT_ASSERT(isTensor(), "Expected Tensor but got ", tagKind());
   return payload.as_tensor;
 }
 inline c10::Storage IValue::toStorage() && {
@@ -255,9 +251,9 @@ struct TORCH_API Tuple : c10::intrusive_ptr_target {
   }
 
   template <typename... Args>
-  static c10::intrusive_ptr<Tuple> create(Args&&... elements_) {
+  static c10::intrusive_ptr<Tuple> create(Args... elements_) {
     return c10::make_intrusive<Tuple>(
-        std::vector<IValue>{IValue(std::forward<Args>(elements_))...});
+        std::vector<IValue>{IValue(elements_)...});
   }
 
   const std::vector<IValue>& elements() const& {
@@ -366,7 +362,7 @@ struct C10_EXPORT ivalue::Future : c10::intrusive_ptr_target {
   /**
    * Explicitly mark the future as completed with the output value and DataPtrs.
    * The data_ptrs contains storage pointers for all tensors in IValue, which
-   * will be passed to preMarkCompletedHook. Some subclass, like CUDAFuture,
+   * will be passed to postMarkCompletedHook. Some subclass, like CUDAFuture,
    * uses these DataPtrs to synchronize CUDA streams. You only need to provide
    * data_ptrs when 1) DataPtrs cannot be extracted through
    * IValue::getSubValues() or 2) customized DataPtrs extraction is more
@@ -381,12 +377,10 @@ struct C10_EXPORT ivalue::Future : c10::intrusive_ptr_target {
         !completed(),
         "Attempting to mark a completed Future as complete again. Note that "
         "a Future can only be marked completed once.");
-
-    preMarkCompletedHook(value, std::move(data_ptrs));
-    // Only set value_ and completed_ flag once preMarkCompletedHook has
-    // returned successfully to allow for proper error propagation.
-    value_ = std::move(value);
     completed_ = true;
+    value_ = std::move(value);
+
+    postMarkCompletedHook(value_, std::move(data_ptrs));
 
     std::vector<std::function<void(void)>> cbs;
     cbs.swap(callbacks_);
@@ -529,7 +523,7 @@ struct C10_EXPORT ivalue::Future : c10::intrusive_ptr_target {
   // resides on and record an event in those devices' current streams.
   // The data_ptrs field contains storage pointers of all tensors in the value,
   // which is used by the CUDAFuture subclass to synchronize streams.
-  virtual void preMarkCompletedHook(
+  virtual void postMarkCompletedHook(
       const at::IValue& value,
       c10::optional<std::vector<std::reference_wrapper<const at::DataPtr>>>
           data_ptrs) {}
@@ -559,17 +553,11 @@ struct C10_EXPORT ivalue::Future : c10::intrusive_ptr_target {
   void setErrorInternal(
       std::exception_ptr eptr,
       std::unique_lock<std::mutex>& lock) {
-    TORCH_CHECK(
-        !eptr_,
-        "Error already set on this Future: ",
-        tryRetrieveErrorMessageInternal(eptr_),
-        ", trying to set error: ",
-        tryRetrieveErrorMessageInternal(eptr));
-    TORCH_INTERNAL_ASSERT(!completed(), "Future is already marked completed");
+    AT_ASSERT(!completed());
     completed_ = true;
     eptr_ = std::move(eptr);
 
-    // Do not call preMarkCompletedHook() here as there isn't any value.
+    // Do not call postMarkCompletedHook() here as there isn't any value.
 
     std::vector<std::function<void(void)>> cbs;
     cbs.swap(callbacks_);
@@ -921,7 +909,7 @@ static std::vector<T> createVectorFromList(const c10::detail::ListImpl* impl) {
 }
 
 template <typename T>
-std::vector<T> createVectorFromList(const c10::List<T>& impl) {
+static std::vector<T> createVectorFromList(const c10::List<T>& impl) {
   std::vector<T> result;
   result.reserve(impl.size());
   for (size_t i = 0, N = impl.size(); i < N; ++i) {
@@ -1149,19 +1137,7 @@ template <
         std::nullptr_t>>
 inline IValue::IValue(const std::tuple<Args...>& t)
     : IValue(
-          std::move(c10::guts::apply(c10::ivalue::Tuple::create<const Args&...>, t))) {
-}
-
-template <
-    typename... Args,
-    std::enable_if_t<
-        !guts::disjunction<
-            std::is_lvalue_reference<Args>...,
-            guts::negation<std::is_constructible<IValue, Args>>...>::value,
-        std::nullptr_t>>
-inline IValue::IValue(std::tuple<Args...>&& t)
-    : IValue(
-          std::move(c10::guts::apply(c10::ivalue::Tuple::create<Args&&...>, std::move(t)))) {
+          std::move(c10::guts::apply(c10::ivalue::Tuple::create<Args...>, t))) {
 }
 
 inline IValue::IValue(c10::intrusive_ptr<ivalue::ConstantString> v)
@@ -1296,7 +1272,7 @@ inline IValue::IValue(c10::intrusive_ptr<at::Quantizer> v)
 template <typename T>
 inline IValue::IValue(c10::complex<T> c)
     : tag(Tag::ComplexDouble), is_intrusive_ptr(true) {
-  auto v = c10::make_intrusive<ivalue::ComplexHolder>(c);
+  auto v = c10::make_intrusive<c10::ComplexHolder>(c);
   payload.u.as_intrusive_ptr = v.release();
 }
 
@@ -1391,7 +1367,7 @@ namespace detail {
 
 template <typename T>
 IValue from_(T&& x, std::true_type) {
-  return IValue(std::forward<T>(x));
+  return IValue(std::move(x));
 }
 template <typename T>
 IValue from_(c10::intrusive_ptr<T> x, std::false_type) {
