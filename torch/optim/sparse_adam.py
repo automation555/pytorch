@@ -1,6 +1,8 @@
 import math
+from typing import Tuple, List, Union
+
 import torch
-from .optimizer import Optimizer
+from ._optimizer import Optimizer, _params_t
 
 
 class SparseAdam(Optimizer):
@@ -9,7 +11,7 @@ class SparseAdam(Optimizer):
     In this variant, only moments that show up in the gradient get updated, and
     only those portions of the gradient get applied to the parameters.
 
-    Args:
+    Arguments:
         params (iterable): iterable of parameters to optimize or dicts defining
             parameter groups
         lr (float, optional): learning rate (default: 1e-3)
@@ -22,7 +24,9 @@ class SparseAdam(Optimizer):
         https://arxiv.org/abs/1412.6980
     """
 
-    def __init__(self, params, lr=1e-3, betas=(0.9, 0.999), eps=1e-8):
+    def __init__(self, params: _params_t, lr: float = 1e-3,
+                 betas: Tuple[float, float] = (0.9, 0.999),
+                 eps: float = 1e-8) -> None:
         if not 0.0 < lr:
             raise ValueError("Invalid learning rate: {}".format(lr))
         if not 0.0 < eps:
@@ -32,15 +36,13 @@ class SparseAdam(Optimizer):
         if not 0.0 <= betas[1] < 1.0:
             raise ValueError("Invalid beta parameter at index 1: {}".format(betas[1]))
 
-        params = list(params)
-
-        sparse_params = []
+        sparse_params : List[Union[List[int], int]] = []
         for index, param in enumerate(params):
             if isinstance(param, dict):
                 for d_index, d_param in enumerate(param.get("params", [])):
                     if d_param.is_sparse:
                         sparse_params.append([index, d_index])
-            elif param.is_sparse:
+            elif param.is_sparse:  # type: ignore
                 sparse_params.append(index)
         if sparse_params:
             raise ValueError(
@@ -54,7 +56,7 @@ class SparseAdam(Optimizer):
     def step(self, closure=None):
         """Performs a single optimization step.
 
-        Args:
+        Arguments:
             closure (callable, optional): A closure that reevaluates the model
                 and returns the loss.
         """

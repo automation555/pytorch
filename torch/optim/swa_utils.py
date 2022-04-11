@@ -1,8 +1,13 @@
-import torch
 import math
-from torch.nn import Module
 from copy import deepcopy
+from typing import Iterable, Optional, Callable, Union
+
+import torch
+from torch.nn import Module
 from torch.optim.lr_scheduler import _LRScheduler
+from torch.types import _device
+from torch import Tensor
+from ._optimizer import Optimizer
 
 
 class AveragedModel(Module):
@@ -17,7 +22,7 @@ class AveragedModel(Module):
     on the device :attr:`device` and allows to compute running averages of the
     parameters of the :attr:`model`.
 
-    Args:
+    Arguments:
         model (torch.nn.Module): model to use with SWA
         device (torch.device, optional): if provided, the averaged model will be
             stored on the :attr:`device`
@@ -84,7 +89,8 @@ class AveragedModel(Module):
         Generalizes Well:
         https://arxiv.org/abs/2001.02312
     """
-    def __init__(self, model, device=None, avg_fn=None):
+    def __init__(self, model: Module, device: Optional[Union[int, _device]] = None,
+                 avg_fn: Optional[Callable[[Tensor, Tensor, int], Tensor]] = None) -> None:
         super(AveragedModel, self).__init__()
         self.module = deepcopy(model)
         if device is not None:
@@ -100,7 +106,7 @@ class AveragedModel(Module):
     def forward(self, *args, **kwargs):
         return self.module(*args, **kwargs)
 
-    def update_parameters(self, model):
+    def update_parameters(self, model: Module) -> None:
         for p_swa, p_model in zip(self.parameters(), model.parameters()):
             device = p_swa.device
             p_model_ = p_model.detach().to(device)
@@ -112,13 +118,13 @@ class AveragedModel(Module):
         self.n_averaged += 1
 
 
-@torch.no_grad()
-def update_bn(loader, model, device=None):
+def update_bn(loader: Iterable, model: Module,
+              device: Optional[Union[int, _device]] = None) -> None:
     r"""Updates BatchNorm running_mean, running_var buffers in the model.
 
     It performs one pass over data in `loader` to estimate the activation
     statistics for BatchNorm layers in the model.
-    Args:
+    Arguments:
         loader (torch.utils.data.DataLoader): dataset loader to compute the
             activation statistics on. Each data batch should be either a
             tensor, or a list/tuple whose first element is a tensor
@@ -173,7 +179,7 @@ class SWALR(_LRScheduler):
     This learning rate scheduler is meant to be used with Stochastic Weight
     Averaging (SWA) method (see `torch.optim.swa_utils.AveragedModel`).
 
-    Args:
+    Arguments:
         optimizer (torch.optim.Optimizer): wrapped optimizer
         swa_lrs (float or list): the learning rate value for all param groups
             together or separately for each group.
@@ -209,7 +215,9 @@ class SWALR(_LRScheduler):
     .. _Averaging Weights Leads to Wider Optima and Better Generalization:
         https://arxiv.org/abs/1803.05407
     """
-    def __init__(self, optimizer, swa_lr, anneal_epochs=10, anneal_strategy='cos', last_epoch=-1):
+    def __init__(self, optimizer: Optimizer, swa_lr: float,
+                 anneal_epochs: int = 10, anneal_strategy: str = 'cos',
+                 last_epoch: int = -1) -> None:
         swa_lrs = self._format_param(optimizer, swa_lr)
         for swa_lr, group in zip(swa_lrs, optimizer.param_groups):
             group['swa_lr'] = swa_lr
@@ -220,8 +228,8 @@ class SWALR(_LRScheduler):
             self.anneal_func = self._cosine_anneal
         elif anneal_strategy == 'linear':
             self.anneal_func = self._linear_anneal
-        if not isinstance(anneal_epochs, int) or anneal_epochs < 0:
-            raise ValueError("anneal_epochs must be equal or greater than 0, got {}".format(
+        if not isinstance(anneal_epochs, int) or anneal_epochs < 1:
+            raise ValueError("anneal_epochs must be a positive integer, got {}".format(
                              anneal_epochs))
         self.anneal_epochs = anneal_epochs
 
@@ -258,13 +266,11 @@ class SWALR(_LRScheduler):
             warnings.warn("To get the last learning rate computed by the scheduler, "
                           "please use `get_last_lr()`.", UserWarning)
         step = self._step_count - 1
-        if self.anneal_epochs == 0:
-            step = max(1, step)
-        prev_t = max(0, min(1, (step - 1) / max(1, self.anneal_epochs)))
+        prev_t = max(0, min(1, (step - 1) / self.anneal_epochs))
         prev_alpha = self.anneal_func(prev_t)
         prev_lrs = [self._get_initial_lr(group['lr'], group['swa_lr'], prev_alpha)
                     for group in self.optimizer.param_groups]
-        t = max(0, min(1, step / max(1, self.anneal_epochs)))
+        t = max(0, min(1, step / self.anneal_epochs))
         alpha = self.anneal_func(t)
         return [group['swa_lr'] * alpha + lr * (1 - alpha)
                 for group, lr in zip(self.optimizer.param_groups, prev_lrs)]
