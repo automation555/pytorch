@@ -80,8 +80,20 @@ struct WelfordData {
   scalar_t m2;
   index_t n;
   combine_t nf;
-  C10_HOST_DEVICE WelfordData() : mean(0), m2(0), n(0), nf(0)  {}
-  C10_DEVICE WelfordData(scalar_t mean, scalar_t m2, index_t n, combine_t nf) : mean(mean), m2(m2), n(n), nf(nf) {}
+
+#if defined(__CUDACC__) || defined(__HIPCC__)
+  // Shared memory requires no initialization.
+  C10_HOST_DEVICE WelfordData() = default;
+#else
+  C10_HOST WelfordData() : mean(0), m2(0), n(0), nf(0) {}
+#endif
+
+  C10_HOST_DEVICE WelfordData(
+      scalar_t mean,
+      scalar_t m2,
+      index_t n,
+      combine_t nf)
+      : mean(mean), m2(m2), n(n), nf(nf) {}
 };
 
 
@@ -147,7 +159,7 @@ struct WelfordOps {
     };
   }
 #endif
-  WelfordOps(bool unbiased, bool take_sqrt)
+  C10_HOST_DEVICE WelfordOps(bool unbiased, bool take_sqrt)
     : unbiased(unbiased), take_sqrt(take_sqrt) {
   }
 };
