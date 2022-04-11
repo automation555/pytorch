@@ -2625,7 +2625,7 @@ Tensor _lu_solve_helper_cuda(const Tensor& self, const Tensor& LU_data, const Te
 // ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ lstsq ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Tensor& _lstsq_helper_cuda(
-  Tensor& b, Tensor& rank, Tensor& singular_values, Tensor& infos, const Tensor& a, double cond, std::string driver_name) {
+  Tensor& b, Tensor& rank, Tensor& singular_values, Tensor& infos, const Tensor& a, double rcond, std::string driver_name) {
 #ifndef USE_MAGMA
 TORCH_CHECK(false, "torch.linalg.lstsq: MAGMA library not found in "
     "compilation. Please rebuild with MAGMA.");
@@ -2634,6 +2634,11 @@ TORCH_CHECK(false, "torch.linalg.lstsq: MAGMA library not found in "
     auto trans = MagmaNoTrans;
     auto m = magma_int_cast(a.size(-2), "m");
     auto n = magma_int_cast(a.size(-1), "n");
+
+    TORCH_CHECK(
+      m >= n,
+      "torch.linalg.lstsq: only overdetermined systems (input.size(-2) >= input.size(-1)) are allowed on CUDA");
+
     auto nrhs = magma_int_cast(b.size(-1), "nrhs");
     auto ldda = std::max<magma_int_t>(1, m);
     auto lddb = std::max<magma_int_t>(1, std::max(m, n));
