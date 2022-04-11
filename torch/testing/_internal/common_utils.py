@@ -42,10 +42,10 @@ from typing import cast, Any, Dict, Iterable, Iterator, Optional
 
 import numpy as np
 
-from torch.testing import floating_types_and, integral_types, complex_types
 from torch.testing._internal import expecttest
-from .._core import \
-    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type)
+from torch.testing import \
+    (_compare_tensors_internal, _compare_scalars_internal, _compare_return_type,
+     floating_types_and, integral_types, complex_types)
 
 import torch
 import torch.cuda
@@ -186,24 +186,52 @@ if not expecttest.ACCEPT:
 UNITTEST_ARGS = [sys.argv[0]] + remaining
 torch.manual_seed(SEED)
 
+GPU_COUNT = -1
+def get_gpu_count():
+    global GPU_COUNT
+    if GPU_COUNT == -1:
+        # do this in subprocess to avoid initializing gpu runtime
+        code = 'import torch,sys; c = torch.cuda.device_count(); sys.exit(c)'
+        GPU_COUNT = subprocess.call([sys.executable, '-c', code])
+    return GPU_COUNT
+
+# determine sensible default for parallel jobs if caller wants "max", e.g., 0
+# CPU and GPU tests are not currently separate; we use min() to be safe
+if RUN_PARALLEL == 0:
+    try:
+        import multiprocessing
+        RUN_PARALLEL = multiprocessing.cpu_count()
+    except (ImportError, NotImplementedError):
+        RUN_PARALLEL = 1
+    if torch.version.cuda or torch.version.hip:
+        gpus = get_gpu_count()
+        if gpus > 0:
+            RUN_PARALLEL = min(RUN_PARALLEL, gpus)
+
 def wait_for_process(p):
     try:
         return p.wait()
     except KeyboardInterrupt:
+        print("Caught KeyboardInterrupt")
         # Give `p` a chance to handle KeyboardInterrupt. Without this,
         # `pytest` can't print errors it collected so far upon KeyboardInterrupt.
         exit_status = p.wait(timeout=5)
         if exit_status is not None:
+            print("After KeyboardInterrupt and wait with timeout 5, exit_status %d" % exit_status)
             return exit_status
         else:
+            print("Killing subprocess")
             p.kill()
             raise
-    except:  # noqa E722, copied from python core library
+    except Exception as e:  # noqa E722, copied from python core library
+        print("Caught exception; killing again?")
+        print(repr(e))
         p.kill()
         raise
     finally:
         # Always call p.wait() to ensure exit
         p.wait()
+    return p.wait()  # should not be reached?
 
 def shell(command, cwd=None, env=None):
     sys.stdout.flush()
@@ -279,11 +307,16 @@ def run_tests(argv=UNITTEST_ARGS):
         test_batches = chunk_list(get_test_names(test_cases), RUN_PARALLEL)
         processes = []
         for i in range(RUN_PARALLEL):
+            env = os.environ.copy()
+            if torch.version.cuda or torch.version.hip:
+                env['CUDA_VISIBLE_DEVICES'] = str(i)
             command = [sys.executable] + argv + ['--log-suffix=-shard-{}'.format(i + 1)] + test_batches[i]
-            processes.append(subprocess.Popen(command, universal_newlines=True))
+            processes.append(subprocess.Popen(command, universal_newlines=True, env=env))
         failed = False
-        for p in processes:
-            failed |= wait_for_process(p) != 0
+        for i, p in enumerate(processes):
+            code = wait_for_process(p)
+            print("Shard %d exit code %d" % (i, code))
+            failed |= (code != 0)
         assert not failed, "Some test shards have failed"
     elif TEST_SAVE_XML is not None:
         # import here so that non-CI doesn't need xmlrunner installed
@@ -690,30 +723,6 @@ def is_iterable(obj):
     except TypeError:
         return False
 
-
-def is_iterable_of_tensors(iterable, include_empty=False):
-    """ Returns True if iterable is an iterable of tensors and False o.w.
-
-        If the iterable is empty, the return value is :attr:`include_empty`
-    """
-    # Tensor itself is iterable so we check this first
-    if isinstance(iterable, torch.Tensor):
-        return False
-
-    try:
-        if len(iterable) == 0:
-            return include_empty
-
-        for t in iter(iterable):
-            if not isinstance(t, torch.Tensor):
-                return False
-
-    except TypeError as te:
-        return False
-
-    return True
-
-
 class CudaNonDefaultStream():
     def __enter__(self):
         # Before starting CUDA test save currently active streams on all
@@ -815,27 +824,6 @@ try:
     )
 except ImportError:
     print('Fail to import hypothesis in common_utils, tests are not derandomized')
-
-
-slow_tests_dict: Optional[Dict[str, float]] = None
-def check_slow_test_from_stats(test):
-    global slow_tests_dict
-    if slow_tests_dict is None:
-        url = 'https://raw.githubusercontent.com/pytorch/test-infra/master/stats/.pytorch-slow-tests'
-        try:
-            contents = urlopen(url, timeout=1).read().decode('utf-8')
-            slow_tests_dict = json.loads(contents)
-        except Exception as e:
-            print(f'Could not download slow test stats because of error {e}. Proceeding with no added slow tests.')
-            slow_tests_dict = {}
-    test_suite = str(test.__class__).split('\'')[1]
-    test_name = f'{test._testMethodName} ({test_suite})'
-
-    if test_name in slow_tests_dict:
-        getattr(test, test._testMethodName).__dict__['slow_test'] = True
-        if not TEST_WITH_SLOW:
-            raise unittest.SkipTest("test is slow; run with PYTORCH_TEST_WITH_SLOW to enable test")
-
 
 disabled_test_from_issues: Optional[Dict[str, Any]] = None
 def check_disabled(test_name):
@@ -1011,7 +999,7 @@ class TestCase(expecttest.TestCase):
 
     def setUp(self):
 
-        check_slow_test_from_stats(self)
+
         if TEST_SKIP_FAST:
             if not getattr(self, self._testMethodName).__dict__.get('slow_test', False):
                 raise unittest.SkipTest("test is fast; we disabled it with PYTORCH_TEST_SKIP_FAST")
@@ -1671,6 +1659,7 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
             result = (torch.rand(size, device=device, dtype=torch.float32) * span + low).to(torch.bfloat16)
         else:
             result = torch.rand(size, device=device, dtype=dtype) * span + low
+        result.requires_grad = requires_grad
     else:
         assert dtype in complex_types()
         low = -9 if low is None else max(low, -9)
@@ -1680,14 +1669,11 @@ def make_tensor(size, device: torch.device, dtype: torch.dtype, *, low=None, hig
         real = torch.rand(size, device=device, dtype=float_dtype) * span + low
         imag = torch.rand(size, device=device, dtype=float_dtype) * span + low
         result = torch.complex(real, imag)
+        result.requires_grad = requires_grad
 
     if discontiguous and result.numel() > 1:
         result = torch.repeat_interleave(result, 2, dim=-1)
         result = result[..., ::2]
-
-    if dtype in floating_types_and(torch.half, torch.bfloat16) or\
-       dtype in complex_types():
-        result.requires_grad = requires_grad
 
     return result
 

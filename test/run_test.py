@@ -47,6 +47,7 @@ TESTS = [
     'test_jit_cuda_fuser',
     'test_cuda_primary_ctx',
     'test_dataloader',
+    'test_dataset',
     'test_datapipe',
     'distributed/test_data_parallel',
     'distributed/test_distributed_fork',
@@ -112,6 +113,7 @@ TESTS = [
     'distributed/rpc/test_faulty_agent',
     'distributed/rpc/test_process_group_agent',
     'distributed/rpc/test_tensorpipe_agent',
+    'test_jit_py3',
     'test_determination',
     'test_futures',
     'test_fx',
@@ -220,17 +222,22 @@ ROCM_BLOCKLIST = [
 
 RUN_PARALLEL_BLOCKLIST = [
     'test_cpp_extensions_jit',
+    'test_cuda_primary_ctx',
     'test_expecttest',
-    'test_jit_disabled',
+    'test_functional_autograd_benchmark',
     'test_mobile_optimizer',
     'test_multiprocessing',
     'test_multiprocessing_spawn',
     'test_namedtuple_return_api',
+    'test_op_aliases',
     'test_overrides',
+    'test_package',
     'test_show_pickle',
     'test_tensorexpr',
-    'test_cuda_primary_ctx',
-] + [test for test in TESTS if test.startswith('distributed/')]
+    'distributions/test_constraints',
+]
+RUN_PARALLEL_BLOCKLIST += [test for test in TESTS if test.startswith('distributed/')]
+RUN_PARALLEL_BLOCKLIST += [test for test in TESTS if test.startswith('test_jit')]
 
 WINDOWS_COVERAGE_BLOCKLIST = [
 ]
@@ -500,7 +507,17 @@ def run_test(test_module, test_directory, options, launcher_cmd=None, extra_unit
     if options.verbose:
         unittest_args.append(f'-{"v"*options.verbose}')  # in case of pytest
     if test_module in RUN_PARALLEL_BLOCKLIST:
-        unittest_args = [arg for arg in unittest_args if not arg.startswith('--run-parallel')]
+        # we must remove '--run-parallel' plus the next arg if it is an int
+        new_args = []
+        skip_i = -1
+        for i, arg in enumerate(unittest_args):
+            if arg.startswith('--run-parallel'):
+                skip_i = i + 1
+            elif i == skip_i and arg.isnumeric():
+                pass
+            else:
+                new_args.append(arg)
+        unittest_args = new_args
     if extra_unittest_args:
         assert isinstance(extra_unittest_args, list)
         unittest_args.extend(extra_unittest_args)
@@ -1015,8 +1032,7 @@ def export_S3_test_times(test_times_filename: str, test_times: Dict[str, float])
         print(f'Overwriting existent file: {test_times_filename}')
     with open(test_times_filename, 'w+') as file:
         job_times_json = get_job_times_json(test_times)
-        json.dump(job_times_json, file, indent='    ', separators=(',', ': '))
-        file.write('\n')
+        json.dump(job_times_json, file)
 
 def main():
     options = parse_args()
