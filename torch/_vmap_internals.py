@@ -237,18 +237,15 @@ def vmap(func: Callable, in_dims: in_dims_t = 0, out_dims: out_dims_t = 0) -> Ca
         vmap does not provide general autobatching or handle variable-length
         sequences out of the box.
     """
-    warnings.warn(
-        'torch.vmap is an experimental prototype that is subject to '
-        'change and/or deletion. Please use at your own risk. There may be '
-        'unexpected performance cliffs due to certain operators not being '
-        'implemented. To see detailed performance warnings please use '
-        '`torch._C._debug_only_display_vmap_fallback_warnings(True) '
-        'before the call to `vmap`.',
-        stacklevel=2)
-    return _vmap(func, in_dims, out_dims)
+    # warnings.warn(
+    #     'torch.vmap is an experimental prototype that is subject to '
+    #     'change and/or deletion. Please use at your own risk. There may be '
+    #     'unexpected performance cliffs due to certain operators not being '
+    #     'implemented. To see detailed performance warnings please use '
+    #     '`torch._C._debug_only_display_vmap_fallback_warnings(True) '
+    #     'before the call to `vmap`.',
+    #     stacklevel=2)
 
-# A version of vmap but without the initial "experimental prototype" warning
-def _vmap(func: Callable, in_dims: in_dims_t = 0, out_dims: out_dims_t = 0) -> Callable:
     @functools.wraps(func)
     def wrapped(*args):
         _check_out_dims_is_int_or_int_tuple(out_dims, func)
@@ -256,8 +253,10 @@ def _vmap(func: Callable, in_dims: in_dims_t = 0, out_dims: out_dims_t = 0) -> C
         try:
             batched_inputs, batch_size = _create_batched_inputs(in_dims, args, vmap_level, func)
             batched_outputs = func(*batched_inputs)
-            _validate_outputs(batched_outputs, func)
-            return _unwrap_batched(batched_outputs, out_dims, vmap_level, batch_size, func)
+            # _validate_outputs(batched_outputs, func)
+            flat_batched_outputs, tree_spec = tree_flatten(batched_outputs)
+            result = _unwrap_batched(tuple(flat_batched_outputs), out_dims, vmap_level, batch_size, func)
+            return tree_unflatten(result, tree_spec)
         finally:
             torch._C._vmapmode_decrement_nesting()
     return wrapped
