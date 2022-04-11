@@ -113,14 +113,14 @@ def div(g, self, other, *args):
 
 @parse_args('v', 'v', 's')
 def _div_rounding_mode(g, self, other, rounding_mode):
-    if rounding_mode is None:
+    if rounding_mode == 'true':
         return true_divide(g, self, other)
     elif rounding_mode == 'floor':
         return _floor_divide(g, self, other)
     elif rounding_mode == 'trunc':
         return _trunc_divide(g, self, other)
     else:
-        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected None, "floor" or "trunc"')
+        raise RuntimeError(f'Unsupported rounding mode: "{rounding_mode}". Expected "true", "floor" or "trunc"')
 
 
 def _trunc_divide(g, self, other):
@@ -448,6 +448,13 @@ def _standard_gamma(g, self, generator):
 
 def t(g, self):
     return g.op("Transpose", self, perm_i=(1, 0))
+
+
+def mv(g, mat, vec):
+    vec = sym_help._unsqueeze_helper(g, vec, [0])
+    vec = t(g, vec)
+    out = matmul(g, mat, vec)
+    return sym_help._squeeze_helper(g, out, [1])
 
 
 def expand(g, self, size, implicit):
@@ -1866,12 +1873,6 @@ def hardswish(g, self):
     hardtanh_ = g.op("Div", hardtanh_, g.op('Constant', value_t=torch.tensor(6, dtype=torch.float)))
     return g.op("Mul", self, hardtanh_)
 
-
-@parse_args('v')
-def hardsigmoid(g, self):
-    return g.op('HardSigmoid', self, alpha_f=1 / 6)
-
-
 def alias(g, self):
     return self
 
@@ -3018,5 +3019,24 @@ def linear(g, input, weight, bias):
         output = matmul(g, input, weight)
         if not bias.node().mustBeNone():
             output = add(g, bias, output)
+
+    return output
+
+@parse_args('v', 'b', 'i', 'v', 'v', 'v', 'v')
+def hann_window(g, window_length, periodic=True, dtype=None, layout=None, device=None, pin_memory=None, requires_grad=False):
+    if dtype is None:
+        dtype = torch.get_default_dtype()
+        if sym_help._dtype_is_fp(dtype) is False:
+            dtype = torch.float
+        dtype = sym_help.scalar_type_to_pytorch_type.index(dtype)
+
+    n_array = arange(g, window_length, 4, None, None, None)
+    output = g.op('Cast', n_array, to_i=sym_help.cast_pytorch_to_onnx['Float'])
+    output = mul(g, g.op('Constant', value_t=torch.tensor(math.pi, dtype=torch.float)), output)
+
+    if periodic is False:
+        window_length = sub(g, window_length, g.op("Constant", value_t=torch.tensor(1, dtype=torch.int)))
+    output = div(g, output, window_length)
+    output = g.op("Cast", square(g, sin(g, output)), to_i=sym_help.scalar_type_to_onnx[dtype])
 
     return output
