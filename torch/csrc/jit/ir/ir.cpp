@@ -104,12 +104,10 @@ std::ostream& operator<<(
 static void printAttribute(std::ostream& out, const at::Tensor& tensor) {
   // 1-elem tensors are usually boxed scalars, so print them like it
   if (tensor.numel() == 1) {
-    auto scalar_tensor = tensor.view(std::vector<int64_t>{}).item();
+    auto scalar_tensor = tensor.view({}).item();
     out << "{";
     if (scalar_tensor.isFloatingPoint()) {
       out << scalar_tensor.toDouble();
-    } else if (scalar_tensor.isComplex()) {
-      out << scalar_tensor.toComplexDouble();
     } else {
       out << scalar_tensor.toLong();
     }
@@ -159,13 +157,6 @@ static void printTypeList(
 
 void Node::printAttrValue(std::ostream& out, const Symbol& name) const {
   switch (kindOf(name)) {
-    case AttributeKind::c:
-      printAttribute(out, c(name));
-      break;
-    case AttributeKind::cs:
-      // TODO(@anjali411): fix this
-      AT_ASSERT(false);
-      break;
     case AttributeKind::f:
       printAttribute(out, f(name));
       break;
@@ -449,6 +440,7 @@ void Node::lint() const {
       break;
     case prim::FusionGroup:
     case prim::CudaFusionGroup:
+    case prim::LlgaFusionGroup:
       checkSameDevice(this);
       // TODO: Typecheck the parameters
       g(attr::Subgraph)->lint();
@@ -806,24 +798,12 @@ Value* Value::setDebugName(const std::string& name) {
         name_base = name.substr(0, last_dot_pos);
       }
     }
-
-    auto& names_suffixes = node()->owningGraph()->name_base_suffix_;
-    auto it = names_suffixes.find(name_base);
-    if (it != names_suffixes.end()) {
-      suffix = std::max(suffix, it->second + 1);
-    }
-
-    // Verify that new name is not used and find next usable name in case
-    // suffix is used.
     std::string replacement_name;
     do {
       std::stringstream ss;
       ss << name_base << "." << suffix++;
       replacement_name = ss.str();
     } while (names.count(replacement_name) > 0);
-
-    names_suffixes[name_base] = suffix;
-
     old_owner_of_name->second->setDebugName(replacement_name);
   }
 
@@ -1273,27 +1253,6 @@ void Node::replaceAllUsesWith(Node* n) {
   for (size_t i = 0; i < nOutputs; i++) {
     outputs()[i]->replaceAllUsesWith(n->outputs()[i]);
   }
-}
-
-Node* Node::replaceWithNewSymbol(Symbol new_symbol) {
-  WithInsertPoint insert_guard{this};
-  bool had_operator = maybeOperator() != nullptr;
-  auto graph = owningGraph();
-  auto replace_node = graph->insertNode(graph->create(new_symbol, 0));
-  for (Value* v : inputs()) {
-    replace_node->addInput(v);
-  }
-  for (Value* v : outputs()) {
-    auto new_out = replace_node->addOutput()->copyMetadata(v);
-    v->replaceAllUsesWith(new_out);
-  }
-  replace_node->copyMetadata(this);
-  TORCH_INTERNAL_ASSERT(
-      (replace_node->maybeOperator() != nullptr) == had_operator,
-      "invalid symbol replacement:",
-      new_symbol,
-      kind());
-  return replace_node;
 }
 
 Value* Node::insertInput(size_t i, Value* value) {
@@ -1808,13 +1767,11 @@ Value* Graph::insertToList(Value* v, TypePtr type) {
     elem_ty = 1;
   } else if (ptr == BoolType::get()) {
     elem_ty = 2;
-  } else if (ptr == ComplexType::get()) {
-    elem_ty = 3;
   } else {
     TORCH_CHECK(
         false,
         ptr->repr_str(),
-        " is not one of the supported element types for tolist: int, float, complex, bool");
+        " is not one of the supported element types for tolist: int, float, bool");
   }
 
   // Pass in the number of dimensions and base element type as arguments
@@ -2100,6 +2057,16 @@ Node* ProfileOp::allocNewInstance(Graph* g) {
   return new ProfileOp(g, {nullptr});
 }
 
+void ProfileOptionalOp::cloneFrom(Node* other_) {
+  Node::cloneFrom(other_);
+  auto other = other_->cast<ProfileOptionalOp>();
+  this->callback_ = other->getCallback();
+}
+
+Node* ProfileOptionalOp::allocNewInstance(Graph* g) {
+  return new ProfileOptionalOp(g, {nullptr});
+}
+
 void ProfileIValueOp::cloneFrom(Node* other_) {
   Node::cloneFrom(other_);
   auto other = other_->cast<ProfileIValueOp>();
@@ -2119,6 +2086,7 @@ TypePtr NamedValue::type() const {
 }
 
 const Symbol ProfileOp::Kind = ::c10::prim::profile;
+const Symbol ProfileOptionalOp::Kind = ::c10::prim::profile_optional;
 const Symbol ProfileIValueOp::Kind = ::c10::prim::profile_ivalue;
 
 OperatorSet::OperatorSet(std::initializer_list<const char*> sig_literals) {
