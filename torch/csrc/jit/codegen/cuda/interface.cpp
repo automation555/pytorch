@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/codegen/cuda/interface.h>
-
 #include <ATen/core/dispatch/OperatorOptions.h>
 #include <torch/csrc/jit/runtime/custom_operator.h>
 #include <torch/csrc/jit/runtime/register_ops_utils.h>
@@ -47,6 +46,12 @@ bool canFuseNode(const Node* node) {
       getFuserInterface()->fn_can_fuse_n_(node);
 }
 
+void InsertProfileNodesForCUDAFuser(ProfilingRecord* pr) {
+  if (getFuserInterface()->fn_insert_profile_inodes_) {
+    getFuserInterface()->fn_insert_profile_inodes_(pr);
+  }
+};
+
 //! [ Note -- type guard logic in CudaFusionGuard ]
 //!
 //! CudaFusionGuard is used to Guard input tensor to `CudaFusionGroup` so that
@@ -90,8 +95,7 @@ bool complyWith(
   // check a. if num_dimension check fails or scalar type check fails
   if (*guard_tensor_type->dim() != static_cast<size_t>(tensor.ndimension()) ||
       (guard_tensor_type->scalarType().has_value() &&
-       (guard_tensor_type->scalarType().value() != tensor.scalar_type())) ||
-      tensor.requires_grad()) {
+       (guard_tensor_type->scalarType().value() != tensor.scalar_type()))) {
     return false;
   }
 
