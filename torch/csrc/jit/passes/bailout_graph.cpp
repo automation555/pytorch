@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/passes/bailout_graph.h>
-
 #include <ATen/core/function.h>
 #include <torch/csrc/jit/ir/alias_analysis.h>
 #include <torch/csrc/jit/ir/ir_views.h>
@@ -121,6 +120,7 @@ struct BailOutGraphBuilderForNode {
     auto old_max_count = getOrAddInputForValue(lv.maxTripCount());
     auto cur_iter = getInputForValue(lv.currentTripCount());
     auto block_outputs = lv.bodyBlock()->outputs();
+    auto carried_deps = lv.carriedInputsWithCond();
 
     auto* block = copy_graph_->block();
     // subtract the number of iterations
@@ -236,6 +236,7 @@ struct BailOutInserter {
   // This graph will be used to compute a bailout graph for
   // any given bailout point
   void addUnoptimizedFuncToBailouts() {
+    GRAPH_DUMP("addUnoptimizedFuncToBailouts", graph_);
     auto unoptimized_graph = graph_->copy();
     auto unopt_func = graph_->create(prim::BailoutTemplate)
                           ->insertAfter(graph_->param_node());
