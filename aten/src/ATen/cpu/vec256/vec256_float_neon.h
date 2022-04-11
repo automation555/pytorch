@@ -259,12 +259,12 @@ public:
   // Only required because vec256_qint refers to this.
   // Once we specialize that implementation for ARM
   // this should be removed. TODO (kimishpatel)
-  float operator[](int idx) const {
+  const float operator[](int idx) const {
     __at_align32__ float tmp[size()];
     store(tmp);
     return tmp[idx];
-  }
-  float operator[](int idx) {
+  };
+  const float operator[](int idx) {
     __at_align32__ float tmp[size()];
     store(tmp);
     return tmp[idx];
@@ -349,39 +349,6 @@ public:
     }
     return loadu(tmp);
   }
-  Vec256<float> hypot(const Vec256<float> &b) const {
-    __at_align32__ float tmp[size()];
-    __at_align32__ float tmp_b[size()];
-    store(tmp);
-    b.store(tmp_b);
-    for (int64_t i = 0; i < size(); i++) {
-      tmp[i] = std::hypot(tmp[i], tmp_b[i]);
-    }
-    return loadu(tmp);
-  }
-  Vec256<float> i0() const {
-    return map(calc_i0);
-  }
-  Vec256<float> igamma(const Vec256<float> &x) const {
-    __at_align32__ float tmp[size()];
-    __at_align32__ float tmp_x[size()];
-    store(tmp);
-    x.store(tmp_x);
-    for (int64_t i = 0; i < size(); i++) {
-      tmp[i] = calc_igamma(tmp[i], tmp_x[i]);
-    }
-    return loadu(tmp);
-  }
-  Vec256<float> igammac(const Vec256<float> &x) const {
-    __at_align32__ float tmp[size()];
-    __at_align32__ float tmp_x[size()];
-    store(tmp);
-    x.store(tmp_x);
-    for (int64_t i = 0; i < size(); i++) {
-      tmp[i] = calc_igammac(tmp[i], tmp_x[i]);
-    }
-    return loadu(tmp);
-  }
   Vec256<float> log() const {
     return map(std::log);
   }
@@ -394,19 +361,12 @@ public:
   Vec256<float> log2() const {
     return map(std::log2);
   }
-  Vec256<float> nextafter(const Vec256<float> &b) const {
-    __at_align32__ float tmp[size()];
-    __at_align32__ float tmp_b[size()];
-    store(tmp);
-    b.store(tmp_b);
-    for (int64_t i = 0; i < size(); i++) {
-      tmp[i] = std::nextafter(tmp[i], tmp_b[i]);
-    }
-    return loadu(tmp);
-  }
   Vec256<float> frac() const;
   Vec256<float> sin() const {
     return map(std::sin);
+  }
+  Vec256<float> sinc() const {
+    return map(std::sinc);
   }
   Vec256<float> sinh() const {
     return map(std::sinh);
@@ -452,23 +412,14 @@ public:
         vsqrtq_f32(values.val[1]));
   }
   Vec256<float> reciprocal() const {
-    float32x4_t r0 = vrecpeq_f32(values.val[0]);
-    float32x4_t r1 = vrecpeq_f32(values.val[1]);
-    // Run two more Netwon's method iterations to get more accurate results
-    r0 = vmulq_f32(vrecpsq_f32(values.val[0], r0), r0);
-    r0 = vmulq_f32(vrecpsq_f32(values.val[0], r0), r0);
-    r1 = vmulq_f32(vrecpsq_f32(values.val[1], r1), r1);
-    r1 = vmulq_f32(vrecpsq_f32(values.val[1], r1), r1);
-    return Vec256<float>(r0, r1);
+    return Vec256<float>(
+        vrecpeq_f32(values.val[0]),
+        vrecpeq_f32(values.val[1]));
   }
   Vec256<float> rsqrt() const {
-    float32x4_t r0 =  vrsqrteq_f32(values.val[0]);
-    float32x4_t r1 =  vrsqrteq_f32(values.val[1]);
-    r0 = vmulq_f32(vrsqrtsq_f32(vmulq_f32(values.val[0], r0), r0), r0);
-    r0 = vmulq_f32(vrsqrtsq_f32(vmulq_f32(values.val[0], r0), r0), r0);
-    r1 = vmulq_f32(vrsqrtsq_f32(vmulq_f32(values.val[1], r1), r1), r1);
-    r1 = vmulq_f32(vrsqrtsq_f32(vmulq_f32(values.val[1], r1), r1), r1);
-    return Vec256<float>(r0, r1);
+    return Vec256<float>(
+        vrsqrteq_f32(values.val[0]),
+        vrsqrteq_f32(values.val[1]));
   }
   Vec256<float> pow(const Vec256<float> &exp) const {
     __at_align32__ float tmp[size()];
@@ -604,10 +555,10 @@ Vec256<float> inline clamp_min(const Vec256<float>& a, const Vec256<float>& min)
 
 template <>
 Vec256<float> inline operator&(const Vec256<float>& a, const Vec256<float>& b) {
-  float32x4_t r0 = vreinterpretq_f32_u32(vandq_u32(
+  float32x4_t r0 = vreinterpretq_u32_f32(vandq_u32(
       vreinterpretq_u32_f32(a.get_low()),
       vreinterpretq_u32_f32(b.get_low())));
-  float32x4_t r1 = vreinterpretq_f32_u32(vandq_u32(
+  float32x4_t r1 = vreinterpretq_u32_f32(vandq_u32(
       vreinterpretq_u32_f32(a.get_high()),
       vreinterpretq_u32_f32(b.get_high())));
   return Vec256<float>(r0, r1);
@@ -615,10 +566,10 @@ Vec256<float> inline operator&(const Vec256<float>& a, const Vec256<float>& b) {
 
 template <>
 Vec256<float> inline operator|(const Vec256<float>& a, const Vec256<float>& b) {
-  float32x4_t r0 = vreinterpretq_f32_u32(vorrq_u32(
+  float32x4_t r0 = vreinterpretq_u32_f32(vorrq_u32(
       vreinterpretq_u32_f32(a.get_low()),
       vreinterpretq_u32_f32(b.get_low())));
-  float32x4_t r1 = vreinterpretq_f32_u32(vorrq_u32(
+  float32x4_t r1 = vreinterpretq_u32_f32(vorrq_u32(
       vreinterpretq_u32_f32(a.get_high()),
       vreinterpretq_u32_f32(b.get_high())));
   return Vec256<float>(r0, r1);
@@ -626,10 +577,10 @@ Vec256<float> inline operator|(const Vec256<float>& a, const Vec256<float>& b) {
 
 template <>
 Vec256<float> inline operator^(const Vec256<float>& a, const Vec256<float>& b) {
-  float32x4_t r0 = vreinterpretq_f32_u32(veorq_u32(
+  float32x4_t r0 = vreinterpretq_u32_f32(veorq_u32(
       vreinterpretq_u32_f32(a.get_low()),
       vreinterpretq_u32_f32(b.get_low())));
-  float32x4_t r1 = vreinterpretq_f32_u32(veorq_u32(
+  float32x4_t r1 = vreinterpretq_u32_f32(veorq_u32(
       vreinterpretq_u32_f32(a.get_high()),
       vreinterpretq_u32_f32(b.get_high())));
   return Vec256<float>(r0, r1);
@@ -694,6 +645,6 @@ Vec256<float> inline fmadd(const Vec256<float>& a, const Vec256<float>& b, const
   return Vec256<float>(r0, r1);
 }
 
-#endif /* defined(aarch64) */
+#endif
 
 }}}
