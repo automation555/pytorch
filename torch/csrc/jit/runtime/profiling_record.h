@@ -82,8 +82,6 @@ namespace jit {
 using ::c10::TensorTypePtr;
 using Dimension = int64_t;
 
-TORCH_API void RegisterProfilingNode(const std::function<bool(const Node*)>&);
-
 struct ProfilingRecord;
 
 // `SetPartitioningHelper` is used to maintain the following invariant:
@@ -181,6 +179,12 @@ struct ProfilingRecord {
   TORCH_API static void removeProfilingNodes(Block* b);
   TORCH_API static void removeProfileCounter(Block* b);
 
+  TORCH_API void insertProfileIValueOp(
+      Value* none_output,
+      std::function<IValue(const IValue& acc, const IValue& val)> combine,
+      const IValue& init,
+      const std::string& attr_name);
+
   std::shared_ptr<Graph> profiled_graph_;
   std::mutex mutex_;
   size_t profiling_count_;
@@ -204,15 +208,18 @@ struct ProfilingRecord {
     return profiled_graph_;
   }
 
-  TORCH_API ProfileIValueOp* createProfileIValueNode(Value* in_val);
-
  private:
   ProfileOp* createProfileNode(
+      const std::function<void(Stack&)>& fp,
+      at::ArrayRef<Value*> inputs);
+  ProfileOptionalOp* createProfileOptionalNode(
       const std::function<void(Stack&)>& fp,
       at::ArrayRef<Value*> inputs);
   void instrumentBlock(Block* block);
   void insertShapeProfile(Node* n, size_t offset);
   ProfilingRecord(std::shared_ptr<Graph> g);
+  void profileOptionalValue(Value* none_output);
+  void profileListValue(Value* none_output);
 };
 
 } // namespace jit

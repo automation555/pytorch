@@ -1,56 +1,15 @@
 #include <torch/csrc/jit/runtime/profiling_record.h>
-
 #include <ATen/core/interned_strings.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/clear_profiling.h>
 #include <torch/csrc/jit/passes/constant_propagation.h>
 #include <torch/csrc/jit/passes/tensorexpr_fuser.h>
-#include <torch/csrc/jit/runtime/autodiff.h>
 #include <torch/csrc/jit/runtime/graph_executor.h>
 #include <torch/csrc/jit/runtime/interpreter.h>
+#include "jit/ir/ir.h"
 
 namespace torch {
 namespace jit {
-
-namespace {
-
-class ProfileRegistry {
- public:
-  static ProfileRegistry* getRegistry() {
-    static ProfileRegistry profile_registry_;
-    return &profile_registry_;
-  }
-
-  void registerProfileNode(const std::function<bool(const Node*)>& func) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    registry_funcs_.push_back(func);
-  }
-
-  bool shouldProfileNode(const Node* node) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    // to guard differentiable graphs, we want profiling information
-    // (in particular requires_grad) for nodes handled by autodiff
-    if (isDifferentiable(node)) {
-      return true;
-    }
-    for (const auto& func : registry_funcs_) {
-      if (func(node)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
- private:
-  std::vector<std::function<bool(const Node*)>> registry_funcs_;
-  std::mutex mutex_;
-};
-
-} // namespace
-
-void RegisterProfilingNode(const std::function<bool(const Node*)>& func) {
-  ProfileRegistry::getRegistry()->registerProfileNode(func);
-}
 
 bool ShapeSymbolTable::bindSymbolicShapes(
     at::IntArrayRef new_sizes,
@@ -93,11 +52,16 @@ ProfileOp* ProfilingRecord::createProfileNode(
   return pn;
 }
 
-ProfileIValueOp* ProfilingRecord::createProfileIValueNode(Value* in_val) {
-  auto pn = new ProfileIValueOp(this->profiled_graph_.get(), nullptr);
-  pn->addInput(in_val);
-  auto pno = pn->addOutput();
-  pno->setType(in_val->type());
+ProfileOptionalOp* ProfilingRecord::createProfileOptionalNode(
+    const std::function<void(Stack&)>& fp,
+    at::ArrayRef<Value*> inputs) {
+  auto pn = new ProfileOptionalOp(profiled_graph_.get(), fp);
+  pn->i_(attr::num_present, 0);
+  pn->i_(attr::num_none, 0);
+
+  for (auto in : inputs) {
+    pn->addInput(in);
+  }
   return pn;
 }
 
@@ -153,6 +117,78 @@ c10::SymbolicShape ProfilingRecord::mergeSymbolicShapes(
   return c10::SymbolicShape(new_symbols);
 }
 
+void ProfilingRecord::profileOptionalValue(Value* none_output) {
+  c10::Dict<std::string, int64_t> noneCountsDict;
+  noneCountsDict.insert("num_none", 0);
+  noneCountsDict.insert("num_present", 0);
+  IValue init_val(noneCountsDict);
+
+  auto combine = [](const IValue& acc, const IValue& val) {
+    auto noneCounts =
+        c10::impl::toTypedDict<std::string, int64_t>(acc.toGenericDict());
+    if (val.isNone()) {
+      noneCounts.insert_or_assign("num_none", noneCounts.at("num_none") + 1);
+    } else {
+      noneCounts.insert_or_assign(
+          "num_present", noneCounts.at("num_present") + 1);
+    }
+    return IValue{noneCounts};
+  };
+  insertProfileIValueOp(none_output, combine, init_val, "none_counts");
+}
+
+void ProfilingRecord::profileListValue(Value* none_output) {
+
+  IValue init_val;
+
+  auto combine = [](const IValue& acc, const IValue& val) {
+    if (val.isNone()) {
+      return val;
+    } else if (acc == val) {
+        return acc;
+    } else {
+        return IValue{std::vector<int64_t>{}};
+    }
+  };
+  insertProfileIValueOp(none_output, combine, init_val, "axes_or_shape");
+}
+
+void ProfilingRecord::insertProfileIValueOp(
+    Value* none_output,
+    std::function<IValue(const IValue& acc, const IValue& val)> combine,
+    const IValue& init,
+    const std::string& attr_name) {
+  auto pn = new ProfileIValueOp(none_output->node()->owningGraph(), {nullptr});
+  pn->addInput(none_output);
+  auto pno = pn->addOutput();
+  pn->insertAfter(none_output->node());
+  none_output->replaceAllUsesAfterNodeWith(pn, pno);
+  pn->ival_(Symbol::attr(attr_name), init);
+  pno->setType(none_output->type());
+
+  std::function<void(Stack&)> wrapper =
+      [this, pn, combine, attr_name](Stack& stack) {
+        int64_t frame_id = 0;
+        pop(stack, frame_id);
+        IValue val;
+        pop(stack, val);
+        std::lock_guard<std::mutex> lock(this->mutex_);
+        auto old_val = pn->ival(Symbol::attr(attr_name));
+        auto new_val = combine(old_val, val);
+        pn->ival_(Symbol::attr(attr_name), new_val);
+        GRAPH_DEBUG(
+            "old_val = ",
+            old_val,
+            " val = ",
+            val,
+            "Combined value = ",
+            new_val);
+        push(stack, val);
+      };
+
+  pn->setCallback(wrapper);
+}
+
 void ProfilingRecord::insertShapeProfile(Node* n, size_t offset) {
   Value* i = n->input(offset);
   auto pn = createProfileNode(nullptr, {i});
@@ -167,7 +203,7 @@ void ProfilingRecord::insertShapeProfile(Node* n, size_t offset) {
     if (v.isTensor()) {
       std::lock_guard<std::mutex> lock(this->mutex_);
       auto& profiled_types = profiled_types_per_frame_[frame_id];
-      auto& t = v.toTensor();
+      auto t = v.toTensor();
       if (t.defined()) {
         auto pttp = tensorTypeInCurrentExecutionContext(t);
         GRAPH_DEBUG(
@@ -182,7 +218,7 @@ void ProfilingRecord::insertShapeProfile(Node* n, size_t offset) {
         } else {
           auto type = profiled_types.at(pno);
           GRAPH_DEBUG("Existing type for %", pno->debugName(), " ", *type);
-          pttp = type->merge(*pttp);
+          pttp = type->merge(pttp);
           GRAPH_DEBUG("Result for %", pno->debugName(), " ", *pttp);
           profiled_types[pno] = pttp;
         }
@@ -226,7 +262,7 @@ bool needsProfiledInputs(Node* n) {
     case aten::mm:
       return true;
     default:
-      return ProfileRegistry::getRegistry()->shouldProfileNode(n);
+      return false;
   }
 }
 
@@ -240,7 +276,7 @@ bool needsProfiledOutput(Node* n) {
     case prim::AutogradZero:
       return true;
     default:
-      return ProfileRegistry::getRegistry()->shouldProfileNode(n);
+      return false;
   }
 }
 
@@ -257,7 +293,23 @@ void ProfilingRecord::removeProfileCounter(Block* b) {
   }
 }
 
+bool hasKindUses(Value* v, NodeKind kind) {
+  return std::any_of(v->uses().begin(), v->uses().end(), [kind](const Use& use) {
+    return use.user->kind() == kind;
+  });
+}
+
+bool hasGradSumToSizeUses(Value* v) {
+  return hasKindUses(v, aten::_grad_sum_to_size);
+}
+
+bool hasSumUses(Value* v) {
+  return hasKindUses(v, aten::sum);
+}
+
+
 void ProfilingRecord::instrumentBlock(Block* block) {
+
   for (auto it = block->nodes().begin(); it != block->nodes().end(); ++it) {
     auto n = *it;
     for (size_t offset = 0; offset < n->inputs().size(); offset++) {
@@ -265,6 +317,21 @@ void ProfilingRecord::instrumentBlock(Block* block) {
       if (i->type()->kind() == c10::TypeKind::TensorType &&
           (needsProfiledInputs(n) || needsProfiledOutput(i->node()))) {
         insertShapeProfile(n, offset);
+      }
+
+      if (i->type()->cast<OptionalType>() && hasGradSumToSizeUses(i)) {
+        // here we are profile the definition instead of the use,
+        // because we are only optimizing in the case of a None value which is
+        // immutable
+        profileOptionalValue(i);
+      }
+
+      GRAPH_DEBUG("before %", i->debugName(), " isList ", (i->type()->cast<OptionalType>() || i->type()->cast<ListType>()), ", hasSumUses ", hasSumUses(i));
+      i = n->input(offset);
+      GRAPH_DEBUG("after %", i->debugName(), " isList ", (i->type()->cast<OptionalType>() || i->type()->cast<ListType>()), ", hasSumUses ", hasSumUses(i));
+      if ((i->type()->cast<OptionalType>() || i->type()->cast<ListType>()) && (hasSumUses(i) || hasGradSumToSizeUses(i))) {
+        // get a profiled optional
+        profileListValue(i);
       }
     }
 
@@ -289,7 +356,8 @@ void ProfilingRecord::instrumentBlock(Block* block) {
 
 void ProfilingRecord::removeProfilingNodes(Block* b) {
   for (auto it = b->nodes().begin(); it != b->nodes().end(); it++) {
-    if (it->kind() == prim::profile || it->kind() == prim::profile_ivalue) {
+    if (it->kind() == prim::profile || it->kind() == prim::profile_optional ||
+        it->kind() == prim::profile_ivalue) {
       it->output()->replaceAllUsesWith(it->input());
       it.destroyCurrent();
     } else {
@@ -328,7 +396,7 @@ std::unique_ptr<ProfilingRecord> ProfilingRecord::instrumentGraph(
           " records for run ",
           frame_id);
 
-      if (raw_pr->profiled_types_per_frame_.empty()) {
+      if (raw_pr->profiled_types_per_frame_.size() == 0) {
         return;
       }
 
@@ -339,17 +407,18 @@ std::unique_ptr<ProfilingRecord> ProfilingRecord::instrumentGraph(
       // and use it for building the symbol sets
       auto profiled_types_iter = raw_pr->profiled_types_per_frame_.begin();
       auto merged_profiled_types = profiled_types_iter->second;
-      ++profiled_types_iter;
+      profiled_types_iter++;
 
       // merge profiling information from next runs into the first one
       for (; profiled_types_iter != raw_pr->profiled_types_per_frame_.end();
-           ++profiled_types_iter) {
+           profiled_types_iter++) {
         SetPartitioningHelper partition_helper;
         for (const auto& val_type_pair : profiled_types_iter->second) {
-          auto insertion_result = merged_profiled_types.insert(val_type_pair);
-          if (!insertion_result.second) { // Already existed
-            const TensorType* type = insertion_result.first->second.get();
-            auto merged_type = type->merge(*val_type_pair.second);
+          if (merged_profiled_types.count(val_type_pair.first) == 0) {
+            merged_profiled_types[val_type_pair.first] = val_type_pair.second;
+          } else {
+            auto type = merged_profiled_types[val_type_pair.first];
+            auto merged_type = type->merge(val_type_pair.second);
             if (merged_type->sizes().size().has_value()) {
               auto new_shape = raw_pr->mergeSymbolicShapes(
                   val_type_pair.second->symbolic_sizes(),
@@ -362,12 +431,13 @@ std::unique_ptr<ProfilingRecord> ProfilingRecord::instrumentGraph(
                   profiled_types_iter->first,
                   " into ",
                   *type);
-              merged_type = type->withSymbolicShapes(std::move(new_shape));
+              merged_type = type->withSymbolicShapes(new_shape);
               GRAPH_DEBUG("Result : ", *merged_type);
-              insertion_result.first->second = std::move(merged_type);
+              merged_profiled_types[val_type_pair.first] = merged_type;
             } else {
               // reset symbolic shapes when ranks are different
-              insertion_result.first->second = std::move(merged_type);
+              type = type->merge(val_type_pair.second);
+              merged_profiled_types[val_type_pair.first] = type;
             }
           }
         }
