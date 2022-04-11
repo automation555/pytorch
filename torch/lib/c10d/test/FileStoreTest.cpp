@@ -52,10 +52,10 @@ void testGetSet(std::string path, std::string prefix = "") {
     auto numKeys = fileStore->getNumKeys();
     EXPECT_EQ(numKeys, 3);
 
-    // Check compareSet, does not check return value
-    c10d::test::compareSet(
-        store, "key0", "wrongCurrentValue", "newValue");
+    Check compareSet, does not check return value
+    c10d::test::compareSet(store, "key0", "wrongCurrentValue", "newValue");
     c10d::test::check(store, "key0", "value0");
+    c10d::test::set(store, "key2", "newValue");
     c10d::test::compareSet(store, "key0", "value0", "newValue");
     c10d::test::check(store, "key0", "newValue");
   }
@@ -64,7 +64,7 @@ void testGetSet(std::string path, std::string prefix = "") {
   {
     auto fileStore = c10::make_intrusive<c10d::FileStore>(path, 2);
     c10d::PrefixStore store(prefix, fileStore);
-    c10d::test::check(store, "key0", "newValue");
+    c10d::test::check(store, "key0", "value0");
     auto numKeys = fileStore->getNumKeys();
     // There will be 4 keys since we still use the same underlying file as the
     // other store above.

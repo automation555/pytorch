@@ -8,8 +8,6 @@
 #include <c10d/HashStore.hpp>
 #include <c10d/PrefixStore.hpp>
 
-constexpr int64_t kShortStoreTimeoutMillis = 100;
-
 void testGetSet(std::string prefix = "") {
   // Basic set/get
   {
@@ -28,7 +26,7 @@ void testGetSet(std::string prefix = "") {
     c10d::test::check(store, "key0", "value0");
     c10d::test::compareSet(store, "key0", "value0", "newValue");
     c10d::test::check(store, "key0", "newValue");
-
+    
     auto numKeys = store.getNumKeys();
     EXPECT_EQ(numKeys, 3);
     auto delSuccess = store.deleteKey("key0");
@@ -37,8 +35,6 @@ void testGetSet(std::string prefix = "") {
     EXPECT_EQ(numKeys, 2);
     auto delFailure = store.deleteKey("badKeyName");
     EXPECT_FALSE(delFailure);
-    auto timeout = std::chrono::milliseconds(kShortStoreTimeoutMillis);
-    store.setTimeout(timeout);
     EXPECT_THROW(store.get("key0"), std::runtime_error);
   }
 

@@ -288,6 +288,26 @@ FileStore::~FileStore() {
   }
 }
 
+std::vector<uint8_t> FileStore::compareSet(const std::string& key, const std::vector<uint8_t>& currentValue, const std::vector<uint8_t>& newValue) {
+  std::string regKey = regularPrefix_ + key;
+
+  std::unique_lock<std::mutex> l(activeFileOpLock_);
+  File file(path_, O_RDWR, timeout_);
+  auto lock = file.lockExclusive();
+  std::cout << path_;
+
+  pos_ = refresh(file, pos_, cache_);
+  if (cache_.count(regKey) == 0) {
+  	return currentValue;
+  } else if (cache_[regKey] == currentValue) {
+  	file.seek(pos_, SEEK_END);
+  	file.write(regKey);
+  	file.write(newValue);
+  	return newValue;
+  }
+  return cache_[regKey];
+}
+
 void FileStore::set(const std::string& key, const std::vector<uint8_t>& value) {
   std::string regKey = regularPrefix_ + key;
   std::unique_lock<std::mutex> l(activeFileOpLock_);
@@ -296,29 +316,6 @@ void FileStore::set(const std::string& key, const std::vector<uint8_t>& value) {
   file.seek(0, SEEK_END);
   file.write(regKey);
   file.write(value);
-}
-
-std::vector<uint8_t> FileStore::compareSet(
-    const std::string& key,
-    const std::vector<uint8_t>& currentValue,
-    const std::vector<uint8_t>& newValue) {
-  std::string regKey = regularPrefix_ + key;
-  std::unique_lock<std::mutex> l(activeFileOpLock_);
-  File file(path_, O_RDWR | O_CREAT, timeout_);
-  auto lock = file.lockExclusive();
-  // Always refresh since even though the key exists in the cache,
-  // it might be outdated
-  pos_ = refresh(file, pos_, cache_);
-  if (cache_.count(regKey) == 0) {
-    return currentValue;
-  }
-  else if (cache_[regKey] == currentValue){
-    file.seek(0, SEEK_END);
-    file.write(regKey);
-    file.write(newValue);
-    return newValue;
-  }
-  return cache_[regKey];
 }
 
 std::vector<uint8_t> FileStore::get(const std::string& key) {
