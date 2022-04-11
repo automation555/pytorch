@@ -1,6 +1,6 @@
+import base64
 import errno
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -39,9 +39,6 @@ except ImportError:
                 else:
                     sys.stderr.write("\r{0:.1f}%".format(100 * self.n / float(self.total)))
                 sys.stderr.flush()
-
-            def close(self):
-                self.disable = True
 
             def __enter__(self):
                 return self
@@ -84,8 +81,8 @@ def _remove_if_exists(path):
             shutil.rmtree(path)
 
 
-def _git_archive_link(repo_owner, repo_name, branch):
-    return 'https://github.com/{}/{}/archive/{}.zip'.format(repo_owner, repo_name, branch)
+def _git_archive_link(repo_owner, repo_name, branch, git_url="https://github.com"):
+    return '{}/{}/{}/archive/{}.zip'.format(git_url, repo_owner, repo_name, branch)
 
 
 def _load_attr_from_module(module, func_name):
@@ -109,19 +106,20 @@ def _parse_repo_info(github):
         repo_info, branch = github.split(':')
     else:
         repo_info = github
-    repo_owner, repo_name = repo_info.split('/')
-    return repo_owner, repo_name, branch
 
-def _validate_not_a_forked_repo(repo_owner, repo_name, branch):
-    # Use urlopen to avoid depending on local git.
-    url = f'https://api.github.com/repos/{repo_owner}/{repo_name}/branches'
-    with urlopen(url) as r:
-        response = json.loads(r.read().decode(r.headers.get_content_charset('utf-8')))
-    for br in response:
-        if br['name'] == branch or br['commit']['sha'].startswith(branch):
-            return
-    raise ValueError(f'Cannot find {branch} in https://github.com/{repo_owner}/{repo_name}. '
-                     'If it\'s a commit from a forked repo, please call hub.load() with forked repo directly.')
+    # Case 1: "repo_owner/repo_name"         --> git_url will be set "github.com" as default.
+    # Case 2: "git_url/repo_owner/repo_name" --> git_url will be parsed.
+    n_slash = repo_info.count('/')
+    if n_slash == 1:
+        repo_owner, repo_name = repo_info.split('/')
+        git_url = 'https://github.com'
+    elif n_slash == 2:
+        git_url, repo_owner, repo_name = repo_info.split('/')
+        git_url = 'https://{}'.format(git_url)
+    else:
+        raise ValueError(f"Only supported case with 1 or 2 slash, got github={github}")
+    return repo_owner, repo_name, branch, git_url
+
 
 def _get_cache_or_reload(github, force_reload, verbose=True):
     # Setup hub_dir to save downloaded files
@@ -129,8 +127,7 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
     if not os.path.exists(hub_dir):
         os.makedirs(hub_dir)
     # Parse github repo information
-    repo_owner, repo_name, branch = _parse_repo_info(github)
-
+    repo_owner, repo_name, branch, git_url = _parse_repo_info(github)
     # Github allows branch name with slash '/',
     # this causes confusion with path on both Linux and Windows.
     # Backslash is not allowed in Github branch name so no need to
@@ -148,13 +145,10 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
         if verbose:
             sys.stderr.write('Using cache found in {}\n'.format(repo_dir))
     else:
-        # Validate the tag/branch is from the original repo instead of a forked repo
-        _validate_not_a_forked_repo(repo_owner, repo_name, branch)
-
         cached_file = os.path.join(hub_dir, normalized_br + '.zip')
         _remove_if_exists(cached_file)
 
-        url = _git_archive_link(repo_owner, repo_name, branch)
+        url = _git_archive_link(repo_owner, repo_name, branch, git_url=git_url)
         sys.stderr.write('Downloading: \"{}\" to {}\n'.format(url, cached_file))
         download_url_to_file(url, cached_file, progress=False)
 
@@ -173,9 +167,43 @@ def _get_cache_or_reload(github, force_reload, verbose=True):
 
 
 def _check_module_exists(name):
-    import importlib.util
-    return importlib.util.find_spec(name) is not None
-
+    if sys.version_info >= (3, 4):
+        import importlib.util
+        return importlib.util.find_spec(name) is not None
+    elif sys.version_info >= (3, 3):
+        # Special case for python3.3
+        import importlib.find_loader
+        return importlib.find_loader(name) is not None
+    else:
+        # NB: Python2.7 imp.find_module() doesn't respect PEP 302,
+        #     it cannot find a package installed as .egg(zip) file.
+        #     Here we use workaround from:
+        #     https://stackoverflow.com/questions/28962344/imp-find-module-which-supports-zipped-eggs?lq=1
+        #     Also imp doesn't handle hierarchical module names (names contains dots).
+        try:
+            # 1. Try imp.find_module(), which searches sys.path, but does
+            # not respect PEP 302 import hooks.
+            import imp
+            result = imp.find_module(name)
+            if result:
+                return True
+        except ImportError:
+            pass
+        path = sys.path
+        for item in path:
+            # 2. Scan path for import hooks. sys.path_importer_cache maps
+            # path items to optional "importer" objects, that implement
+            # find_module() etc.  Note that path must be a subset of
+            # sys.path for this to work.
+            importer = sys.path_importer_cache.get(item)
+            if importer:
+                try:
+                    result = importer.find_module(name, [item])
+                    if result:
+                        return True
+                except ImportError:
+                    pass
+        return False
 
 def _check_dependencies(m):
     dependencies = _load_attr_from_module(m, VAR_DEPENDENCY)
@@ -403,9 +431,21 @@ def download_url_to_file(url, dst, hash_prefix=None, progress=True):
 
     """
     file_size = None
+
+    # Check environment variable, if both GIT_USER & GIT_PASSWORD are set, use basic
+    # authentification. It is necessary for private repository etc.
+    user = os.getenv("GIT_USER")
+    password = os.getenv("GIT_PASSWORD")
+
+    headers = {"User-Agent": "torch.hub"}
+    if user is not None and password is not None:
+        print("user", user, "password", password)
+        basic_user_and_pasword = base64.b64encode('{}:{}'.format(user, password).encode('utf-8'))
+        headers["Authorization"] = "Basic " + basic_user_and_pasword.decode('utf-8')
+
     # We use a different API for python2 since urllib(2) doesn't recognize the CA
     # certificates in older Python
-    req = Request(url, headers={"User-Agent": "torch.hub"})
+    req = Request(url, headers=headers)
     u = urlopen(req)
     meta = u.info()
     if hasattr(meta, 'getheaders'):
