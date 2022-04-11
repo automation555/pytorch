@@ -169,12 +169,6 @@ void BoundShapeInferencer::InferOps(
     InferTile(op);
   } else if (op.type() == "SparseLengthsSumSparseLookup") {
     InferSparseLengthsSumSparseLookup(op);
-  } else if (op.type() == "Softmax") {
-    InferSoftmax(op);
-  } else if (op.type() == "LpNorm") {
-    InferLpNorm(op);
-  } else if (op.type() == "Transpose") {
-    InferTranspose(op);
   } else {
     InferCommonOp(op);
   }
@@ -247,9 +241,6 @@ TensorShape& BoundShapeInferencer::CheckAndSetTensorBoundShape(
   auto rt = shape_info_.emplace(name, ShapeInfo());
   ShapeInfo& shape_info = rt.first->second;
   TensorShape& shape = shape_info.shape;
-  if (shape_info.getShapeIsFinal()) {
-    return shape;
-  }
   if (is_quantized) {
     shape_info.is_quantized = true;
     shape_info.q_info.scale.clear();
@@ -373,11 +364,11 @@ void BoundShapeInferencer::InferSparseLengthsSumSparseLookup(
       op.output_size(),
       1,
       "SparseLengthsSumSparseLookup must have more than 1 output");
-  if (shape_info_.find(op.input(2)) != shape_info_.end()) {
-    LOG(WARNING)
-        << "Shape of COMPRESSED_INDICES_MAPPING input of SparseLengthsSumSparseLookup "
-        << op.input(2) << " needs to be presented";
-  }
+  CAFFE_ENFORCE(
+      shape_info_.find(op.input(2)) != shape_info_.end(),
+      "Shape of COMPRESSED_INDICES_MAPPING input of SparseLengthsSumSparseLookup",
+      op.input(2),
+      " needs to be presented");
   for (int i = 0; i < 2; ++i) {
     const auto it = shape_info_.find(op.input(i));
     if (it != shape_info_.end()) {
@@ -907,80 +898,6 @@ void BoundShapeInferencer::InferTile(const OperatorDef& op) {
       false);
 }
 
-void BoundShapeInferencer::InferSoftmax(const OperatorDef& op) {
-  CAFFE_ENFORCE_EQ(op.input_size(), 1, op.type(), " must have 1 input");
-  CAFFE_ENFORCE_EQ(op.output_size(), 1, op.type(), " must have 1 output");
-
-  auto it = shape_info_.find(op.input(0));
-  if (it == shape_info_.end()) {
-    LOG(WARNING) << "Didn't find shape info for the input of Softmax";
-    return;
-  }
-
-  CheckAndSetTensorBoundShape(
-      op.output(0),
-      setDimTypeWithFirst(it->second.getDimType(0), it->second.shape.dims_size()),
-      ConvertToVec(it->second.shape.dims()),
-      it->second.shape.data_type(),
-      false);
-}
-
-void BoundShapeInferencer::InferLpNorm(const OperatorDef& op) {
-  CAFFE_ENFORCE_EQ(op.output_size(), 1, op.type(), " must have 1 output");
-  InferCommonOp(op);
-  auto it = shape_info_.find(op.output(0));
-  if (it != shape_info_.end()) {
-    it->second.setDimType(std::vector<TensorBoundShape::DimType>(
-        it->second.shape.dims_size(), TensorBoundShape_DimType_CONSTANT));
-  }
-}
-
-void BoundShapeInferencer::InferTranspose(const OperatorDef& op) {
-  CAFFE_ENFORCE_EQ(op.input_size(), 1, op.type(), " must have 1 input");
-  CAFFE_ENFORCE_EQ(op.output_size(), 1, op.type(), " must have 1 output");
-
-  auto it = shape_info_.find(op.input(0));
-  if (it == shape_info_.end()) {
-    LOG(WARNING) << "Didn't find shape info for the input of Softmax";
-    return;
-  }
-
-  ArgumentHelper helper(op);
-  std::vector<int> axes = helper.GetRepeatedArgument<int>("axes");
-  if (axes.empty()) {
-    // In this case it should be existing dims in reverse order
-    for (int i = it->second.shape.dims().size() - 1; i >= 0; --i) {
-      axes.push_back(i);
-    }
-  } else {
-    CAFFE_ENFORCE_EQ(
-        axes.size(),
-        it->second.shape.dims().size(),
-        op.type(),
-        " must specify all axes in Transpose."
-    );
-    auto valid_axes =
-        std::all_of(axes.begin(), axes.end(), [numDims = it->second.shape.dims().size()](int& axis) {
-          return axis >= 0 && axis < numDims;
-        });
-    CAFFE_ENFORCE(valid_axes, "Invalid axes were provided.");
-  }
-
-  std::vector<TensorBoundShape::DimType> dimTypes;
-  std::vector<int64_t> dims;
-  for (auto axis : axes) {
-    dimTypes.push_back(it->second.getDimType(axis));
-    dims.push_back(it->second.shape.dims()[axis]);
-  }
-
-  CheckAndSetTensorBoundShape(
-      op.output(0),
-      dimTypes,
-      dims,
-      it->second.shape.data_type(),
-      false);
-}
-
 void BoundShapeInferencer::InferCommonOp(
     const OperatorDef& op,
     const OpSchema* schema,
@@ -995,6 +912,8 @@ void BoundShapeInferencer::InferCommonOp(
             "Int8QuantSchemeBlobFill",
             "ComputeEqualizationScale",
             "Int8GenQuantParamsMinMax"};
+    const static std::unordered_set<std::string> pruning_ops = {
+        "RowwisePruneI64", "RowwisePruneI32"};
     std::vector<TensorShape> input_shapes;
     for (const auto& input : op.input()) {
       const auto it = shape_info_.find(input);
@@ -1069,7 +988,8 @@ void BoundShapeInferencer::InferCommonOp(
         continue;
       }
       auto tmp_dtype = infered_data_type;
-      if (infered_data_type == TensorProto::UNDEFINED) {
+      if (infered_data_type == TensorProto::UNDEFINED ||
+          pruning_ops.find(op.type()) != pruning_ops.end()) {
         infered_data_type = shape.data_type();
       }
       CheckAndSetTensorBoundShape(
