@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/frontend/schema_matching.h>
-
 #include <ATen/core/jit_type.h>
 #include <torch/csrc/jit/frontend/builtin_functions.h>
 #include <torch/csrc/jit/frontend/error_report.h>
@@ -46,6 +45,10 @@ inline bool convertibleToList(const TypePtr& type, const TypePtr& list_type_) {
           return t->isSubtypeOf(list_type->getElementType());
         });
   }
+  if (auto vltuple = type->cast<VariableLengthTupleType>()) {
+    return vltuple->getElementType()->isSubtypeOf(list_type->getElementType());
+  }
+
   return false;
 }
 
@@ -67,12 +70,12 @@ Value* tryConvertToType(
   }
 
   if (auto value_tuple = value->type()->cast<TupleType>()) {
+    auto unwrapped_type = unwrapOptional(concrete_type);
     // Allow homogeneous tuples to be casted implicitly to lists of appropriate
     // types
-    if (convertibleToList(value->type(), unwrapOptional(concrete_type))) {
+    if (convertibleToList(value->type(), unwrapped_type)) {
       auto unpacked = createTupleUnpack(value);
-      auto elem_type =
-          unwrapOptional(concrete_type)->expectRef<ListType>().getElementType();
+      auto elem_type = unwrapped_type->expect<ListType>()->getElementType();
       value = graph.insertNode(graph.createList(elem_type, unpacked))->output();
     }
 
@@ -95,20 +98,29 @@ Value* tryConvertToType(
     }
   }
 
+#if 0
+  if (auto value_tuple = value->type()->cast<VariableLengthTupleType>()) {
+    auto unwrapped_type = unwrapOptional(concrete_type);
+    // Allow homogeneous tuples to be casted implicitly to lists of appropriate
+    if (convertibleToList(value->type(), unwrapped_type)) {
+      auto unpacked = createTupleUnpack(value);
+      auto elem_type = unwrapped_type->expect<ListType>()->getElementType();
+      value = graph.insertNode(graph.createList(elem_type, unpacked))->output();
+    }
+  }
+#endif
+
   // implicit conversions
   if (allow_conversions) {
     // Convert tensor or number to concrete int/float types
     bool value_isa_tensor = value->type()->isSubtypeOf(TensorType::get());
     bool value_equals_number = *value->type() == *NumberType::get();
     bool concrete_float = *concrete_type == *FloatType::get();
-    bool concrete_complex = *concrete_type == *ComplexType::get();
     bool concrete_int = *concrete_type == *IntType::get();
     bool concrete_number = *concrete_type == *NumberType::get();
     if (value_isa_tensor) {
       if (concrete_float) {
         value = graph.insert(aten::FloatImplicit, {value}, {}, loc);
-      } else if (concrete_complex) {
-        value = graph.insert(aten::ComplexImplicit, {value}, {}, loc);
       } else if (concrete_int) {
         value = graph.insert(aten::IntImplicit, {value}, {}, loc);
       } else if (concrete_number) {
@@ -117,8 +129,6 @@ Value* tryConvertToType(
     } else if (value_equals_number) {
       if (concrete_float) {
         value = graph.insert(aten::Float, {value}, {}, loc);
-      } else if (concrete_complex) {
-        value = graph.insert(aten::Complex, {value}, {}, loc);
       } else if (concrete_int) {
         value = graph.insert(aten::Int, {value}, {}, loc);
       }
@@ -280,7 +290,7 @@ static bool varargsCanBeUsedAsList(
 
   // matching varargs of typevar list nyi
   bool typevar_list = argument_is_list &&
-      arg.type()->castRaw<ListType>()->getElementType()->cast<VarType>();
+      arg.type()->cast<ListType>()->getElementType()->cast<VarType>();
 
   // it must not be a broadcasting list like int[3],
   // otherwise a single int is a valid input
@@ -288,19 +298,6 @@ static bool varargsCanBeUsedAsList(
 
   return is_last_argument && argument_is_list && !arg_is_broadcasting_list &&
       !typevar_list;
-}
-
-// Note (@zasdfgbnm):
-// This is a workaround for https://github.com/pytorch/pytorch/issues/47964
-// Currently JIT does not distinguish ScalarType vs int, so there is really
-// no way to distinguish x.view(1) vs x.view(torch.int8). So we have to hardcode
-// the aten::view.dtype here to block this overload. This blocklist should be
-// removed when JIT fully suports ScalarType as its own type.
-bool isBlockListedSchema(const FunctionSchema& schema) {
-  if (schema.name() == "aten::view" && schema.overload_name() == "dtype") {
-    return true;
-  }
-  return false;
 }
 
 static c10::optional<MatchedSchema> tryMatchSchema(
@@ -312,10 +309,6 @@ static c10::optional<MatchedSchema> tryMatchSchema(
     c10::optional<NamedValue> self,
     std::ostream* failure_messages,
     bool allow_conversions) {
-  if (isBlockListedSchema(schema)) {
-    return c10::nullopt;
-  }
-
   auto err = [&]() -> std::ostream& {
     *failure_messages << "\n" << schema << ":\n";
     return *failure_messages;
@@ -345,9 +338,8 @@ static c10::optional<MatchedSchema> tryMatchSchema(
         // The actual cannot already be a list
         if (actual_type->kind() != TypeKind::ListType &&
             !convertibleToList(actual_type, unwrapOptional(arg.type()))) {
-          auto formal_type = unwrapOptional(arg.type())
-                                 ->expectRef<ListType>()
-                                 .getElementType();
+          auto formal_type =
+              unwrapOptional(arg.type())->expect<ListType>()->getElementType();
 
           Value* list = tryCreateList(
               formal_type,
@@ -461,10 +453,9 @@ static c10::optional<MatchedSchema> tryMatchSchema(
     return_field_names =
         fmap(returns, [&](const Argument& r) { return r.name(); });
   }
-  return MatchedSchema{
-      std::move(positional_inputs),
-      std::move(return_types),
-      std::move(return_field_names)};
+  return MatchedSchema{std::move(positional_inputs),
+                       std::move(return_types),
+                       std::move(return_field_names)};
 }
 
 MatchedSchema matchSchema(
@@ -544,7 +535,7 @@ std::pair<size_t, MatchedSchema> matchSchemas(
           render_errors ? &failure_messages : nullptr,
           allow_conversions);
       if (matched_schema) {
-        return std::make_pair(i, *matched_schema);
+        return std::make_pair(i, std::move(*matched_schema));
       }
     }
   }
@@ -576,8 +567,8 @@ static Value* packOutputs(
   TupleTypePtr named_tuple = nullptr;
   if (field_names) {
     auto types = fmap(values, [](Value* v) { return v->type(); });
-    named_tuple =
-        TupleType::createNamed(c10::nullopt, field_names.value(), types);
+    named_tuple = TupleType::createNamed(
+        c10::nullopt, field_names.value(), std::move(types));
   }
   return g.insertNode(g.createTuple(values, named_tuple))->output();
 }
@@ -609,15 +600,14 @@ Value* emitBuiltinCall(
     const SourceRange& loc,
     Graph& graph,
     Symbol name,
-    at::ArrayRef<NamedValue> args,
-    at::ArrayRef<NamedValue> kwargs,
+    at::ArrayRef<NamedValue> inputs,
+    at::ArrayRef<NamedValue> attributes,
     const c10::optional<NamedValue>& self) {
   const auto& variants = getAllOperatorsFor(name);
   const auto& builtin_functions = getAllBuiltinFunctionsFor(name);
 
   std::stringstream failure_messages;
   std::vector<const FunctionSchema*> schemas;
-  schemas.reserve(variants.size());
   for (const std::shared_ptr<Operator>& op : variants) {
     schemas.push_back(&op->schema());
   }
@@ -646,7 +636,7 @@ Value* emitBuiltinCall(
     throw error;
   }
 
-  auto matched = matchSchemas(schemas, loc, graph, args, kwargs, self);
+  auto matched = matchSchemas(schemas, loc, graph, inputs, attributes, self);
 
   if (matched.first < variants.size()) {
     return emitBuiltinNode(matched.second, loc, graph, name);

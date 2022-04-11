@@ -1,5 +1,4 @@
 #include <torch/csrc/jit/frontend/script_type_parser.h>
-
 #include <torch/csrc/jit/frontend/parser.h>
 #include <torch/csrc/jit/ir/ir.h>
 #include <torch/custom_class.h>
@@ -27,21 +26,17 @@ TypePtr ScriptTypeParser::subscriptToType(
     const std::string& typeName,
     const Subscript& subscript) const {
   if (typeName == "Tuple") {
-    if (subscript.subscript_exprs().size() == 1 &&
-        subscript.subscript_exprs()[0].kind() == TK_TUPLE_LITERAL) {
-      // `typing.Tuple` special cases syntax for empty tuple annotations,
-      // i.e. `typing.Tuple[()]`. Allow for parsing an empty tuple literal
-      // here. See https://docs.python.org/3/library/typing.html#typing.Tuple
-      auto tup_literal = TupleLiteral(subscript.subscript_exprs()[0]);
-      if (tup_literal.inputs().size() > 0) {
-        throw ErrorReport(tup_literal.range())
-            << "Tuple literal in Tuple type annotation must not "
-            << "have any elements!";
+    auto subscript_exprs = subscript.subscript_exprs();
+    // Arbitrary-length homogeneous tuple as defined in PEP-484
+    if (subscript_exprs.size() == 2) {
+      auto second_kind = subscript_exprs[1].kind();
+      if (second_kind == TK_DOTS || second_kind == TK_ELLIPSIS) {
+        auto elem_type = parseTypeFromExprImpl(subscript_exprs[0]);
+        return VariableLengthTupleType::create(elem_type);
       }
-      return TupleType::create({});
     }
     std::vector<TypePtr> subscript_expr_types;
-    for (auto expr : subscript.subscript_exprs()) {
+    for (auto expr : subscript_exprs) {
       subscript_expr_types.push_back(parseTypeFromExprImpl(expr));
     }
     return TupleType::create(subscript_expr_types);
@@ -83,30 +78,6 @@ TypePtr ScriptTypeParser::subscriptToType(
     auto elem_type =
         parseTypeFromExprImpl(*subscript.subscript_exprs().begin());
     return RRefType::create(elem_type);
-  } else if (typeName == "Union") {
-    // In Python 3.9+, Union[NoneType, T] or Union[T, NoneType] are
-    // treated as Optional[T]. Adding the same support for Union in Torchscript.
-    const char* const err =
-        "General Union types are not currently supported."
-        " Only Union[T, NoneType] (i.e. Optional[T]) is "
-        "supported.";
-    if (subscript.subscript_exprs().size() != 2) {
-      throw ErrorReport(subscript) << (err);
-    }
-    auto first_type = parseTypeFromExprImpl(subscript.subscript_exprs()[0]);
-    auto second_type = parseTypeFromExprImpl(subscript.subscript_exprs()[1]);
-
-    bool first_none = first_type == NoneType::get();
-    bool second_none = second_type == NoneType::get();
-
-    if (first_none && !second_none) {
-      return OptionalType::create(second_type);
-    } else if (!first_none && second_none) {
-      return OptionalType::create(first_type);
-    } else {
-      throw ErrorReport(subscript.range()) << err;
-    }
-
   } else if (typeName == "Dict") {
     if (subscript.subscript_exprs().size() != 2) {
       throw ErrorReport(subscript)
@@ -124,22 +95,6 @@ TypePtr ScriptTypeParser::subscriptToType(
 
 c10::optional<std::pair<TypePtr, int32_t>> ScriptTypeParser::parseBroadcastList(
     const Expr& expr) const {
-  // Alias torch.nn._common_types._size_?_t to BroadcastingList?[int]
-  if (expr.kind() == TK_VAR) {
-    auto var = Var(expr);
-    auto& name = var.name().name();
-    constexpr auto _size_prefix = "_size_";
-    constexpr auto _size_suffix = "_t";
-    constexpr auto _size_n_len = 9; // strlen("_size_X_t")
-    constexpr auto _size_prefix_len = 6; // strlen("_size_");
-    if (name.find(_size_prefix) == 0 && name.length() == _size_n_len &&
-        name.find(_size_suffix) == _size_prefix_len + 1 &&
-        ::isdigit(name[_size_prefix_len])) {
-      int n = name[_size_prefix_len] - '0';
-      return std::pair<TypePtr, int32_t>(ListType::create(IntType::get()), n);
-    }
-  }
-
   if (expr.kind() != TK_SUBSCRIPT)
     return c10::nullopt;
   auto subscript = Subscript(expr);
@@ -203,26 +158,15 @@ c10::optional<std::string> ScriptTypeParser::parseBaseTypeName(
     case TK_NONE: {
       return "None";
     }
-    case TK_NONE_TYPE: {
-      return "NoneType";
+    case TK_STRINGLITERAL: {
+      return StringLiteral(expr).text();
     }
     case '.': {
       auto select = Select(expr);
       const std::string& name = select.selector().name();
-      // Special case for torch.Tensor and its' subclasses
-      const std::unordered_set<std::string> tensor_subtypes = {
-          "Tensor",
-          "LongTensor",
-          "FloatTensor",
-          "DoubleTensor",
-          "IntTensor",
-          "ShortTensor",
-          "HalfTensor",
-          "CharTensor",
-          "ByteTensor",
-          "BoolTensor"};
-      if (isTorch(select.value()) && tensor_subtypes.count(name) == 1) {
-        return name;
+      // Special case for torch.Tensor
+      if (isTorch(select.value()) && name == "Tensor") {
+        return "Tensor";
       } else {
         // Otherwise, it's a fully qualified class name
         return collectQualname(select);
@@ -255,39 +199,6 @@ TypePtr ScriptTypeParser::parseTypeFromExprImpl(const Expr& expr) const {
     }
     return subscriptToType(*value_name, subscript);
 
-  } else if (expr.kind() == TK_STRINGLITERAL) {
-    const auto& type_name = StringLiteral(expr).text();
-
-    // Check if the type is a custom class. This is done by checking
-    // if type_name starts with "torch.classes."
-    if (type_name.find("torch.classes.") == 0) {
-      auto custom_class_type = getCustomClass("__torch__." + type_name);
-      return custom_class_type;
-    }
-
-    // `torch.cuda.Stream` and `torch.cuda.Event` are aliased as
-    // custom classes of type torch.classes.cuda.Stream and
-    // torch.classes.cuda.Event respectively. Return the respective
-    // custom class types for these two cases.
-    if (type_name.find("torch.cuda.Stream") == 0) {
-      auto custom_class_type =
-          getCustomClass("__torch__.torch.classes.cuda.Stream");
-      return custom_class_type;
-    }
-
-    if (type_name.find("torch.cuda.Event") == 0) {
-      auto custom_class_type =
-          getCustomClass("__torch__.torch.classes.cuda.Event");
-      return custom_class_type;
-    }
-
-    if (resolver_) {
-      if (auto typePtr = resolver_->resolveType(type_name, expr.range())) {
-        return typePtr;
-      }
-    }
-
-    throw ErrorReport(expr) << "Unknown type name '" << type_name << "'";
   } else if (auto name = parseBaseTypeName(expr)) {
     auto itr = string_to_type_lut().find(*name);
     if (itr != string_to_type_lut().end()) {
