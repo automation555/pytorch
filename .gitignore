@@ -14,9 +14,6 @@ coverage.xml
 .gradle
 .hypothesis
 .mypy_cache
-/.shellcheck_generated/
-**/.pytorch-test-times
-**/.pytorch-slow-tests
 */*.pyc
 */*.so*
 */**/__pycache__
@@ -68,12 +65,7 @@ torch/csrc/autograd/generated/*
 # Listed manually because some files in this directory are not generated
 torch/testing/_internal/generated/annotated_fn_args.py
 torch/testing/_internal/data/*.pt
-torch/csrc/api/include/torch/version.h
 torch/csrc/cudnn/cuDNN.cpp
-torch/csrc/deploy/example/generated
-torch/csrc/deploy/interpreter/cpython
-torch/csrc/deploy/interpreter/frozen
-torch/csrc/deploy/interpreter/third_party/typing_extensions.py
 torch/csrc/generated
 torch/csrc/generic/TensorMethods.cpp
 torch/csrc/jit/generated/*
@@ -108,12 +100,12 @@ torch/share/
 torch/test/
 torch/utils/benchmark/utils/valgrind_wrapper/callgrind.h
 torch/utils/benchmark/utils/valgrind_wrapper/valgrind.h
+torch/utils_backport/
 torch/version.py
 # Root level file used in CI to specify certain env configs.
 # E.g., see .circleci/config.yaml
 env
 .circleci/scripts/COMMIT_MSG
-scripts/release_notes/*.json
 
 # IPython notebook checkpoints
 .ipynb_checkpoints
@@ -175,9 +167,6 @@ docs/source/scripts/activation_images/
 *.swo
 *.swp
 *~
-
-# NFS handle files
-**/.nfs*
 
 # Sublime Text settings
 *.sublime-workspace
@@ -243,7 +232,6 @@ caffe2/version.py
 # setup.py intermediates
 .eggs
 caffe2.egg-info
-MANIFEST
 
 # Atom/Watchman required file
 .watchmanconfig
