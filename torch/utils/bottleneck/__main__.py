@@ -1,9 +1,9 @@
+"""modify torch profile"""
 import argparse
 import cProfile
 import pstats
 import sys
 import os
-from typing import Dict
 
 import torch
 from torch.autograd import profiler
@@ -36,7 +36,7 @@ def run_env_analysis():
     print('Running environment analysis...')
     info = get_env_info()
 
-    result: Dict[str, str] = dict()
+    result = []
 
     debug_str = ''
     if info.is_debug_build:
@@ -85,7 +85,10 @@ cprof_summary = """
 
 
 def print_cprofile_summary(prof, sortby='tottime', topk=15):
-    print(cprof_summary)
+    result = {}
+
+    print(cprof_summary.format(**result))
+
     cprofile_stats = pstats.Stats(prof).sort_stats(sortby)
     cprofile_stats.print_stats(topk)
 
@@ -181,9 +184,9 @@ def main():
     scriptfile = args.scriptfile
     scriptargs = [] if args.args is None else args.args
     scriptargs.insert(0, scriptfile)
-    cprofile_sortby = 'tottime'
+    cprofile_sortby = os.environ.get("CPROFILE_SORTBY", 'tottime')
     cprofile_topk = 15
-    autograd_prof_sortby = 'cpu_time_total'
+    autograd_prof_sortby = os.environ.get("AUTOGRAD_PROF_SORTBY", 'cpu_time_total')
     autograd_prof_topk = 15
 
     redirect_argv(scriptargs)
@@ -224,6 +227,7 @@ def main():
             print_autograd_prof_summary(autograd_prof_cpu, 'CPU', autograd_prof_sortby, autograd_prof_topk)
 
     print_autograd_prof_summary(autograd_prof_cuda, 'CUDA', autograd_prof_sortby, autograd_prof_topk)
+
 
 if __name__ == '__main__':
     main()
