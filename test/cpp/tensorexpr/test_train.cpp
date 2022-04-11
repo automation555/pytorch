@@ -1,12 +1,13 @@
-#include <gtest/gtest.h>
-
+#include "test/cpp/tensorexpr/test_train.h"
 #include "test/cpp/tensorexpr/padded_buffer.h"
 #include "test/cpp/tensorexpr/test_base.h"
-#include "test/cpp/tensorexpr/test_train.h"
 #include "test/cpp/tensorexpr/test_utils.h"
+#include "torch/csrc/jit/tensorexpr/buffer.h"
 #include "torch/csrc/jit/tensorexpr/eval.h"
+#include "torch/csrc/jit/tensorexpr/function.h"
 #include "torch/csrc/jit/tensorexpr/ir.h"
 #include "torch/csrc/jit/tensorexpr/ir_printer.h"
+#include "torch/csrc/jit/tensorexpr/llvm_codegen.h"
 #include "torch/csrc/jit/tensorexpr/loopnest.h"
 #include "torch/csrc/jit/tensorexpr/tensor.h"
 
@@ -37,18 +38,27 @@ struct T {
   T operator-(const T& other) {
     return T(call("sub", {vt_, other})[0]);
   }
+  T operator-() {
+    return T(call("neg", {vt_})[0]);
+  }
+  T exp() {
+    return T(call("exp", {vt_})[0]);
+  }
   T sum() {
     return T(call("sum", {vt_})[0]);
   }
   T broadcast_like(const T& other) {
     return T(call("broadcast", {vt_, other})[0]);
   }
+  T mm(const T& other) {
+    return T(call("matmul", {vt_, other})[0]);
+  }
   T grad(const T& param, const T& jacob) {
     return T(::grad(vt_, param, jacob));
   }
 };
 
-TEST(Train, TrainBasic) {
+void testTrainBasic() {
   {
     VGraph graph;
     auto A = graph.create_tensor({"K"});
@@ -56,7 +66,7 @@ TEST(Train, TrainBasic) {
     auto C = call("mul", {A, B})[0];
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -85,7 +95,7 @@ TEST(Train, TrainBasic) {
     auto dA = grad(D, A, ones);
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -117,7 +127,7 @@ TEST(Train, TrainBasic) {
     auto C = A + B;
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -146,7 +156,7 @@ TEST(Train, TrainBasic) {
     auto dA = D.grad(A, ones);
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -181,7 +191,7 @@ TEST(Train, TrainBasic) {
     auto dC = (C * C).grad(B, ones);
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -209,7 +219,7 @@ TEST(Train, TrainBasic) {
     auto X = T(g, {"K"});
     auto Y = X.sum();
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -229,7 +239,7 @@ TEST(Train, TrainBasic) {
     auto Y = X.sum();
     auto Z = Y.broadcast_like(X);
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -241,6 +251,59 @@ TEST(Train, TrainBasic) {
     std::vector<float> Z_vec(N, 0.0f);
     cg.call({X_vec.data(), Z_vec.data(), N});
     assertAllEqual(Z_vec, 2048.f);
+  }
+
+  {
+    VGraph g;
+    auto X = T(g, {"K"});
+    auto ones = T(g, {"K"});
+    auto sigmoid = ones / (ones + (-X).exp());
+    // swish
+    auto Y = X * sigmoid;
+    Stmt* s;
+    std::map<const VTensor*, Buffer> inputs;
+    std::map<const VTensor*, Tensor*> bindings;
+    std::map<std::string, VarHandle> vbindings;
+
+    KernelScope kernel_scope;
+    std::tie(s, inputs, bindings, vbindings) = to_tensorexpr(g, {Y});
+    SimpleIREvaluator cg(
+        s, {inputs.at(X), inputs.at(ones), bindings.at(Y), vbindings.at("K")});
+    auto N = 32;
+    std::vector<float> X_vec(N, 5.0f);
+    std::vector<float> ones_vec(N, 1.0f);
+    std::vector<float> Y_vec(N, 0.0f);
+    cg.call({X_vec.data(), ones_vec.data(), Y_vec.data(), N});
+    for (auto i = 0; i < N; ++i) {
+      ASSERT_LT(std::abs(Y_vec[i] - 4.96654), 0.001);
+    }
+  }
+
+  {
+    VGraph g;
+    auto X = T(g, {"K"});
+    auto ones = T(g, {"K"});
+    auto sigmoid = ones / (ones + (-X).exp());
+    auto swish = X * sigmoid;
+    auto Y = swish.grad(X, ones);
+    Stmt* s;
+    std::map<const VTensor*, Buffer> inputs;
+    std::map<const VTensor*, Tensor*> bindings;
+    std::map<std::string, VarHandle> vbindings;
+
+    KernelScope kernel_scope;
+    std::tie(s, inputs, bindings, vbindings) = to_tensorexpr(g, {Y});
+    SimpleIREvaluator cg(
+        s, {inputs.at(X), inputs.at(ones), bindings.at(Y), vbindings.at("K")});
+    auto N = 32;
+    std::vector<float> X_vec(N, 5.0f);
+    std::vector<float> ones_vec(N, 1.0f);
+    std::vector<float> Y_vec(N, 0.0f);
+    cg.call({X_vec.data(), ones_vec.data(), Y_vec.data(), N});
+    // from wolfram alpha
+    for (auto i = 0; i < N; ++i) {
+      ASSERT_FLOAT_EQ(Y_vec[i], 1.026547432f);
+    }
   }
 
   // Linear regression
@@ -266,7 +329,7 @@ TEST(Train, TrainBasic) {
     auto new_W = W - W_grad;
 
     Stmt* s;
-    std::map<const VTensor*, Placeholder> inputs;
+    std::map<const VTensor*, Buffer> inputs;
     std::map<const VTensor*, Tensor*> bindings;
     std::map<std::string, VarHandle> vbindings;
 
@@ -304,20 +367,81 @@ TEST(Train, TrainBasic) {
 
     for (auto i = 0; i < 100; ++i) {
       std::generate(X_.begin(), X_.end(), gen);
-      cg.call(
-          {X_.data(),
-           W_ref_.data(),
-           W_.data(),
-           one_.data(),
-           K_.data(),
-           LR_.data(),
-           W_.data(),
-           N});
+      cg.call({X_.data(),
+               W_ref_.data(),
+               W_.data(),
+               one_.data(),
+               K_.data(),
+               LR_.data(),
+               W_.data(),
+               N});
     }
     // Less than 1% difference after running regression
     for (auto i = 0; i < W_.size(); ++i) {
       assert(std::abs(W_[i] - W_ref_[i]) < 0.01);
     }
+  }
+
+  // Higher dimensional operations
+  {
+    VGraph g;
+    auto X = T(g, {"M", "K"});
+    auto W = T(g, {"K", "N"});
+    auto Z = X.mm(W);
+    Stmt* s;
+    std::map<const VTensor*, Buffer> inputs;
+    std::map<const VTensor*, Tensor*> bindings;
+    std::map<std::string, VarHandle> vbindings;
+
+    KernelScope kernel_scope;
+    std::tie(s, inputs, bindings, vbindings) = to_tensorexpr(g, {Z});
+    SimpleIREvaluator cg(
+        s,
+        {inputs.at(X),
+         inputs.at(W),
+         bindings.at(Z),
+         vbindings.at("M"),
+         vbindings.at("N"),
+         vbindings.at("K")});
+    auto M = 16;
+    auto N = 16;
+    auto K = 16;
+    std::vector<float> X_vec(M * K, 2.0f);
+    std::vector<float> W_vec(K * N, 3.0f);
+    std::vector<float> Z_vec(M * N, 0.0f);
+    cg.call({X_vec.data(), W_vec.data(), Z_vec.data(), M, N, K});
+    assertAllEqual(Z_vec, 6.f * K);
+  }
+
+  // Transpose
+  {
+    VGraph g;
+    auto X = T(g, {"M", "K"});
+    auto W = T(g, {"N", "K"});
+    auto Z = X.mm(W);
+    Stmt* s;
+    std::map<const VTensor*, Buffer> inputs;
+    std::map<const VTensor*, Tensor*> bindings;
+    std::map<std::string, VarHandle> vbindings;
+
+    KernelScope kernel_scope;
+    std::tie(s, inputs, bindings, vbindings) = to_tensorexpr(g, {Z});
+    SimpleIREvaluator cg(
+        s,
+        {inputs.at(X),
+         inputs.at(W),
+         bindings.at(Z),
+         vbindings.at("M"),
+         vbindings.at("N"),
+         vbindings.at("K")});
+    auto M = 16;
+    auto N = 16;
+    auto K = 16;
+    std::vector<float> X_vec(M * K, 2.0f);
+    std::vector<float> W_vec(K * N, 3.0f);
+    std::vector<float> Z_vec(M * N, 0.0f);
+    cg.call({X_vec.data(), W_vec.data(), Z_vec.data(), M, N, K});
+    assertAllEqual(Z_vec, 6.f * K);
   }
 }
 } // namespace jit
