@@ -8,6 +8,7 @@
 #endif
 
 #include <ATen/Context.h>
+#include <ATen/Exceptions.h>
 #include <c10/util/Exception.h>
 #include <c10/cuda/CUDAException.h>
 
@@ -65,17 +66,12 @@ const char *cusparseGetErrorString(cusparseStatus_t status);
 // cusolver related headers are only supported on cuda now
 #ifdef CUDART_VERSION
 
-namespace at { namespace cuda { namespace solver {
-const char* cusolverGetErrorMessage(cusolverStatus_t status);
-}}} // namespace at::cuda::solver
-
-#define TORCH_CUSOLVER_CHECK(EXPR)                                \
-  do {                                                            \
-    cusolverStatus_t __err = EXPR;                                \
-    TORCH_CHECK(__err == CUSOLVER_STATUS_SUCCESS,                 \
-                "cusolver error: ",                               \
-                at::cuda::solver::cusolverGetErrorMessage(__err), \
-                ", when calling `" #EXPR "`");                    \
+#define TORCH_CUSOLVER_CHECK(EXPR)                              \
+  do {                                                          \
+    cusolverStatus_t __err = EXPR;                              \
+    TORCH_CHECK(__err == CUSOLVER_STATUS_SUCCESS,               \
+                "cusolver error: ", __err,                      \
+                ", when calling `" #EXPR "`");                  \
   } while (0)
 
 #else
