@@ -31,7 +31,7 @@ Tensors
 .. _tensor-creation-ops:
 
 Creation Ops
-~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~
 
 .. note::
     Random sampling creation ops are listed under :ref:`random-sampling` and
@@ -76,8 +76,6 @@ Creation Ops
     complex
     polar
     heaviside
-
-.. _indexing-slicing-joining:
 
 Indexing, Slicing, Joining, Mutating Ops
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -467,6 +465,7 @@ Other Operations
     cdist
     clone
     combinations
+    cov
     cross
     cummax
     cummin

@@ -614,19 +614,22 @@ See :func:`torch.bernoulli`
 
 add_docstr_all('bernoulli_',
                r"""
-bernoulli_(p=0.5, *, generator=None) -> Tensor
+.. function:: bernoulli_(p=0.5, *, generator=None) -> Tensor
 
-Fills each location of :attr:`self` with an independent sample from
-:math:`\text{Bernoulli}(\texttt{p})`. :attr:`self` can have integral
-``dtype``.
+    Fills each location of :attr:`self` with an independent sample from
+    :math:`\text{Bernoulli}(\texttt{p})`. :attr:`self` can have integral
+    ``dtype``.
 
-:attr:`p` should either be a scalar or tensor containing probabilities to be
-used for drawing the binary random number.
+.. function:: bernoulli_(p_tensor, *, generator=None) -> Tensor
 
-If it is a tensor, the :math:`\text{i}^{th}` element of :attr:`self` tensor
-will be set to a value sampled from
-:math:`\text{Bernoulli}(\texttt{p\_tensor[i]})`. In this case `p` must have
-floating point ``dtype``.
+    :attr:`p_tensor` should be a tensor containing probabilities to be used for
+    drawing the binary random number.
+
+    The :math:`\text{i}^{th}` element of :attr:`self` tensor will be set to a
+    value sampled from :math:`\text{Bernoulli}(\texttt{p\_tensor[i]})`.
+
+    :attr:`self` can have integral ``dtype``, but :attr:`p_tensor` must have
+    floating point ``dtype``.
 
 See also :meth:`~Tensor.bernoulli` and :func:`torch.bernoulli`
 """)
@@ -953,6 +956,13 @@ add_docstr_all('count_nonzero',
 count_nonzero(dim=None) -> Tensor
 
 See :func:`torch.count_nonzero`
+""")
+
+add_docstr_all('cov',
+               r"""
+cov(input, other=None, rowvar=True, bias=None, ddof=None, fweights=None, aweights=None) -> Tensor
+
+See :func:`torch.cov`
 """)
 
 add_docstr_all('cross',
@@ -2699,22 +2709,19 @@ See :func:`torch.prod`
 
 add_docstr_all('put_',
                r"""
-put_(index, source, accumulate=False) -> Tensor
+put_(indices, tensor, accumulate=False) -> Tensor
 
-Copies the elements from :attr:`source` into the positions specified by
-:attr:`index`. For the purpose of indexing, the :attr:`self` tensor is treated as if
+Copies the elements from :attr:`tensor` into the positions specified by
+indices. For the purpose of indexing, the :attr:`self` tensor is treated as if
 it were a 1-D tensor.
 
-:attr:`index` and :attr:`source` need to have the same number of elements, but not necessarily
-the same shape.
-
-If :attr:`accumulate` is ``True``, the elements in :attr:`source` are added to
-:attr:`self`. If accumulate is ``False``, the behavior is undefined if :attr:`index`
+If :attr:`accumulate` is ``True``, the elements in :attr:`tensor` are added to
+:attr:`self`. If accumulate is ``False``, the behavior is undefined if indices
 contain duplicate elements.
 
 Args:
-    index (LongTensor): the indices into self
-    source (Tensor): the tensor containing values to copy from
+    indices (LongTensor): the indices into self
+    tensor (Tensor): the tensor containing values to copy from
     accumulate (bool): whether to accumulate into self
 
 Example::
@@ -2724,14 +2731,6 @@ Example::
     >>> src.put_(torch.tensor([1, 3]), torch.tensor([9, 10]))
     tensor([[  4,   9,   5],
             [ 10,   7,   8]])
-""")
-
-add_docstr_all('put',
-               r"""
-put(input, index, source, accumulate=False) -> Tensor
-
-Out-of-place version of :meth:`torch.Tensor.put_`.
-`input` corresponds to `self` in :meth:`torch.Tensor.put_`.
 """)
 
 add_docstr_all('qr',

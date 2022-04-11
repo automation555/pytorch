@@ -256,6 +256,7 @@ _(aten, cosine_embedding_loss) \
 _(aten, cosine_similarity) \
 _(aten, count_nonzero) \
 _(aten, cross) \
+_(aten, cov) \
 _(aten, std_mean) \
 _(aten, var_mean) \
 _(aten, ctc_loss) \
@@ -435,6 +436,7 @@ _(aten, _log_softmax) \
 _(aten, _log_softmax_backward_data) \
 _(aten, logcumsumexp) \
 _(aten, logdet) \
+_(aten, logit) \
 _(aten, logspace) \
 _(aten, logsumexp) \
 _(aten, xlogy) \
@@ -619,6 +621,7 @@ _(aten, segment_reduce) \
 _(aten, select) \
 _(aten, selu) \
 _(aten, set) \
+_(aten, sigmoid) \
 _(aten, sign) \
 _(aten, signbit) \
 _(aten, silu) \
