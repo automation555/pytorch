@@ -1,9 +1,7 @@
 #include <torch/csrc/jit/runtime/static/fusion.h>
-
 #include <ATen/core/interned_strings.h>
 #include <torch/csrc/jit/jit_log.h>
 #include <torch/csrc/jit/passes/canonicalize.h>
-#include <torch/csrc/jit/passes/constant_pooling.h>
 #include <torch/csrc/jit/passes/dead_code_elimination.h>
 #include <torch/csrc/jit/passes/freeze_module.h>
 #include <torch/csrc/jit/passes/remove_mutation.h>
@@ -11,16 +9,14 @@
 #include <torch/csrc/jit/runtime/custom_operator.h>
 #include <torch/csrc/jit/runtime/static/impl.h>
 #include <torch/csrc/jit/runtime/static/ops.h>
-#include <torch/csrc/jit/runtime/static/passes.h>
 
 namespace torch {
 namespace jit {
 
-void createFusionGroups(Block* block, AliasDb* aliasDb, size_t min_size);
+void createFusionGroups(Block* block, AliasDb* aliasDb);
 
-void fuseStaticSubgraphs(std::shared_ptr<Graph> graph, size_t min_size) {
+void fuseStaticSubgraphs(std::shared_ptr<Graph> graph) {
   Inline(*graph);
-  ReplaceWithCopy(graph);
   ConstantPropagation(graph);
   Canonicalize(graph);
   ConstantPropagation(graph);
@@ -28,24 +24,23 @@ void fuseStaticSubgraphs(std::shared_ptr<Graph> graph, size_t min_size) {
   ConstantPropagation(graph);
   EliminateDeadCode(graph);
   auto aliasDb = torch::make_unique<AliasDb>(graph);
-  createFusionGroups(graph->block(), aliasDb.get(), min_size);
-  ConstantPooling(graph);
-  ConstantPropagation(graph);
+  createFusionGroups(graph->block(), aliasDb.get());
   torch::jit::EliminateDeadCode(graph);
 }
 
 Operation createStaticSubgraphRuntime(const Node* node) {
   auto g = node->g(attr::Subgraph);
-  auto module = std::make_shared<torch::jit::StaticModule>(g);
-  auto num_inputs = module->num_inputs();
-  return [module, num_inputs](Stack* stack) {
+  torch::jit::PrepareGraphForStaticRuntime(g);
+  auto runtime = std::make_shared<torch::jit::StaticRuntime>(g);
+  auto num_inputs = runtime->inputs().size();
+  return [runtime, num_inputs](Stack* stack) {
     RECORD_FUNCTION("Static Runtime", std::vector<c10::IValue>());
     auto inps = torch::jit::last(stack, num_inputs);
     // TODO maybe avoid call to vec
-    auto outputs = (*module)(inps.vec(), {});
+    auto outputs = runtime->run(inps.vec(), {});
     torch::jit::drop(stack, num_inputs);
 
-    if (module->num_outputs() > 1) {
+    if (runtime->num_outputs() > 1) {
       for (auto& o : outputs.toTuple()->elements()) {
         push_one(*stack, std::move(o));
       }
@@ -234,33 +229,7 @@ std::pair<graph_node_list::iterator, bool> scanNode(Node* n, AliasDb* aliasDb) {
   return createFusionGroup(n, aliasDb);
 }
 
-bool inlineIfTooSmall(Node* n, size_t min_size) {
-  if (n->kind() != prim::StaticSubgraph) {
-    return false;
-  }
-  auto subgraph = SubgraphUtils::getSubgraph(n);
-  size_t num_nodes = std::distance(
-      subgraph->block()->nodes().begin(), subgraph->block()->nodes().end());
-  if (num_nodes < min_size) {
-    GRAPH_UPDATE("Fusion group is too small, unmerging: ", *n);
-    SubgraphUtils::unmergeSubgraph(n);
-    return true;
-  }
-  ConstantPooling(subgraph);
-  ConstantPropagation(subgraph);
-  return false;
-}
-
-void inlineSmallFusionGroups(Block* block, size_t min_size) {
-  for (Node* n : block->nodes()) {
-    for (Block* b : n->blocks()) {
-      inlineSmallFusionGroups(b, min_size);
-    }
-    inlineIfTooSmall(n, min_size);
-  }
-}
-
-void createFusionGroups(Block* block, AliasDb* aliasDb, size_t min_size) {
+void createFusionGroups(Block* block, AliasDb* aliasDb) {
   bool any_changed = true;
   while (any_changed) {
     any_changed = false;
@@ -273,7 +242,7 @@ void createFusionGroups(Block* block, AliasDb* aliasDb, size_t min_size) {
 
   for (Node* n : block->nodes()) {
     for (Block* b : n->blocks()) {
-      createFusionGroups(b, aliasDb, min_size);
+      createFusionGroups(b, aliasDb);
     }
   }
 
@@ -312,7 +281,6 @@ void createFusionGroups(Block* block, AliasDb* aliasDb, size_t min_size) {
       prev_fusion_group = fusion_group;
     }
   }
-  inlineSmallFusionGroups(block, min_size);
 }
 
 } // namespace jit
