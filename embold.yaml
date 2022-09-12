@@ -23,7 +23,7 @@ sources:
     - '.git'
     
 # Specify the languages you would like to Scan. Default is all Detected
-languages: 'PYTHON'
+#languages: 'PYTHON'
 
 
 # Define modules one would like to run or disable. This is enough for Basic Users
