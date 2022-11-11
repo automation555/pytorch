@@ -35,12 +35,9 @@ bool isForLoop(Node* node) {
 int64_t limitedBlockSize(Block* body, int64_t limit) {
   auto it = body->nodes().begin();
   auto end = body->nodes().end();
-  for (int64_t i = 0; i < limit; ++it) {
+  for (int64_t i = 0; i < limit; ++i, ++it) {
     for (Block* subblock : it->blocks()) {
       i += limitedBlockSize(subblock, limit - i);
-    }
-    if (!it->notExecutedOp()) {
-      ++i;
     }
     if (it == end) {
       return i;
@@ -162,11 +159,11 @@ void replaceLoopCounter(Node* loop) {
   body->insertOutput(1, result);
 }
 
-bool unroll(Node* loop) {
+void unroll(Node* loop, bool only_const) {
   Graph* graph = loop->owningGraph();
   Block* body = loop->blocks().at(0);
   if (!isSmallBlock(body))
-    return false;
+    return;
 
   // We will be using a "mutable" counter outside of the loop instead of the
   // default one, because this will allow us to share it between the unrolled
@@ -184,7 +181,10 @@ bool unroll(Node* loop) {
     repeatBody(body, *const_len, dest);
     loop->eraseBlock(0);
     inlineBody(loop);
-    return true;
+    return;
+  }
+  if (only_const) {
+    return;
   }
 
   WithInsertPoint insert_point_guard{loop};
@@ -200,6 +200,7 @@ bool unroll(Node* loop) {
   Block* dest = loop->addBlock();
   repeatBody(body, kUnrollFactor, dest);
   loop->eraseBlock(0);
+  body = dest;
 
   // Change the iteration counts of both loops
   Value* iter_count = loop->inputs().at(0);
@@ -212,25 +213,21 @@ bool unroll(Node* loop) {
           aten::sub,
           {iter_count,
            graph->insert(aten::mul, {unrolled_iter_count, kUnrollFactor})}));
-
-  return true;
 }
 
-bool UnrollLoops(Block* block) {
-  bool changed = false;
+void UnrollLoops(Block* block, bool only_const) {
   for (auto it = block->nodes().begin(); it != block->nodes().end();) {
     // XXX: unroll might destroy the current node, so we need to pre-increment
     // the iterator
     Node* node = *it;
     ++it;
     for (Block* subblock : node->blocks()) {
-      changed |= UnrollLoops(subblock);
+      UnrollLoops(subblock, only_const);
     }
     if (isForLoop(node)) {
-      changed |= unroll(node);
+      unroll(node, only_const);
     }
   }
-  return changed;
 }
 
 } // anonymous namespace
@@ -248,12 +245,11 @@ static void addCondAsOutput(Node* loop) {
   cond_output->copyMetadata(loop_view.nextCond());
 }
 
-bool LoopsPeeler::run(const std::shared_ptr<Graph>& graph) {
+void LoopsPeeler::run(const std::shared_ptr<Graph>& graph) {
   GRAPH_DUMP("Before LoopsPeeler", graph);
   collectLoops(graph->block());
   peelLoops();
   GRAPH_DUMP("After LoopsPeeler", graph);
-  return true;
 }
 
 void LoopsPeeler::collectLoop(Node* n) {
@@ -293,7 +289,7 @@ void LoopsPeeler::peelLoops() {
   }
 }
 
-bool PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
+void PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
   auto peel_predicate = [](Node* n) {
     for (auto i : n->inputs()) {
       if (i->type()->isSubtypeOf(TensorType::get())) {
@@ -305,7 +301,7 @@ bool PeelProfilingLoops(const std::shared_ptr<Graph>& graph) {
   };
 
   LoopsPeeler lp(peel_predicate);
-  return lp.run(graph);
+  lp.run(graph);
 }
 
 Node* PeelLoop(Node* n, size_t times) {
@@ -365,12 +361,9 @@ Node* PeelLoop(Node* n, size_t times) {
   return peeled_copy;
 }
 
-bool UnrollLoops(std::shared_ptr<Graph>& graph) {
-  bool changed = UnrollLoops(graph->block());
-  if (changed) {
-    EliminateDeadCode(graph);
-  }
-  return changed;
+void UnrollLoops(std::shared_ptr<Graph>& graph, bool only_const) {
+  UnrollLoops(graph->block(), only_const);
+  EliminateDeadCode(graph);
 }
 
 } // namespace jit
