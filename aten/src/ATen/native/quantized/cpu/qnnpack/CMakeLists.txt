@@ -15,6 +15,7 @@ project(PYTORCH_QNNPACK C CXX ASM)
 option(PYTORCH_QNNPACK_CUSTOM_THREADPOOL "Build QNNPACK for custom thread pool" OFF)
 set(PYTORCH_QNNPACK_LIBRARY_TYPE "default" CACHE STRING "Type of library (shared, static, or default) to build")
 set_property(CACHE PYTORCH_QNNPACK_LIBRARY_TYPE PROPERTY STRINGS default static shared)
+option(PYTORCH_QNNPACK_ENABLE_ARM_ASSEMBLY "Build QNNPACK with ARM assembly micro-kernels" ON)
 option(PYTORCH_QNNPACK_BUILD_TESTS "Build QNNPACK unit tests" ON)
 option(PYTORCH_QNNPACK_BUILD_BENCHMARKS "Build QNNPACK benchmarks" ON)
 
@@ -31,6 +32,12 @@ ENDIF()
 if(PYTORCH_QNNPACK_BUILD_TESTS)
   enable_testing()
 endif()
+
+IF(PYTORCH_QNNPACK_ENABLE_ARM_ASSEMBLY)
+  ADD_DEFINITIONS(-DQNN_ENABLE_ARM_ASSEMBLY=1)
+ELSE()
+  ADD_DEFINITIONS(-DQNN_ENABLE_ARM_ASSEMBLY=0)
+ENDIF()
 
 # ---[ Build flags
 if(NOT CMAKE_SYSTEM_PROCESSOR)
@@ -150,7 +157,6 @@ set(PYTORCH_QNNPACK_INIT_SRCS
   src/deconvolution.c
   src/fc-prepack.cc
   src/fully-connected.c
-  src/fully-connected-sparse.c
   src/global-average-pooling.c
   src/hardsigmoid.c
   src/hardswish.c
@@ -166,7 +172,6 @@ set(PYTORCH_QNNPACK_EXEC_SRCS
   src/deconv-run.cc
   src/fc-run.cc
   src/fc-dynamic-run.cc
-  src/pack_block_sparse.cc
   src/indirection.c
   src/operator-run.c)
 
@@ -215,18 +220,12 @@ set(PYTORCH_QNNPACK_AARCH32_ASM_UKERNELS
   src/q8dwconv/up8x9-aarch32-neon-per-channel.S
   src/q8gemm/4x8-aarch32-neon.S
   src/q8gemm/4x8-dq-aarch32-neon.S
-  src/q8gemm/4x8c2-xzp-aarch32-neon.S
-  src/q8gemm_sparse/4x4-packA-aarch32-neon.S
-  src/q8gemm_sparse/4x8c1x4-dq-packedA-aarch32-neon.S
-  src/q8gemm_sparse/4x8c8x1-dq-packedA-aarch32-neon.S)
+  src/q8gemm/4x8c2-xzp-aarch32-neon.S)
 
 set(PYTORCH_QNNPACK_AARCH64_ASM_UKERNELS
   src/q8conv/8x8-aarch64-neon.S
   src/q8gemm/8x8-aarch64-neon.S
-  src/q8gemm/8x8-dq-aarch64-neon.S
-  src/q8gemm_sparse/8x4-packA-aarch64-neon.S
-  src/q8gemm_sparse/8x8c1x4-dq-packedA-aarch64-neon.S
-  src/q8gemm_sparse/8x8c8x1-dq-packedA-aarch64-neon.S)
+  src/q8gemm/8x8-dq-aarch64-neon.S)
 
 set(PYTORCH_QNNPACK_X86_SSE2_UKERNELS
   src/q8avgpool/mp8x9p8q-sse2.c
@@ -243,8 +242,6 @@ set(PYTORCH_QNNPACK_X86_SSE2_UKERNELS
   src/q8gemm/2x4c8-sse2.c
   src/q8gemm/4x4c2-dq-sse2.c
   src/q8gemm/4x4c2-sse2.c
-  src/q8gemm_sparse/8x4c1x4-dq-packedA-sse2.c
-  src/q8gemm_sparse/8x4-packA-sse2.c
   src/q8vadd/sse2.c
   src/u8clamp/sse2.c
   src/u8maxpool/16x9p8q-sse2.c
@@ -258,11 +255,15 @@ set(PYTORCH_QNNPACK_X86_SSE2_UKERNELS
 set(PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_SCALAR_UKERNELS} ${PYTORCH_QNNPACK_PSIMD_UKERNELS})
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^armv[5-8]" OR IOS_ARCH MATCHES "^armv7")
   list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_ARM_NEON_UKERNELS})
-  list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_AARCH32_ASM_UKERNELS})
+  if(PYTORCH_QNNPACK_ENABLE_ARM_ASSEMBLY)
+    list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_AARCH32_ASM_UKERNELS})
+  endif()
 endif()
 if(PYTORCH_QNNPACK_TARGET_PROCESSOR MATCHES "^(aarch64|arm64)$" OR IOS_ARCH MATCHES "^arm64.*")
   list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_ARM_NEON_UKERNELS})
-  list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_AARCH64_ASM_UKERNELS})
+  if(PYTORCH_QNNPACK_ENABLE_ARM_ASSEMBLY)
+    list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_AARCH64_ASM_UKERNELS})
+  endif()
 endif()
 if(PYTORCH_QNNPACK_TARGET_PROCESSOR MATCHES "^(i[3-6]86|x86_64)$" OR IOS_ARCH MATCHES "^(i386|x86_64)$")
   list(APPEND PYTORCH_QNNPACK_UKERNELS ${PYTORCH_QNNPACK_X86_SSE2_UKERNELS})
@@ -463,15 +464,6 @@ if(PYTORCH_QNNPACK_BUILD_TESTS)
   target_link_libraries(fully-connected-test PRIVATE pytorch_qnnpack clog cpuinfo fp16 gtest gtest_main)
   add_test(fully-connected-test fully-connected-test)
 
-  add_executable(fully-connected-sparse-test test/fully-connected-sparse.cc)
-  set_target_properties(fully-connected-sparse-test PROPERTIES
-    CXX_STANDARD 14
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO)
-  target_include_directories(fully-connected-sparse-test PRIVATE src test)
-  target_link_libraries(fully-connected-sparse-test PRIVATE pytorch_qnnpack clog cpuinfo fp16 gtest gtest_main)
-  add_test(fully-connected-sparse-test fully-connected-sparse-test)
-
   add_executable(channel-shuffle-test test/channel-shuffle.cc)
   set_target_properties(channel-shuffle-test PROPERTIES
     CXX_STANDARD 14
@@ -589,15 +581,6 @@ if(PYTORCH_QNNPACK_BUILD_TESTS)
   target_include_directories(q8gemm-test PRIVATE src test)
   target_link_libraries(q8gemm-test PRIVATE pytorch_qnnpack cpuinfo fp16 gtest gtest_main)
   add_test(q8gemm-test q8gemm-test)
-
-  add_executable(q8gemm-sparse-test test/q8gemm_sparse.cc)
-  set_target_properties(q8gemm-sparse-test PROPERTIES
-    CXX_STANDARD 14
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO)
-  target_include_directories(q8gemm-sparse-test PRIVATE src test)
-  target_link_libraries(q8gemm-sparse-test PRIVATE pytorch_qnnpack cpuinfo fp16 gtest gtest_main)
-  add_test(q8gemm-sparse-test q8gemm-sparse-test)
 
   add_executable(q8conv-test test/q8conv.cc)
   set_target_properties(q8conv-test PROPERTIES
@@ -812,14 +795,6 @@ if(PYTORCH_QNNPACK_BUILD_BENCHMARKS)
   target_include_directories(q8gemm-bench PRIVATE src)
   target_compile_definitions(q8gemm-bench PRIVATE pytorch_PYTORCH_QNNPACK_BENCHMARK_GEMMLOWP=0)
   target_link_libraries(q8gemm-bench PRIVATE pytorch_qnnpack cpuinfo fp16 benchmark)
-
-  add_executable(q8gemm-sparse-bench bench/q8gemm_sparse.cc)
-  set_target_properties(q8gemm-sparse-bench PROPERTIES
-    CXX_STANDARD 14
-    CXX_STANDARD_REQUIRED YES
-    CXX_EXTENSIONS NO)
-  target_include_directories(q8gemm-sparse-bench PRIVATE src)
-  target_link_libraries(q8gemm-sparse-bench PRIVATE pytorch_qnnpack cpuinfo fp16 benchmark)
 
   add_executable(hgemm-bench bench/hgemm.cc)
   set_target_properties(hgemm-bench PROPERTIES
